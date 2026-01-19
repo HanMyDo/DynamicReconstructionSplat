@@ -48,6 +48,13 @@ from src.model.encoder.heads.head_modules import TransformerBlockSelfAttn
 from src.model.encoder.vggt.heads.dpt_head import DPTHead
 from src.model.encoder.vggt.layers.mlp import Mlp
 from src.model.encoder.vggt.models.vggt import VGGT
+from src.model.encoder.vggt4d.models.vggt4d import VGGTFor4D
+from src.model.encoder.vggt4d.utils import organize_qk_dict
+from src.model.encoder.vggt4d.masks import (
+    extract_dyn_map,
+    cluster_attention_maps,
+    adaptive_multiotsu_variance,
+)
 
 inf = float("inf")
 
@@ -114,6 +121,13 @@ class EncoderAnySplatCfg:
     conf_threshold: float = 0.1
     intermediate_layer_idx: Optional[List[int]] = None
     voxelize: bool = False
+    use_vggt4d: bool = False
+    vggt4d_weights_path: Optional[str] = None
+    # Dynamic mask extraction options
+    enable_dynamic_detection: bool = False
+    dynamic_mask_threshold: Optional[float] = None  # None = use adaptive threshold
+    dynamic_n_clusters: int = 64  # Number of clusters for KMeans refinement
+    suppress_dynamic_gaussians: bool = True  # If True, reduce opacity of dynamic regions 
 
 
 def rearrange_head(feat, patch_size, H, W):
@@ -130,8 +144,27 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
 
     def __init__(self, cfg: EncoderAnySplatCfg) -> None:
         super().__init__(cfg)
-        model_full = VGGT.from_pretrained("facebook/VGGT-1B")
-        # model_full = VGGT()
+
+        # Choose between VGGT and VGGT4D
+        self.use_vggt4d = cfg.use_vggt4d
+        if self.use_vggt4d:
+            model_full = VGGTFor4D()
+            if cfg.vggt4d_weights_path is not None:
+                print(f"Loading VGGT4D weights from {cfg.vggt4d_weights_path}")
+                model_full.load_state_dict(torch.load(cfg.vggt4d_weights_path, weights_only=True))
+            else:
+                print("Initializing VGGT4D from pretrained VGGT-1B weights")
+                vggt_model = VGGT.from_pretrained("facebook/VGGT-1B")
+                model_full.camera_head.load_state_dict(vggt_model.camera_head.state_dict())
+                model_full.depth_head.load_state_dict(vggt_model.depth_head.state_dict())
+                model_full.point_head.load_state_dict(vggt_model.point_head.state_dict())
+                vggt_agg_state = vggt_model.aggregator.state_dict()
+                model_full.aggregator.load_state_dict(vggt_agg_state, strict=False)
+                del vggt_model
+            print("Using VGGT4D aggregator for dynamic scene handling")
+        else:
+            model_full = VGGT.from_pretrained("facebook/VGGT-1B")
+
         self.aggregator = model_full.aggregator.to(torch.bfloat16)
         self.freeze_backbone = cfg.freeze_backbone
         self.distill = cfg.distill
@@ -142,6 +175,10 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
             self.depth_head = model_full.depth_head
         else:
             self.point_head = model_full.point_head
+
+        # Storage for VGGT4D outputs (for later dynamic mask extraction, tbd)
+        self.qk_dict = None
+        self.enc_feat = None
 
         if self.distill:
             self.distill_aggregator = copy.deepcopy(self.aggregator)
@@ -325,6 +362,119 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
 
         return voxel_pts, voxel_feats
 
+    @torch.no_grad()
+    def compute_attention_dynamic_mask(
+        self,
+        images: torch.Tensor,
+        qk_dict: dict,
+        enc_feat: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Compute dynamic mask from VGGT4D attention patterns.
+
+        Args:
+            images: Input images [B, V, C, H, W]
+            qk_dict: Q/K dictionary from VGGT4D aggregator
+            enc_feat: Encoder features for clustering refinement
+
+        Returns:
+            dyn_mask: Binary dynamic mask [B, V, H, W]
+            dyn_map: Continuous dynamic score map [B, V, h, w] (patch resolution)
+        """
+        b, v, c, h, w = images.shape
+
+        # Reshape images for extraction: [B*V, C, H, W] -> [V, C, H, W] (assuming B=1)
+        images_flat = images.view(b * v, c, h, w)
+
+        # Organize Q/K dict for dynamic extraction
+        organized_qk = organize_qk_dict(qk_dict, n_img=v)
+
+        # Extract raw dynamic maps from attention patterns
+        dyn_maps = extract_dyn_map(organized_qk, images_flat)  # [V, h//14, w//14]
+
+        # Prepare encoder features for clustering (reshape from patch tokens)
+        # enc_feat shape: [B*V, P, C] where P = (H/14) * (W/14)
+        patch_h, patch_w = h // 14, w // 14
+        enc_feat_reshaped = enc_feat.view(v, patch_h, patch_w, -1)  # [V, h, w, C]
+
+        # Refine using KMeans clustering
+        clustered_map, _ = cluster_attention_maps(
+            enc_feat_reshaped,
+            dyn_maps,
+            n_clusters=self.cfg.dynamic_n_clusters
+        )
+
+        # Determine threshold
+        if self.cfg.dynamic_mask_threshold is not None:
+            threshold = self.cfg.dynamic_mask_threshold
+        else:
+            # Use adaptive multi-Otsu thresholding
+            threshold = adaptive_multiotsu_variance(clustered_map.numpy())
+
+        # Create binary mask at patch resolution
+        dyn_mask_patch = (clustered_map > threshold).float()  # [V, h, w]
+
+        # Upsample to full resolution
+        dyn_mask_full = F.interpolate(
+            dyn_mask_patch.unsqueeze(1),  # [V, 1, h, w]
+            size=(h, w),
+            mode='nearest'
+        ).squeeze(1)  # [V, H, W]
+
+        # Reshape back to batch format
+        dyn_mask = dyn_mask_full.view(b, v, h, w)
+        dyn_map = clustered_map.view(b, v, patch_h, patch_w)
+
+        return dyn_mask, dyn_map
+
+    def apply_dynamic_mask_to_gaussians(
+        self,
+        opacity: torch.Tensor,
+        pts_all: torch.Tensor,
+        dyn_mask: torch.Tensor,
+        conf_valid_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """Apply dynamic mask to Gaussian opacities.
+
+        Args:
+            opacity: Gaussian opacities [B, N]
+            pts_all: 3D points [B, V, H, W, 3]
+            dyn_mask: Dynamic mask [B, V, H, W]
+            conf_valid_mask: Confidence validity mask [B, V, H, W]
+
+        Returns:
+            Modified opacity tensor with dynamic regions suppressed
+        """
+        b, v, h, w, _ = pts_all.shape
+
+        # Flatten the dynamic mask to match the flattened point structure
+        dyn_mask_flat = dyn_mask.view(b, v * h * w)  # [B, V*H*W]
+        conf_flat = conf_valid_mask.view(b, v * h * w)  # [B, V*H*W]
+
+        # Get indices of valid (non-dynamic) points
+        # After voxelization/filtering, we need to match the opacity shape
+        # The opacity tensor has been filtered by conf_valid_mask already
+
+        # Get the dynamic values for valid points only
+        valid_dyn_mask = dyn_mask_flat[conf_flat]  # This gives us the mask for valid points
+
+        # For batch processing, we need to handle this per-batch
+        # Since opacity is [B, N], we need to align the masks
+        if self.cfg.suppress_dynamic_gaussians:
+            # Suppress opacity for dynamic regions (multiply by inverse of mask)
+            # dyn_mask = 1 for dynamic, 0 for static
+            # We want to reduce opacity where dyn_mask = 1
+            suppression_factor = 0.1  # Reduce opacity to 10% for dynamic regions
+
+            # Since the filtering already happened, we need to track which points came from where
+            # For now, we'll apply a simpler approach: if using voxelize, the mask was already applied
+            if not self.cfg.voxelize:
+                # Direct application: opacity already filtered by conf_valid_mask
+                # We need to apply dyn_mask in the same filtering pattern
+                dyn_weights = 1.0 - (1.0 - suppression_factor) * valid_dyn_mask.unsqueeze(0).float()
+                opacity = opacity * dyn_weights
+
+        return opacity
+
     def forward(
         self,
         image: torch.Tensor,
@@ -402,10 +552,30 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
                 torch.cuda.empty_cache()
 
         with torch.amp.autocast("cuda", enabled=True, dtype=torch.bfloat16):
-            aggregated_tokens_list, patch_start_idx = self.aggregator(
-                image.to(torch.bfloat16),
-                intermediate_layer_idx=self.cfg.intermediate_layer_idx,
+            if self.use_vggt4d:
+                aggregated_tokens_list, patch_start_idx, qk_dict, enc_feat = self.aggregator(
+                    image.to(torch.bfloat16),
+                    dyn_masks=None,
+                )
+                self.qk_dict = qk_dict
+                self.enc_feat = enc_feat
+            else:
+                # Original VGGT returns 2 values
+                aggregated_tokens_list, patch_start_idx = self.aggregator(
+                    image.to(torch.bfloat16),
+                    intermediate_layer_idx=self.cfg.intermediate_layer_idx,
+                )
+
+        # Compute dynamic mask if enabled and using VGGT4D
+        dyn_mask = None
+        dyn_map = None
+        if self.use_vggt4d and self.cfg.enable_dynamic_detection:
+            print("Computing dynamic mask from attention patterns...")
+            dyn_mask, dyn_map = self.compute_attention_dynamic_mask(
+                image, self.qk_dict, self.enc_feat
             )
+            self.dyn_mask = dyn_mask  # Store for visualization/debugging
+            self.dyn_map = dyn_map
 
         with torch.amp.autocast("cuda", enabled=False):
             pred_pose_enc_list = self.camera_head(aggregated_tokens_list)
@@ -499,6 +669,13 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
                 0
             )  # little bit hacky
 
+        # Apply dynamic mask to suppress dynamic regions
+        if dyn_mask is not None and self.cfg.enable_dynamic_detection:
+            print("Applying dynamic mask to Gaussian opacities...")
+            opacity = self.apply_dynamic_mask_to_gaussians(
+                opacity, pts_all, dyn_mask, conf_valid_mask
+            )
+
         # GS Prune, but only works when bs = 1
         # if want to support bs > 1, need to random prune gaussians based on the rank of opacity like LongLRM
         # Note: we not prune gaussians here, but we will try it in the future
@@ -547,6 +724,13 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
         infos = {}
         infos["scene_scale"] = scene_scale
         infos["voxelize_ratio"] = densities.shape[1] / (h * w * v)
+
+        # Add dynamic detection info if available
+        if dyn_mask is not None:
+            infos["dyn_mask"] = dyn_mask
+            infos["dyn_map"] = dyn_map
+            dyn_ratio = dyn_mask.float().mean().item()
+            print(f"Dynamic detection: {dyn_ratio*100:.1f}% of pixels detected as dynamic")
 
         print(
             f"scene scale: {scene_scale:.3f}, pixel-wise num: {h*w*v}, after voxelize: {neural_pts.shape[1]}, voxelize ratio: {infos['voxelize_ratio']:.3f}"
