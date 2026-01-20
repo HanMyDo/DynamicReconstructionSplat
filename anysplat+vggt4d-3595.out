@@ -1,0 +1,33 @@
+==============================================
+Testing AnySplat + VGGT4D Integration
+==============================================
+Job started on node: muenchen.garching.camp.cluster
+Time: Tue Jan 20 14:46:31 CET 2026
+
+
+==========
+== CUDA ==
+==========
+
+CUDA Version 12.1.1
+
+Container image Copyright (c) 2016-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
+This container image and its contents are governed by the NVIDIA Deep Learning Container License.
+By pulling and using the container, you accept the terms and conditions of this license:
+https://developer.nvidia.com/ngc/nvidia-deep-learning-container-license
+
+A copy of this license is made available in this container at /NGC-DL-CONTAINER-LICENSE for your convenience.
+
+Current directory: /mnt/home/hanmydo/DynamicReconstructionSplat
+Python version: Python 3.10.13
+
+Warning, cannot find cuda-compiled version of RoPE2D, using a slow pytorch version instead
+============================================================
+Testing AnySplat with VGGT4D Integration
+============================================================
+Using device: cuda
+
+Creating model configs...
+
+Job finished at: Tue Jan 20 14:58:19 CET 2026
