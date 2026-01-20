@@ -68,7 +68,7 @@ def create_encoder_config(use_vggt4d=True, enable_dynamic_detection=True):
 
 def create_decoder_config():
     """Create decoder config."""
-    return DecoderSplattingCUDACfg(name="splatting_cuda")
+    return DecoderSplattingCUDACfg(name="splatting_cuda", background_color=[0.0, 0.0, 0.0], make_scale_invariant=False)
 
 
 def main():

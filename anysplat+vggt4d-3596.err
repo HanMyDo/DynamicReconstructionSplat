@@ -1,0 +1,30 @@
+[INFO] Extracting squashfs filesystem...
+Parallel unsquashfs: Using 4 processors
+132724 inodes (248911 blocks) to write
+
+
+created 91569 files
+created 15480 directories
+created 4310 symlinks
+created 0 devices
+created 0 fifos
+created 0 sockets
+  0%|          | 0/5 [00:00<?, ?it/s] 20%|██        | 1/5 [00:00<00:00,  8.48it/s]100%|██████████| 5/5 [00:00<00:00, 30.92it/s]
+Traceback (most recent call last):
+  File "/mnt/home/hanmydo/DynamicReconstructionSplat/test_anysplat+vggt4d.py", line 227, in <module>
+    main()
+  File "/mnt/home/hanmydo/DynamicReconstructionSplat/test_anysplat+vggt4d.py", line 136, in main
+    gaussians, pred_context_pose = model.inference((images + 1) * 0.5)
+  File "/opt/conda/lib/python3.10/site-packages/torch/utils/_contextlib.py", line 115, in decorate_context
+    return func(*args, **kwargs)
+  File "/mnt/home/hanmydo/DynamicReconstructionSplat/src/model/model/anysplat.py", line 101, in inference
+    encoder_output = self.encoder(context_image, global_step=0, visualization_dump=None)
+  File "/opt/conda/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1511, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/opt/conda/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1520, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/mnt/home/hanmydo/DynamicReconstructionSplat/src/model/encoder/anysplat.py", line 675, in forward
+    opacity = self.apply_dynamic_mask_to_gaussians(
+  File "/mnt/home/hanmydo/DynamicReconstructionSplat/src/model/encoder/anysplat.py", line 458, in apply_dynamic_mask_to_gaussians
+    valid_dyn_mask = dyn_mask_flat[conf_flat]  # This gives us the mask for valid points
+RuntimeError: indices should be either on cpu or on the same device as the indexed tensor (cpu)

@@ -1,0 +1,85 @@
+==============================================
+Testing AnySplat + VGGT4D Integration
+==============================================
+Job started on node: muenchen.garching.camp.cluster
+Time: Tue Jan 20 15:12:17 CET 2026
+
+
+==========
+== CUDA ==
+==========
+
+CUDA Version 12.1.1
+
+Container image Copyright (c) 2016-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
+This container image and its contents are governed by the NVIDIA Deep Learning Container License.
+By pulling and using the container, you accept the terms and conditions of this license:
+https://developer.nvidia.com/ngc/nvidia-deep-learning-container-license
+
+A copy of this license is made available in this container at /NGC-DL-CONTAINER-LICENSE for your convenience.
+
+Current directory: /mnt/home/hanmydo/DynamicReconstructionSplat
+Python version: Python 3.10.13
+
+Warning, cannot find cuda-compiled version of RoPE2D, using a slow pytorch version instead
+============================================================
+Testing AnySplat with VGGT4D Integration
+============================================================
+Using device: cuda
+
+Creating model configs...
+
+Building AnySplat with VGGT4D...
+  - use_vggt4d: True
+  - enable_dynamic_detection: True
+Initializing VGGT4D from pretrained VGGT-1B weights
+Using VGGT4D aggregator for dynamic scene handling
+
+Loading 5 images from examples/vrnerf/riverview...
+  - 21_DSC0001.jpg
+  - 21_DSC0010.jpg
+  - 21_DSC0019.jpg
+  - 21_DSC0028.jpg
+  - 21_DSC0037.jpg
+Image tensor shape: torch.Size([1, 5, 3, 448, 448])
+
+============================================================
+Running inference with VGGT4D...
+============================================================
+Computing dynamic mask from attention patterns...
+Extracting dynamic maps for 5 images
+Applying dynamic mask to Gaussian opacities...
+Dynamic detection: 8.5% of pixels detected as dynamic
+scene scale: 1.006, pixel-wise num: 1003520, after voxelize: 1003520, voxelize ratio: 1.000
+Gaussians attributes: 
+opacities: mean: 0.47802308201789856, min: 0.05089443176984787, max: 0.5402839779853821 
+scales: mean: 0.0007084133103489876, min: 0.0006575976149179041, max: 0.0007852044655010104
+B: 1 V: 5 H: 448 W: 448
+
+============================================================
+Results
+============================================================
+Gaussians means shape: torch.Size([1, 1003520, 3])
+Gaussians count: 1003520
+Opacities - mean: 0.4780, min: 0.0509, max: 0.5403
+Scales - mean: 0.0007, min: 0.0007, max: 0.0008
+
+Dynamic Detection Results:
+  - Mask shape: torch.Size([1, 5, 448, 448])
+  - Dynamic pixels: 8.5%
+
+Saving results to output_vggt4d_test/...
+  - Dynamic mask: dynamic_mask.npy
+  - Dynamic map: dynamic_map.npy
+
+============================================================
+Test completed successfully!
+============================================================
+Output files:
+  - RGB video: output_vggt4d_test/rgb.mp4
+  - Depth video: output_vggt4d_test/depth.mp4
+  - 3D Gaussians: output_vggt4d_test/gaussians.ply
+  - Camera poses: output_vggt4d_test/camera_poses.json
+
+Job finished at: Tue Jan 20 15:14:34 CET 2026

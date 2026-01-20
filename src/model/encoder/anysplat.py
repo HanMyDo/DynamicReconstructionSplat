@@ -455,7 +455,7 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
         # The opacity tensor has been filtered by conf_valid_mask already
 
         # Get the dynamic values for valid points only
-        valid_dyn_mask = dyn_mask_flat[conf_flat]  # This gives us the mask for valid points
+        valid_dyn_mask = dyn_mask_flat[conf_flat.to(dyn_mask_flat.device)]  # This gives us the mask for valid points
 
         # For batch processing, we need to handle this per-batch
         # Since opacity is [B, N], we need to align the masks
@@ -470,7 +470,7 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
             if not self.cfg.voxelize:
                 # Direct application: opacity already filtered by conf_valid_mask
                 # We need to apply dyn_mask in the same filtering pattern
-                dyn_weights = 1.0 - (1.0 - suppression_factor) * valid_dyn_mask.unsqueeze(0).float()
+                dyn_weights = (1.0 - (1.0 - suppression_factor) * valid_dyn_mask.unsqueeze(0).float()).to(opacity.device)
                 opacity = opacity * dyn_weights
 
         return opacity

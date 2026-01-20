@@ -27,7 +27,7 @@ echo ""
 enroot create --name anysplat_vggt4d ~/anysplat.sqsh
 
 enroot start --root --rw --mount /mnt:/mnt anysplat_vggt4d bash -c "
-  cd /mnt/home/hanmydo
+  cd /mnt/home/hanmydo/DynamicReconstructionSplat
   echo 'Current directory:' \$(pwd)
   echo 'Python version:' \$(python --version)
   echo ''
