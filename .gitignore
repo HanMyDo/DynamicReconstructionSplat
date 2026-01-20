@@ -196,3 +196,10 @@ tmp_scripts/
 *v2*output_*/
 *.mp4
 *.ply
+
+# SLURM job output files
+*.out
+*.err
+
+# Output directories
+output_*/
