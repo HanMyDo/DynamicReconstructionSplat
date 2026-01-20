@@ -1,13 +1,0 @@
-[INFO] Extracting squashfs filesystem...
-Parallel unsquashfs: Using 4 processors
-132724 inodes (248911 blocks) to write
-
-
-created 91569 files
-created 15480 directories
-created 4310 symlinks
-created 0 devices
-created 0 fifos
-created 0 sockets
-Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
-  0%|          | 0/5 [00:00<?, ?it/s] 80%|████████  | 4/5 [00:00<00:00, 37.97it/s]100%|██████████| 5/5 [00:00<00:00, 31.84it/s]
