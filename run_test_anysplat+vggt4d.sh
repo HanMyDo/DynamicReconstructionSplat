@@ -8,6 +8,7 @@
 #SBATCH --mem=30G
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
+#SBATCH --exclude=essen
 
 # Override scratch paths
 export ENROOT_RUNTIME_PATH=/tmp/$USER/runtime
@@ -29,16 +30,12 @@ enroot remove -f anysplat_vggt4d 2>/dev/null || true
 # Create container from sqsh file
 enroot create --name anysplat_vggt4d ~/anysplat.sqsh
 
-# Start container with GPU access
-enroot start --root --rw \
-  --env NVIDIA_VISIBLE_DEVICES=all \
-  --env NVIDIA_DRIVER_CAPABILITIES=compute,utility \
-  --mount /mnt:/mnt \
-  anysplat_vggt4d bash -c "
+# Start container
+enroot start --root --rw --mount /mnt:/mnt anysplat_vggt4d bash -c "
   cd /mnt/home/hanmydo/DynamicReconstructionSplat
   echo 'Current directory:' \$(pwd)
   echo 'Python version:' \$(python --version)
-  nvidia-smi || echo 'nvidia-smi not available'
+  nvidia-smi
   echo ''
   python 'test_anysplat+vggt4d.py'
 "
