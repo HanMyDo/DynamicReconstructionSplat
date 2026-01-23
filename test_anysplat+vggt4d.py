@@ -98,10 +98,10 @@ def main():
         param.requires_grad = False
 
     # Load test images
-    image_folder = "DynamicReconstructionSplat/examples/vrnerf/rgbd_bonn_placing_nonobstructing_box/rgb"
+    image_folder = "DynamicReconstructionSplat/examples/vrnerf/rgbd_bonn_crowd3/rgb"
     if not os.path.exists(image_folder):
         # Try alternative path (when running from inside the repo)
-        image_folder = "examples/vrnerf/rgbd_bonn_placing_nonobstructing_box/rgb"
+        image_folder = "examples/vrnerf/rgbd_bonn_crowd3/rgb"
 
     if not os.path.exists(image_folder):
         print(f"\nERROR: Image folder not found at {image_folder}")
