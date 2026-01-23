@@ -450,26 +450,13 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
         dyn_mask_flat = dyn_mask.view(b, v * h * w)  # [B, V*H*W]
         conf_flat = conf_valid_mask.view(b, v * h * w)  # [B, V*H*W]
 
-        # Get indices of valid (non-dynamic) points
-        # After voxelization/filtering, we need to match the opacity shape
-        # The opacity tensor has been filtered by conf_valid_mask already
-
         # Get the dynamic values for valid points only
-        valid_dyn_mask = dyn_mask_flat[conf_flat.to(dyn_mask_flat.device)]  # This gives us the mask for valid points
+        valid_dyn_mask = dyn_mask_flat[conf_flat.to(dyn_mask_flat.device)] 
 
-        # For batch processing, we need to handle this per-batch
-        # Since opacity is [B, N], we need to align the masks
         if self.cfg.suppress_dynamic_gaussians:
-            # Suppress opacity for dynamic regions (multiply by inverse of mask)
-            # dyn_mask = 1 for dynamic, 0 for static
-            # We want to reduce opacity where dyn_mask = 1
             suppression_factor = 0.1  # Reduce opacity to 10% for dynamic regions
 
-            # Since the filtering already happened, we need to track which points came from where
-            # For now, we'll apply a simpler approach: if using voxelize, the mask was already applied
             if not self.cfg.voxelize:
-                # Direct application: opacity already filtered by conf_valid_mask
-                # We need to apply dyn_mask in the same filtering pattern
                 dyn_weights = (1.0 - (1.0 - suppression_factor) * valid_dyn_mask.unsqueeze(0).float()).to(opacity.device)
                 opacity = opacity * dyn_weights
 

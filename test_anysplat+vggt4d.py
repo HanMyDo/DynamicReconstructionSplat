@@ -98,21 +98,25 @@ def main():
         param.requires_grad = False
 
     # Load test images
-    image_folder = "DynamicReconstructionSplat/examples/vrnerf/riverview"
+    image_folder = "DynamicReconstructionSplat/examples/vrnerf/rgbd_bonn_placing_nonobstructing_box/rgb"
     if not os.path.exists(image_folder):
-        # Try alternative path
-        image_folder = "examples/vrnerf/riverview"
+        # Try alternative path (when running from inside the repo)
+        image_folder = "examples/vrnerf/rgbd_bonn_placing_nonobstructing_box/rgb"
 
     if not os.path.exists(image_folder):
         print(f"\nERROR: Image folder not found at {image_folder}")
         print("Please provide test images or adjust the path.")
         return
 
-    image_names = sorted([
+    # Sample evenly spaced frames from the sequence
+    all_images = sorted([
         os.path.join(image_folder, f)
         for f in os.listdir(image_folder)
         if f.endswith(('.jpg', '.png', '.jpeg'))
-    ])[:5]  # Use up to 5 images
+    ])
+    n_sample = 8  # Number of frames to sample
+    step = max(1, len(all_images) // n_sample)
+    image_names = all_images[::step][:n_sample]
 
     if len(image_names) < 2:
         print(f"\nERROR: Need at least 2 images, found {len(image_names)}")
@@ -157,7 +161,7 @@ def main():
         print("\nDynamic detection: No mask generated (may be disabled or no dynamic content)")
 
     # Save results
-    output_dir = "output_vggt4d_test"
+    output_dir = "output_anysplat+vggt4d_test"
     os.makedirs(output_dir, exist_ok=True)
 
     pred_all_extrinsic = pred_context_pose['extrinsic']
