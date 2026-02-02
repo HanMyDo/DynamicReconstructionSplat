@@ -201,5 +201,8 @@ tmp_scripts/
 *.out
 *.err
 
+# Example datasets (download separately, don't commit to repo)
+examples/vrnerf/rgbd_*/
+
 # Output directories
 output_*/
