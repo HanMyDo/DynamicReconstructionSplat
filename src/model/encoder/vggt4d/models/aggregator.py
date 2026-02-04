@@ -13,6 +13,10 @@ class AggregatorFor4D(Aggregator):
     def __init__(self, **kwargs):
         kwargs["block_fn"] = BlockFor4D
         super().__init__(**kwargs)
+        # Disable gradient checkpointing: the checkpoint path drops args
+        # (is_frame_attn, layer_id, dyn_masks) which produces wrong results.
+        # The aggregator is frozen during fine-tuning anyway.
+        self.use_checkpoint = False
 
     def forward(self, images: torch.Tensor,
                 dyn_masks: Optional[torch.Tensor] = None,
@@ -172,9 +176,9 @@ class AggregatorFor4D(Aggregator):
 
         # by default, self.aa_block_size=1, which processes one block at a time
         for _ in range(self.aa_block_size):
-            if self.training:
+            if self.use_checkpoint:
                 tokens, q, k = checkpoint(
-                    self.frame_blocks[frame_idx], tokens, pos, use_reentrant=self.use_reentrant)
+                    self.frame_blocks[frame_idx], tokens, pos, use_reentrant=False)
             else:
                 tokens, q, k = self.frame_blocks[frame_idx](
                     tokens, pos=pos, is_frame_attn=True, layer_id=frame_idx, dyn_masks=dyn_masks)
@@ -203,9 +207,9 @@ class AggregatorFor4D(Aggregator):
 
         # by default, self.aa_block_size=1, which processes one block at a time
         for _ in range(self.aa_block_size):
-            if self.training:
+            if self.use_checkpoint:
                 tokens, q, k = checkpoint(
-                    self.global_blocks[global_idx], tokens, pos, use_reentrant=self.use_reentrant)
+                    self.global_blocks[global_idx], tokens, pos, use_reentrant=False)
             else:
                 tokens, q, k = self.global_blocks[global_idx](
                     tokens, pos=pos, is_frame_attn=False, layer_id=global_idx, dyn_masks=dyn_masks)
