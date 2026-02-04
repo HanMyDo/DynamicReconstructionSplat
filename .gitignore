@@ -203,6 +203,7 @@ tmp_scripts/
 
 # Example datasets (download separately, don't commit to repo)
 examples/vrnerf/rgbd_*/
+examples/vrnerf/shortened_sequences/
 
 # Output directories
 output_*/
