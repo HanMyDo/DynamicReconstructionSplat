@@ -9,7 +9,7 @@
 # for PixelwiseTask, the output will be of dimension B x num_channels x H x W
 # --------------------------------------------------------
 from einops import rearrange
-from typing import List
+from typing import List, Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -18,6 +18,115 @@ from .dpt_block import DPTOutputAdapter, Interpolate, make_fusion_block
 from src.model.encoder.vggt.heads.dpt_head import DPTHead
 from .head_modules import UnetExtractor, AppearanceTransformer, _init_weights
 from .postprocess import postprocess
+
+
+class TemporalAttentionBlock(nn.Module):
+    """
+    Cross-frame temporal attention module for Gaussian head.
+
+    Applies multi-head attention across the temporal/frame dimension at each spatial location.
+    This allows Gaussian features to attend to the same spatial location across different frames,
+    enabling the model to learn temporal consistency for static regions and detect inconsistencies
+    for dynamic regions.
+
+    For efficiency, attention is applied at a downsampled spatial resolution.
+    """
+
+    def __init__(
+        self,
+        dim: int,
+        num_heads: int = 4,
+        dropout: float = 0.0,
+        spatial_downsample: int = 4,
+        use_temporal_pe: bool = True,
+        max_frames: int = 32,
+    ):
+        """
+        Args:
+            dim: Feature dimension (number of channels)
+            num_heads: Number of attention heads
+            dropout: Dropout rate
+            spatial_downsample: Factor to downsample spatial dimensions before attention (for efficiency)
+            use_temporal_pe: Whether to add learnable temporal positional encoding
+            max_frames: Maximum number of frames (for positional encoding)
+        """
+        super().__init__()
+        self.dim = dim
+        self.num_heads = num_heads
+        self.spatial_downsample = spatial_downsample
+        self.use_temporal_pe = use_temporal_pe
+
+        # Pre-attention normalization
+        self.norm = nn.LayerNorm(dim)
+
+        # Multi-head attention across frames
+        self.attn = nn.MultiheadAttention(
+            embed_dim=dim,
+            num_heads=num_heads,
+            dropout=dropout,
+            batch_first=True,
+        )
+
+        # Temporal positional encoding (learnable)
+        if use_temporal_pe:
+            self.temporal_pe = nn.Parameter(torch.zeros(1, max_frames, dim))
+            nn.init.trunc_normal_(self.temporal_pe, std=0.02)
+
+        # Output projection with residual scaling (start close to identity)
+        self.output_scale = nn.Parameter(torch.zeros(1))
+
+    def forward(self, x: torch.Tensor, B: int, S: int) -> torch.Tensor:
+        """
+        Apply temporal attention across frames.
+
+        Args:
+            x: Input features [B*S, C, H, W]
+            B: Batch size
+            S: Number of frames
+
+        Returns:
+            Output features [B*S, C, H, W] with temporal attention applied
+        """
+        _, C, H, W = x.shape
+
+        # Downsample spatially for efficiency
+        if self.spatial_downsample > 1:
+            x_down = F.avg_pool2d(x, kernel_size=self.spatial_downsample, stride=self.spatial_downsample)
+        else:
+            x_down = x
+
+        H_down, W_down = x_down.shape[2], x_down.shape[3]
+
+        # Reshape: [B*S, C, H', W'] -> [B, S, C, H', W'] -> [B*H'*W', S, C]
+        x_down = x_down.view(B, S, C, H_down, W_down)
+        x_down = x_down.permute(0, 3, 4, 1, 2)  # [B, H', W', S, C]
+        x_down = x_down.reshape(B * H_down * W_down, S, C)  # [B*H'*W', S, C]
+
+        # Apply normalization
+        x_normed = self.norm(x_down)
+
+        # Add temporal positional encoding
+        if self.use_temporal_pe:
+            x_normed = x_normed + self.temporal_pe[:, :S, :]
+
+        # Apply cross-frame attention (each spatial location attends across all frames)
+        attn_out, _ = self.attn(x_normed, x_normed, x_normed)
+
+        # Residual connection with learnable scaling (starts at 0, so initially identity)
+        x_down = x_down + self.output_scale.tanh() * attn_out
+
+        # Reshape back: [B*H'*W', S, C] -> [B, H', W', S, C] -> [B, S, C, H', W']
+        x_down = x_down.reshape(B, H_down, W_down, S, C)
+        x_down = x_down.permute(0, 3, 4, 1, 2)  # [B, S, C, H', W']
+        x_down = x_down.reshape(B * S, C, H_down, W_down)  # [B*S, C, H', W']
+
+        # Upsample back to original resolution
+        if self.spatial_downsample > 1:
+            x_out = F.interpolate(x_down, size=(H, W), mode='bilinear', align_corners=True)
+        else:
+            x_out = x_down
+
+        return x_out
 
 
     # def __init__(self,
@@ -35,7 +144,7 @@ from .postprocess import postprocess
     #              output_width_ratio=1,
 
 class VGGT_DPT_GS_Head(DPTHead):
-    def __init__(self, 
+    def __init__(self,
             dim_in: int,
             patch_size: int = 14,
             output_dim: int = 83,
@@ -47,21 +156,43 @@ class VGGT_DPT_GS_Head(DPTHead):
             pos_embed: bool = True,
             feature_only: bool = False,
             down_ratio: int = 1,
+            # Temporal attention parameters
+            use_temporal_attention: bool = False,
+            temporal_num_heads: int = 4,
+            temporal_dropout: float = 0.0,
+            temporal_spatial_downsample: int = 4,
+            temporal_use_pe: bool = True,
+            temporal_max_frames: int = 32,
     ):
         super().__init__(dim_in, patch_size, output_dim, activation, conf_activation, features, out_channels, intermediate_layer_idx, pos_embed, feature_only, down_ratio)
-        
+
         head_features_1 = 128
         head_features_2 = 128 if output_dim > 50 else 32 # sh=0, head_features_2 = 32; sh=4, head_features_2 = 128
         self.input_merger = nn.Sequential(
             nn.Conv2d(3, head_features_2, 7, 1, 3),
             nn.ReLU(),
         )
-        
+
         self.scratch.output_conv2 = nn.Sequential(
                 nn.Conv2d(head_features_1, head_features_2, kernel_size=3, stride=1, padding=1),
                 nn.ReLU(inplace=True),
                 nn.Conv2d(head_features_2, output_dim, kernel_size=1, stride=1, padding=0),
             )
+
+        # Temporal attention for cross-frame feature fusion
+        self.use_temporal_attention = use_temporal_attention
+        if use_temporal_attention:
+            self.temporal_attention = TemporalAttentionBlock(
+                dim=head_features_1,  # Applied after scratch_forward, which outputs head_features_1 channels
+                num_heads=temporal_num_heads,
+                dropout=temporal_dropout,
+                spatial_downsample=temporal_spatial_downsample,
+                use_temporal_pe=temporal_use_pe,
+                max_frames=temporal_max_frames,
+            )
+            print(f"[VGGT_DPT_GS_Head] Temporal attention enabled: "
+                  f"heads={temporal_num_heads}, spatial_ds={temporal_spatial_downsample}, "
+                  f"temporal_pe={temporal_use_pe}")
         
     def forward(self, encoder_tokens: List[torch.Tensor], depths, imgs, patch_start_idx: int = 5, image_size=None, conf=None, frames_chunk_size: int = 8):
         # H, W = input_info['image_size']
@@ -91,7 +222,7 @@ class VGGT_DPT_GS_Head(DPTHead):
         return torch.cat(all_preds, dim=1)
     
     def _forward_impl(self, encoder_tokens: List[torch.Tensor], imgs, patch_start_idx: int = 5, frames_start_idx: int = None, frames_end_idx: int = None):
-        
+
         if frames_start_idx is not None and frames_end_idx is not None:
             imgs = imgs[:, frames_start_idx:frames_end_idx]
 
@@ -108,28 +239,34 @@ class VGGT_DPT_GS_Head(DPTHead):
             else:
                 list_idx = self.intermediate_layer_idx.index(layer_idx)
                 x = encoder_tokens[list_idx][:, :, patch_start_idx:]
-            
+
             # Select frames if processing a chunk
             if frames_start_idx is not None and frames_end_idx is not None:
                 x = x[:, frames_start_idx:frames_end_idx].contiguous()
-            
+
             x = x.view(B * S, -1, x.shape[-1])
 
             x = self.norm(x)
-            
+
             x = x.permute(0, 2, 1).reshape((x.shape[0], x.shape[-1], patch_h, patch_w))
 
             x = self.projects[dpt_idx](x)
             if self.pos_embed:
                 x = self._apply_pos_embed(x, W, H)
             x = self.resize_layers[dpt_idx](x)
-            
+
             out.append(x)
             dpt_idx += 1
 
         # Fuse features from multiple layers.
         out = self.scratch_forward(out)
-        direct_img_feat = self.input_merger(imgs.flatten(0,1))
+
+        # Apply temporal attention BEFORE adding image features and final conv
+        # This allows cross-frame reasoning on the DPT-fused features
+        if self.use_temporal_attention:
+            out = self.temporal_attention(out, B, S)
+
+        direct_img_feat = self.input_merger(imgs.flatten(0, 1))
         out = F.interpolate(out, size=(H, W), mode='bilinear', align_corners=True)
         out = out + direct_img_feat
 

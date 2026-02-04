@@ -24,8 +24,19 @@ from src.model.decoder.decoder_splatting_cuda import DecoderSplattingCUDACfg
 from src.model.encoder.visualization.encoder_visualizer_epipolar_cfg import EncoderVisualizerEpipolarCfg
 
 
-def create_encoder_config(use_vggt4d=True, enable_dynamic_detection=True):
-    """Create encoder config with VGGT4D settings."""
+def create_encoder_config(
+    use_vggt4d=True,
+    enable_dynamic_detection=True,
+    use_temporal_attention=False,
+):
+    """Create encoder config with VGGT4D settings.
+
+    Args:
+        use_vggt4d: Use VGGT4D aggregator for temporal processing
+        enable_dynamic_detection: Enable dynamic mask extraction from attention patterns
+        use_temporal_attention: Enable temporal cross-frame attention in Gaussian head
+                               (requires fine-tuning to be effective)
+    """
     return EncoderAnySplatCfg(
         name="anysplat",
         anchor_feat_dim=83,
@@ -63,6 +74,15 @@ def create_encoder_config(use_vggt4d=True, enable_dynamic_detection=True):
         dynamic_mask_threshold=None,  # Use adaptive Otsu threshold
         dynamic_n_clusters=64,
         suppress_dynamic_gaussians=True,
+        # Temporal attention in Gaussian head (Fix 2)
+        # Note: Requires fine-tuning to be effective. Without training,
+        # the attention weights start near-identity (output_scale=0).
+        use_temporal_attention=use_temporal_attention,
+        temporal_num_heads=4,
+        temporal_dropout=0.0,
+        temporal_spatial_downsample=4,  # 4x downsample for efficiency
+        temporal_use_pe=True,
+        temporal_max_frames=32,
     )
 
 
@@ -81,9 +101,11 @@ def main():
 
     # Create configs
     print("\nCreating model configs...")
+    use_temporal_attention = True  # Set to True to enable temporal attention (requires fine-tuning)
     encoder_cfg = create_encoder_config(
         use_vggt4d=True,
-        enable_dynamic_detection=True
+        enable_dynamic_detection=True,
+        use_temporal_attention=use_temporal_attention,
     )
     decoder_cfg = create_decoder_config()
 
@@ -91,6 +113,7 @@ def main():
     print("\nBuilding AnySplat with VGGT4D...")
     print("  - use_vggt4d: True")
     print("  - enable_dynamic_detection: True")
+    print(f"  - use_temporal_attention: {use_temporal_attention}")
     model = AnySplat(encoder_cfg, decoder_cfg)
     model = model.to(device)
     model.eval()

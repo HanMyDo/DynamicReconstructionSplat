@@ -127,7 +127,14 @@ class EncoderAnySplatCfg:
     enable_dynamic_detection: bool = False
     dynamic_mask_threshold: Optional[float] = None  # None = use adaptive threshold
     dynamic_n_clusters: int = 64  # Number of clusters for KMeans refinement
-    suppress_dynamic_gaussians: bool = True  # If True, reduce opacity of dynamic regions 
+    suppress_dynamic_gaussians: bool = True  # If True, reduce opacity of dynamic regions
+    # Temporal attention options for Gaussian head (Fix 2 for dynamic handling)
+    use_temporal_attention: bool = False
+    temporal_num_heads: int = 4
+    temporal_dropout: float = 0.0
+    temporal_spatial_downsample: int = 4  # Downsample factor for efficiency
+    temporal_use_pe: bool = True  # Use learnable temporal positional encoding
+    temporal_max_frames: int = 32  # Maximum number of frames supported
 
 
 def rearrange_head(feat, patch_size, H, W):
@@ -248,6 +255,13 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
             activation="norm_exp",
             conf_activation="expp1",
             features=head_params.feature_dim,
+            # Temporal attention parameters for cross-frame Gaussian feature fusion
+            use_temporal_attention=cfg.use_temporal_attention,
+            temporal_num_heads=cfg.temporal_num_heads,
+            temporal_dropout=cfg.temporal_dropout,
+            temporal_spatial_downsample=cfg.temporal_spatial_downsample,
+            temporal_use_pe=cfg.temporal_use_pe,
+            temporal_max_frames=cfg.temporal_max_frames,
         )
 
     def map_pdf_to_opacity(
@@ -718,6 +732,25 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
             infos["dyn_map"] = dyn_map
             dyn_ratio = dyn_mask.float().mean().item()
             print(f"Dynamic detection: {dyn_ratio*100:.1f}% of pixels detected as dynamic")
+
+        # Store per-frame Gaussian parameters for temporal consistency loss (Fix 3)
+        # out shape: [B, V, raw_gs_dim+1, H, W] where raw_gs_dim = 1 + 7 + 3*d_sh
+        # Channel layout: [0]=opacity, [1:4]=scales, [4:8]=rotations, [8:]=SH
+        if self.cfg.use_temporal_attention or self.training:
+            # Parse per-frame Gaussian parameters from the head output
+            # anchor_feats has shape [B, V, raw_gs_dim, H, W]
+            d_sh = self.gaussian_adapter.d_sh  # (sh_degree + 1)^2
+            per_frame_opacity = anchor_feats[:, :, 0]  # [B, V, H, W]
+            per_frame_scales = anchor_feats[:, :, 1:4].permute(0, 1, 3, 4, 2)  # [B, V, H, W, 3]
+            per_frame_rotations = anchor_feats[:, :, 4:8].permute(0, 1, 3, 4, 2)  # [B, V, H, W, 4]
+            per_frame_sh = anchor_feats[:, :, 8:].permute(0, 1, 3, 4, 2)  # [B, V, H, W, 3*d_sh]
+
+            infos["per_frame_gaussians"] = {
+                "opacity": per_frame_opacity.detach() if not self.training else per_frame_opacity,
+                "scales": per_frame_scales.detach() if not self.training else per_frame_scales,
+                "rotations": per_frame_rotations.detach() if not self.training else per_frame_rotations,
+                "sh": per_frame_sh.detach() if not self.training else per_frame_sh,
+            }
 
         print(
             f"scene scale: {scene_scale:.3f}, pixel-wise num: {h*w*v}, after voxelize: {neural_pts.shape[1]}, voxelize ratio: {infos['voxelize_ratio']:.3f}"
