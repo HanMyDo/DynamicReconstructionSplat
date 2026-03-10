@@ -32,10 +32,15 @@ echo ""
 DATASET_SEQUENCE="rgbd_bonn_crowd3"
 echo "Extracting ${DATASET_SEQUENCE} from zip to /tmp/bonn_data/ ..."
 mkdir -p /tmp/bonn_data
-unzip -q /mnt/projects/theses/dynrecsplat/rgbd_bonn_dataset.zip \
-  "rgbd_bonn_dataset/${DATASET_SEQUENCE}/*" \
-  -d /tmp/bonn_data/
-echo "Extraction done. Contents:"
+python3 -c "
+import zipfile
+seq = 'rgbd_bonn_dataset/${DATASET_SEQUENCE}/'
+with zipfile.ZipFile('/mnt/projects/theses/dynrecsplat/rgbd_bonn_dataset.zip', 'r') as zf:
+    members = [m for m in zf.namelist() if m.startswith(seq)]
+    print(f'Extracting {len(members)} files...')
+    zf.extractall('/tmp/bonn_data/', members)
+print('Extraction done.')
+"
 ls /tmp/bonn_data/rgbd_bonn_dataset/${DATASET_SEQUENCE}/
 echo ""
 
