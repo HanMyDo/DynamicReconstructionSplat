@@ -33,10 +33,10 @@ DATASET_SEQUENCE="rgbd_bonn_crowd3"
 echo "Extracting ${DATASET_SEQUENCE} from zip to /tmp/bonn_data/ ..."
 mkdir -p /tmp/bonn_data
 unzip -q /mnt/projects/theses/dynrecsplat/rgbd_bonn_dataset.zip \
-  "${DATASET_SEQUENCE}/*" \
+  "rgbd_bonn_dataset/${DATASET_SEQUENCE}/*" \
   -d /tmp/bonn_data/
 echo "Extraction done. Contents:"
-ls /tmp/bonn_data/${DATASET_SEQUENCE}/
+ls /tmp/bonn_data/rgbd_bonn_dataset/${DATASET_SEQUENCE}/
 echo ""
 
 # Remove old container if exists
@@ -54,7 +54,7 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp train_temporal_gs b
   echo ''
 
   python train_temporal_gaussian_head.py \
-    --data_dir /tmp/bonn_data \
+    --data_dir /tmp/bonn_data/rgbd_bonn_dataset \
     --dataset_name rgbd_bonn_crowd3 \
     --output_dir output_finetune_smoketest \
     --num_epochs 1 \
