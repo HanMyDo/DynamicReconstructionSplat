@@ -9,7 +9,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 #SBATCH --exclude=essen
-#SBATCH --time=04:00:00
+#SBATCH --time=02:00:00
 
 # Override scratch paths
 export ENROOT_RUNTIME_PATH=/tmp/$USER/runtime
@@ -22,10 +22,21 @@ mkdir -p $ENROOT_RUNTIME_PATH $ENROOT_CACHE_PATH $ENROOT_DATA_PATH
 mkdir -p slurm_logs
 
 echo "=============================================="
-echo "Training Temporal Gaussian Head"
+echo "Training Temporal Gaussian Head - Smoke Test"
 echo "=============================================="
 echo "Job started on node: $(hostname)"
 echo "Time: $(date)"
+echo ""
+
+# Extract one dataset sequence to fast local /tmp (auto-cleaned after job)
+DATASET_SEQUENCE="rgbd_bonn_crowd3"
+echo "Extracting ${DATASET_SEQUENCE} from zip to /tmp/bonn_data/ ..."
+mkdir -p /tmp/bonn_data
+unzip -q /mnt/projects/theses/dynrecsplat/rgbd_bonn_dataset.zip \
+  "${DATASET_SEQUENCE}/*" \
+  -d /tmp/bonn_data/
+echo "Extraction done. Contents:"
+ls /tmp/bonn_data/${DATASET_SEQUENCE}/
 echo ""
 
 # Remove old container if exists
@@ -34,8 +45,8 @@ enroot remove -f train_temporal_gs 2>/dev/null || true
 # Create container from sqsh file
 enroot create --name train_temporal_gs ~/anysplat.sqsh
 
-# Start container
-enroot start --root --rw --mount /mnt:/mnt train_temporal_gs bash -c "
+# Start container — mount both /mnt and /tmp so the extracted data is accessible
+enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp train_temporal_gs bash -c "
   cd /mnt/home/hanmydo/DynamicReconstructionSplat
   echo 'Current directory:' \$(pwd)
   echo 'Python version:' \$(python --version)
@@ -43,18 +54,19 @@ enroot start --root --rw --mount /mnt:/mnt train_temporal_gs bash -c "
   echo ''
 
   python train_temporal_gaussian_head.py \
-    --data_dir examples/vrnerf \
-    --dataset_name rgbd_bonn_synchronous2 \
-    --output_dir output_finetune_trial \
-    --num_epochs 3 \
+    --data_dir /tmp/bonn_data \
+    --dataset_name rgbd_bonn_crowd3 \
+    --output_dir output_finetune_smoketest \
+    --num_epochs 1 \
     --batch_size 1 \
     --learning_rate 1e-4 \
     --num_frames 4 \
     --temporal_weight 0.1 \
-    --intrinsics bonn
+    --intrinsics bonn \
+    --no_temporal_attention
 "
 
-# Cleanup
+# Cleanup container
 enroot remove -f train_temporal_gs
 
 echo ""
