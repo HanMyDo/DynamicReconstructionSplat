@@ -585,7 +585,7 @@ def compute_temporal_loss(
 
         # Apply dynamic mask weighting (only penalize static regions)
         if dyn_mask is not None:
-            static_mask = 1.0 - dyn_mask[:, 1:].float()
+            static_mask = (1.0 - dyn_mask[:, 1:].float()).to(diff.device)
 
             # Expand mask dimensions to match diff
             while static_mask.dim() < diff.dim():
