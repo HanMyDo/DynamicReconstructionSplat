@@ -1,15 +1,15 @@
 #!/bin/sh
-#SBATCH --job-name=train_temporal_gs
+#SBATCH --job-name=smoketest_temporal_attn
 #SBATCH --partition=24g
 #SBATCH --qos=students_normal
-#SBATCH --output=slurm_logs/train_temporal_%j.out
-#SBATCH --error=slurm_logs/train_temporal_%j.err
+#SBATCH --output=slurm_logs/smoketest_temporal_attn_%j.out
+#SBATCH --error=slurm_logs/smoketest_temporal_attn_%j.err
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=30G
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 #SBATCH --exclude=essen
-#SBATCH --time=16:00:00
+#SBATCH --time=02:00:00
 
 # Override scratch paths
 export ENROOT_RUNTIME_PATH=/tmp/$USER/runtime
@@ -18,17 +18,16 @@ export ENROOT_DATA_PATH=/tmp/$USER/data
 export TMPDIR=/tmp
 mkdir -p $ENROOT_RUNTIME_PATH $ENROOT_CACHE_PATH $ENROOT_DATA_PATH
 
-# Create log directory on host
 mkdir -p slurm_logs
 
 echo "=============================================="
-echo "Training Temporal Gaussian Head - Initial Run"
+echo "Smoke Test - Temporal Attention Enabled"
 echo "=============================================="
 echo "Job started on node: $(hostname)"
 echo "Time: $(date)"
 echo ""
 
-# Extract one dataset sequence to fast local /tmp (auto-cleaned after job)
+# Extract one dataset sequence to fast local /tmp
 DATASET_SEQUENCE="rgbd_bonn_crowd3"
 echo "Extracting ${DATASET_SEQUENCE} from zip to /tmp/bonn_data/ ..."
 mkdir -p /tmp/bonn_data
@@ -41,28 +40,27 @@ with zipfile.ZipFile('/mnt/projects/theses/dynrecsplat/rgbd_bonn_dataset.zip', '
     zf.extractall('/tmp/bonn_data/', members)
 print('Extraction done.')
 "
-ls /tmp/bonn_data/rgbd_bonn_dataset/${DATASET_SEQUENCE}/
 echo ""
 
 # Remove old container if exists
-enroot remove -f train_temporal_gs 2>/dev/null || true
+enroot remove -f smoketest_temporal_attn 2>/dev/null || true
 
 # Create container from sqsh file
-enroot create --name train_temporal_gs ~/anysplat.sqsh
+enroot create --name smoketest_temporal_attn ~/anysplat.sqsh
 
-# Start container — mount both /mnt and /tmp so the extracted data is accessible
-enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp train_temporal_gs bash -c "
+# Start container
+enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp smoketest_temporal_attn bash -c "
   cd /mnt/home/hanmydo/DynamicReconstructionSplat
   echo 'Current directory:' \$(pwd)
-  echo 'Python version:' \$(python --version)
+  python --version
   nvidia-smi
   echo ''
 
   python train_temporal_gaussian_head.py \
     --data_dir /tmp/bonn_data/rgbd_bonn_dataset \
     --dataset_name rgbd_bonn_crowd3 \
-    --output_dir output_finetune_initial \
-    --num_epochs 20 \
+    --output_dir output_smoketest_temporal_attn \
+    --num_epochs 1 \
     --batch_size 1 \
     --learning_rate 1e-4 \
     --num_frames 4 \
@@ -71,7 +69,7 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp train_temporal_gs b
 "
 
 # Cleanup container
-enroot remove -f train_temporal_gs
+enroot remove -f smoketest_temporal_attn
 
 echo ""
 echo "Job finished at: $(date)"
