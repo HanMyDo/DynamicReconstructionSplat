@@ -9,7 +9,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 #SBATCH --exclude=essen,koblenz
-#SBATCH --time=12:00:00
+#SBATCH --time=23:00:00
 
 export ENROOT_RUNTIME_PATH=/tmp/$USER/runtime
 export ENROOT_CACHE_PATH=/tmp/$USER/cache
