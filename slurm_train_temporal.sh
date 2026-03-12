@@ -8,7 +8,7 @@
 #SBATCH --mem=30G
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
-#SBATCH --exclude=essen
+#SBATCH --exclude=essen,koblenz
 #SBATCH --time=16:00:00
 
 # Override scratch paths
