@@ -855,6 +855,9 @@ def main():
     parser.add_argument("--num_frames", type=int, default=8)
     parser.add_argument("--frame_stride", type=int, default=1,
                         help="Stride between sampled frames")
+    parser.add_argument("--dataset_names", type=str, default=None,
+                        help="Comma-separated list of dataset names for multi-sequence training. "
+                             "Overrides --dataset_name if provided.")
     parser.add_argument("--resume", type=str, default=None,
                         help="Path to checkpoint to resume from")
     parser.add_argument("--no_temporal_attention", action="store_true",
@@ -907,25 +910,41 @@ def main():
 
     # Create datasets
     print("\nLoading datasets...")
-    train_dataset = VideoFrameDataset(
-        config.data_dir,
-        config.dataset_name,
-        intrinsics=intrinsics,
-        num_frames=config.num_frames,
-        frame_stride=config.frame_stride,
-        image_size=config.image_size,
-        split="train",
-    )
-
-    val_dataset = VideoFrameDataset(
-        config.data_dir,
-        config.dataset_name,
-        intrinsics=intrinsics,
-        num_frames=config.num_frames,
-        frame_stride=config.frame_stride,
-        image_size=config.image_size,
-        split="val",
-    )
+    if args.dataset_names:
+        from torch.utils.data import ConcatDataset
+        names = [n.strip() for n in args.dataset_names.split(",")]
+        print(f"Multi-sequence training on: {names}")
+        train_dataset = ConcatDataset([
+            VideoFrameDataset(config.data_dir, name, intrinsics=intrinsics,
+                              num_frames=config.num_frames, frame_stride=config.frame_stride,
+                              image_size=config.image_size, split="train")
+            for name in names
+        ])
+        val_dataset = ConcatDataset([
+            VideoFrameDataset(config.data_dir, name, intrinsics=intrinsics,
+                              num_frames=config.num_frames, frame_stride=config.frame_stride,
+                              image_size=config.image_size, split="val")
+            for name in names
+        ])
+    else:
+        train_dataset = VideoFrameDataset(
+            config.data_dir,
+            config.dataset_name,
+            intrinsics=intrinsics,
+            num_frames=config.num_frames,
+            frame_stride=config.frame_stride,
+            image_size=config.image_size,
+            split="train",
+        )
+        val_dataset = VideoFrameDataset(
+            config.data_dir,
+            config.dataset_name,
+            intrinsics=intrinsics,
+            num_frames=config.num_frames,
+            frame_stride=config.frame_stride,
+            image_size=config.image_size,
+            split="val",
+        )
 
     train_loader = DataLoader(
         train_dataset,
