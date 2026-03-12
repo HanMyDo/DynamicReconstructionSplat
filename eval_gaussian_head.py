@@ -186,11 +186,14 @@ def main():
     parser.add_argument("--num_workers", type=int, default=2)
     parser.add_argument("--use_temporal_attention", action="store_true",
                         help="Enable temporal attention (set if checkpoint was trained with it)")
+    parser.add_argument("--no_vggt4d", action="store_true",
+                        help="Use original VGGT backbone instead of VGGT4D (no dynamic detection)")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
     print(f"Mode: {'Fine-tuned' if args.checkpoint else 'Baseline'}")
+    print(f"Backbone: {'VGGT (original)' if args.no_vggt4d else 'VGGT4D'}")
 
     intrinsics = INTRINSICS_PRESETS[args.intrinsics]
 
@@ -199,6 +202,8 @@ def main():
         dataset_name=args.dataset_name,
         num_frames=args.num_frames,
         use_temporal_attention=args.use_temporal_attention,
+        use_vggt4d=not args.no_vggt4d,
+        enable_dynamic_detection=not args.no_vggt4d,
     )
 
     print(f"\nLoading {args.split} dataset...")

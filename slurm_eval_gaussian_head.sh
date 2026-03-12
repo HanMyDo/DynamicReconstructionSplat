@@ -9,7 +9,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 #SBATCH --exclude=essen
-#SBATCH --time=01:00:00
+#SBATCH --time=02:00:00
 
 # Override scratch paths
 export ENROOT_RUNTIME_PATH=/tmp/$USER/runtime
@@ -48,9 +48,9 @@ enroot remove -f eval_gaussian_head 2>/dev/null || true
 # Create container from sqsh file
 enroot create --name eval_gaussian_head ~/anysplat.sqsh
 
-# --- Baseline run (no checkpoint) ---
+# --- Run 1: Original AnySplat (VGGT backbone, no VGGT4D) ---
 echo "=============================================="
-echo "Running BASELINE evaluation..."
+echo "Running VGGT (original AnySplat) evaluation..."
 echo "=============================================="
 enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp eval_gaussian_head bash -c "
   cd /mnt/home/hanmydo/DynamicReconstructionSplat
@@ -60,12 +60,28 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp eval_gaussian_head 
     --intrinsics bonn \
     --num_frames 4 \
     --split val \
-    --output_dir output_eval_baseline
+    --no_vggt4d \
+    --output_dir output_eval_vggt_baseline
 "
 
-# --- Fine-tuned run (loads checkpoint) ---
+# --- Run 2: VGGT4D baseline (no fine-tuning) ---
 echo "=============================================="
-echo "Running FINE-TUNED evaluation..."
+echo "Running VGGT4D BASELINE evaluation..."
+echo "=============================================="
+enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp eval_gaussian_head bash -c "
+  cd /mnt/home/hanmydo/DynamicReconstructionSplat
+  python eval_gaussian_head.py \
+    --data_dir /tmp/bonn_data/rgbd_bonn_dataset \
+    --dataset_name rgbd_bonn_crowd3 \
+    --intrinsics bonn \
+    --num_frames 4 \
+    --split val \
+    --output_dir output_eval_vggt4d_baseline
+"
+
+# --- Run 3: VGGT4D fine-tuned ---
+echo "=============================================="
+echo "Running VGGT4D FINE-TUNED evaluation..."
 echo "=============================================="
 enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp eval_gaussian_head bash -c "
   cd /mnt/home/hanmydo/DynamicReconstructionSplat
@@ -77,7 +93,7 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp eval_gaussian_head 
     --split val \
     --checkpoint output_finetune_initial/checkpoint_best.pt \
     --use_temporal_attention \
-    --output_dir output_eval_finetuned
+    --output_dir output_eval_vggt4d_finetuned
 "
 
 # Cleanup container
@@ -85,8 +101,9 @@ enroot remove -f eval_gaussian_head
 
 echo ""
 echo "=============================================="
-echo "Both evaluations done. Results:"
-echo "  Baseline:   output_eval_baseline/metrics.json"
-echo "  Fine-tuned: output_eval_finetuned/metrics.json"
+echo "All evaluations done. Results:"
+echo "  VGGT (original):     output_eval_vggt_baseline/metrics.json"
+echo "  VGGT4D baseline:     output_eval_vggt4d_baseline/metrics.json"
+echo "  VGGT4D fine-tuned:   output_eval_vggt4d_finetuned/metrics.json"
 echo "=============================================="
 echo "Job finished at: $(date)"
