@@ -248,6 +248,7 @@ class TrainingConfig:
     # Loss weights
     mse_weight: float = 1.0
     temporal_consistency_weight: float = 0.1
+    scale_reg_weight: float = 0.01  # L1 penalty on Gaussian scales to prevent size collapse
 
     # Pose handling
     use_gt_poses: bool = True  # Use GT poses for rendering loss (recommended)
@@ -637,6 +638,7 @@ def train_epoch(
     total_loss = 0.0
     total_mse_loss = 0.0
     total_temporal_loss = 0.0
+    total_scale_reg = 0.0
     num_batches = 0
 
     pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}")
@@ -687,10 +689,14 @@ def train_epoch(
 
             temporal_loss = compute_temporal_loss(infos)
 
+            # Scale regularization: L1 penalty on mean Gaussian scale to prevent size collapse
+            scale_reg = gaussians.scales.mean()
+
             # Total loss
             loss = (
                 config.mse_weight * mse_loss +
-                config.temporal_consistency_weight * temporal_loss
+                config.temporal_consistency_weight * temporal_loss +
+                config.scale_reg_weight * scale_reg
             )
 
             # Scale for gradient accumulation
@@ -715,12 +721,14 @@ def train_epoch(
         total_loss += loss.item() * config.accumulate_grad_batches
         total_mse_loss += mse_loss.item()
         total_temporal_loss += temporal_loss.item()
+        total_scale_reg += scale_reg.item()
         num_batches += 1
 
         pbar.set_postfix({
             'loss': f'{total_loss/num_batches:.4f}',
             'mse': f'{total_mse_loss/num_batches:.4f}',
             'temporal': f'{total_temporal_loss/num_batches:.4f}',
+            'scale': f'{total_scale_reg/num_batches:.4f}',
             'lr': f'{scheduler.get_last_lr()[0]:.2e}',
         })
 
@@ -864,6 +872,8 @@ def main():
                         help="Disable temporal attention (for ablation)")
     parser.add_argument("--temporal_weight", type=float, default=0.1,
                         help="Weight for temporal consistency loss")
+    parser.add_argument("--scale_reg_weight", type=float, default=0.01,
+                        help="Weight for L1 scale regularization (prevents Gaussian size collapse)")
     parser.add_argument("--no_gt_poses", action="store_true",
                         help="Use predicted poses instead of GT (not recommended)")
 
@@ -889,6 +899,7 @@ def main():
         intrinsics_preset=args.intrinsics,
         use_temporal_attention=not args.no_temporal_attention,
         temporal_consistency_weight=args.temporal_weight,
+        scale_reg_weight=args.scale_reg_weight,
         use_gt_poses=not args.no_gt_poses,
     )
 

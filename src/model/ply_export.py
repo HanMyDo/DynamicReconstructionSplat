@@ -8,6 +8,9 @@ from plyfile import PlyData, PlyElement
 from scipy.spatial.transform import Rotation as R
 from torch import Tensor
 
+# Standard SH DC-to-color constant (same as INRIA 3DGS and gsplat)
+C0 = 0.28209479177387814
+
 
 def construct_list_of_attributes(num_rest: int) -> list[str]:
     attributes = ["x", "y", "z", "nx", "ny", "nz"]
@@ -50,8 +53,19 @@ def export_ply(
 
     # Since current model use SH_degree = 4,
     # which require large memory to store, we can only save the DC band to save memory.
-    f_dc = harmonics[..., 0]
+    f_dc = harmonics[..., 0]  # [N, 3]: DC SH coefficient for each RGB channel
     f_rest = harmonics[..., 1:].flatten(start_dim=1)
+
+    # Diagnostics: print f_dc statistics to help verify color encoding
+    f_dc_np = f_dc.detach().cpu().float().numpy()
+    rgb_from_dc = (f_dc_np * C0 + 0.5).clip(0, 1)
+    print(f"[PLY export] f_dc range: [{f_dc_np.min():.3f}, {f_dc_np.max():.3f}], "
+          f"mean={f_dc_np.mean():.3f}")
+    print(f"[PLY export] Implied RGB from DC: min={rgb_from_dc.min(axis=0)}, "
+          f"max={rgb_from_dc.max(axis=0)}, mean={rgb_from_dc.mean(axis=0)}")
+
+    # Opacity: PLY format expects pre-sigmoid logit; fix the original AnySplat bug.
+    opacity_logit = opacities.clamp(1e-6, 1 - 1e-6).logit()
 
     dtype_full = [(attribute, "f4") for attribute in construct_list_of_attributes(0 if save_sh_dc_only else f_rest.shape[1])]
     elements = np.empty(means.shape[0], dtype=dtype_full)
@@ -60,7 +74,7 @@ def export_ply(
         torch.zeros_like(means).detach().cpu().numpy(),
         f_dc.detach().cpu().contiguous().numpy(),
         f_rest.detach().cpu().contiguous().numpy(),
-        opacities[..., None].detach().cpu().numpy(),
+        opacity_logit[..., None].detach().cpu().numpy(),
         scales.log().detach().cpu().numpy(),
         rotations,
     ]
@@ -70,5 +84,32 @@ def export_ply(
 
     attributes = np.concatenate(attributes, axis=1)
     elements[:] = list(map(tuple, attributes))
+    path.parent.mkdir(exist_ok=True, parents=True)
+    PlyData([PlyElement.describe(elements, "vertex")]).write(path)
+
+    # Also export a vertex-colored point cloud for easy inspection in any viewer.
+    # Colors are computed from DC SH coefficients using the standard formula.
+    _export_colored_pointcloud(means, rgb_from_dc, Path(str(path).replace(".ply", "_rgb.ply")))
+
+
+def _export_colored_pointcloud(
+    means: Float[Tensor, "gaussian 3"],
+    rgb: np.ndarray,  # [N, 3] in [0, 1]
+    path: Path,
+):
+    """Export a plain XYZ+RGB point cloud PLY for viewing in any PLY viewer."""
+    xyz = means.detach().cpu().numpy()
+    rgb_uint8 = (rgb * 255).clip(0, 255).astype(np.uint8)
+
+    dtype = [("x", "f4"), ("y", "f4"), ("z", "f4"),
+             ("red", "u1"), ("green", "u1"), ("blue", "u1")]
+    elements = np.empty(xyz.shape[0], dtype=dtype)
+    elements["x"] = xyz[:, 0]
+    elements["y"] = xyz[:, 1]
+    elements["z"] = xyz[:, 2]
+    elements["red"] = rgb_uint8[:, 0]
+    elements["green"] = rgb_uint8[:, 1]
+    elements["blue"] = rgb_uint8[:, 2]
+
     path.parent.mkdir(exist_ok=True, parents=True)
     PlyData([PlyElement.describe(elements, "vertex")]).write(path)
