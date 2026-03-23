@@ -457,6 +457,26 @@ def create_model(config: TrainingConfig) -> AnySplat:
     )
 
     model = AnySplat(encoder_cfg, decoder_cfg)
+
+    # Load pretrained GS head weights from the official AnySplat checkpoint.
+    # The VGGT backbone (aggregator, camera/depth head) is already loaded above
+    # from VGGT-1B, but the gaussian_param_head and gaussian_adapter start with
+    # random weights — that's why the baseline produces no colors.
+    print("Loading pretrained GS head weights from lhjiang/anysplat ...")
+    pretrained = AnySplat.from_pretrained("lhjiang/anysplat")
+    gs_head_result = model.encoder.gaussian_param_head.load_state_dict(
+        pretrained.encoder.gaussian_param_head.state_dict(), strict=False
+    )
+    adapter_result = model.encoder.gaussian_adapter.load_state_dict(
+        pretrained.encoder.gaussian_adapter.state_dict(), strict=False
+    )
+    print(f"  gaussian_param_head: missing={gs_head_result.missing_keys}, "
+          f"unexpected={gs_head_result.unexpected_keys}")
+    print(f"  gaussian_adapter:    missing={adapter_result.missing_keys}, "
+          f"unexpected={adapter_result.unexpected_keys}")
+    del pretrained
+    torch.cuda.empty_cache()
+
     return model
 
 
