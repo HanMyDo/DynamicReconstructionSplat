@@ -641,6 +641,40 @@ def compute_temporal_loss(
 # Training loop
 # ============================================================================
 
+def check_gaussian_health(gaussians, loss, step) -> bool:
+    """
+    Check for divergence in Gaussian parameters. Returns True if training should stop.
+    Thresholds:
+      - f_dc abs max > 5  → warning  (pretrained baseline peaks at ~2.25)
+      - f_dc abs max > 15 → critical, stop training
+      - scale max > 0.5   → warning
+      - scale max > 2.0   → critical, stop training
+      - loss NaN/inf      → stop immediately
+    """
+    if torch.isnan(loss) or torch.isinf(loss):
+        print(f"\n[HEALTH] CRITICAL at step {step}: loss is {loss.item():.4f} — stopping training.")
+        return True
+
+    with torch.no_grad():
+        f_dc = gaussians.harmonics[:, :, :, 0]  # DC SH coefficients [B, N, 3]
+        f_dc_absmax = f_dc.abs().max().item()
+        scale_max = gaussians.scales.max().item()
+        scale_mean = gaussians.scales.mean().item()
+
+    if f_dc_absmax > 15.0:
+        print(f"\n[HEALTH] CRITICAL at step {step}: f_dc abs_max={f_dc_absmax:.2f} (>15) — SH diverged, stopping training.")
+        return True
+    if scale_max > 2.0:
+        print(f"\n[HEALTH] CRITICAL at step {step}: scale_max={scale_max:.4f} (>2.0) — scales exploded, stopping training.")
+        return True
+    if f_dc_absmax > 5.0:
+        print(f"\n[HEALTH] WARNING at step {step}: f_dc abs_max={f_dc_absmax:.2f} (>5) — SH drifting, watch closely.")
+    if scale_max > 0.5:
+        print(f"\n[HEALTH] WARNING at step {step}: scale_max={scale_max:.4f} (>0.5), scale_mean={scale_mean:.4f}")
+
+    return False
+
+
 def train_epoch(
     model: AnySplat,
     dataloader: DataLoader,
@@ -719,8 +753,12 @@ def train_epoch(
                 config.scale_reg_weight * scale_reg
             )
 
-            # Scale for gradient accumulation
-            loss = loss / config.accumulate_grad_batches
+        # Health check before backward (use unscaled loss)
+        if check_gaussian_health(gaussians, loss, global_step):
+            return total_loss / max(num_batches, 1), global_step, True
+
+        # Scale for gradient accumulation
+        loss = loss / config.accumulate_grad_batches
 
         # Backward pass
         scaler.scale(loss).backward()
@@ -757,7 +795,7 @@ def train_epoch(
             save_checkpoint(model, optimizer, scheduler, epoch, global_step, config)
 
     avg_loss = total_loss / num_batches if num_batches > 0 else 0.0
-    return avg_loss, global_step
+    return avg_loss, global_step, False
 
 
 def validate(
@@ -1002,11 +1040,14 @@ def main():
     print("\nFreezing backbone...")
     model = freeze_backbone(model)
 
-    # Optimizer (only trainable params)
-    trainable_params = [p for p in model.parameters() if p.requires_grad]
+    # Optimizer — lower LR for gaussian_param_head to prevent SH coefficient divergence
+    gs_head_params = [p for p in model.encoder.gaussian_param_head.parameters() if p.requires_grad]
+    adapter_params = [p for p in model.encoder.gaussian_adapter.parameters() if p.requires_grad]
     optimizer = AdamW(
-        trainable_params,
-        lr=config.learning_rate,
+        [
+            {"params": gs_head_params, "lr": config.learning_rate * 0.1},
+            {"params": adapter_params, "lr": config.learning_rate},
+        ],
         weight_decay=config.weight_decay,
     )
 
@@ -1043,10 +1084,14 @@ def main():
     for epoch in range(start_epoch, config.num_epochs):
         print(f"\nEpoch {epoch + 1}/{config.num_epochs}")
 
-        avg_loss, global_step = train_epoch(
+        avg_loss, global_step, diverged = train_epoch(
             model, train_loader, optimizer, scheduler, scaler,
             config, epoch, global_step
         )
+        if diverged:
+            print("\n[HEALTH] Training stopped early due to divergence. Saving emergency checkpoint...")
+            save_checkpoint(model, optimizer, scheduler, epoch, global_step, config)
+            break
 
         # Validate every 5 epochs and at the end
         if (epoch + 1) % 5 == 0 or epoch == config.num_epochs - 1:
