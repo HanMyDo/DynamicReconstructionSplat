@@ -207,3 +207,6 @@ examples/vrnerf/shortened_sequences/
 
 # Output directories
 output_*/
+
+# Scripts archive
+old_scripts
