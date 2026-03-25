@@ -27,7 +27,7 @@ echo "Time: $(date)"
 echo ""
 
 # Held-out sequence — never seen during any training
-HELD_OUT="rgbd_bonn_crowd2"
+HELD_OUT="rgbd_bonn_kidnapping_box"
 
 echo "Extracting ${HELD_OUT} to /tmp/bonn_data/ ..."
 mkdir -p /tmp/bonn_data

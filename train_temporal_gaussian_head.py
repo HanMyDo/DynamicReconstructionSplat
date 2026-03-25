@@ -5,7 +5,7 @@ This script fine-tunes only the Gaussian head (with temporal attention) while ke
 the VGGT4D backbone frozen. This enables the model to learn temporal consistency
 for dynamic scene handling.
 
-Supports TUM-format datasets (Bonn RGB-D Dynamic, TUM RGB-D Dynamic) with
+Supports TUM-format datasets (Bonn RGB-D, TUM RGB-D Dynamic Scenes) with
 ground truth camera poses from groundtruth.txt.
 
 Usage:
@@ -591,7 +591,9 @@ def compute_temporal_loss(
     total_loss = torch.tensor(0.0, device=device)
     num_components = 0
 
-    for key in ['opacity', 'scales', 'rotations', 'sh']:
+    for key in ['opacity', 'scales', 'rotations']:
+        # 'sh' intentionally excluded: SH coefficients are view-dependent; including them in
+        # the temporal loss collapses f_dc to a near-constant "mean scene color".
         if key not in per_frame:
             continue
 
