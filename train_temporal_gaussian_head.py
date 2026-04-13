@@ -44,6 +44,7 @@ from src.model.encoder.anysplat import EncoderAnySplatCfg, OpacityMappingCfg
 from src.model.encoder.common.gaussian_adapter import GaussianAdapterCfg
 from src.model.decoder.decoder_splatting_cuda import DecoderSplattingCUDACfg
 from src.model.encoder.visualization.encoder_visualizer_epipolar_cfg import EncoderVisualizerEpipolarCfg
+from src.evaluation.metrics import compute_psnr, compute_ssim
 
 
 # ============================================================================
@@ -251,7 +252,7 @@ class TrainingConfig:
     scale_reg_weight: float = 0.01  # L1 penalty on Gaussian scales to prevent size collapse
 
     # Pose handling
-    use_gt_poses: bool = True  # Use GT poses for rendering loss (recommended)
+    use_gt_poses: bool = False  # Use predicted poses — GT poses are in Bonn world frame, incompatible with VGGT4D's predicted world frame
 
     # Checkpointing
     output_dir: str = "output_finetune"
@@ -331,26 +332,28 @@ class VideoFrameDataset(Dataset):
         if len(self.frame_data) == 0:
             raise ValueError(f"No frames found in {self.data_dir}")
 
-        # Calculate valid starting indices for sequences
+        # Split on frame indices first so train and val windows are fully disjoint.
+        # Splitting on window start indices (the old approach) causes the last training
+        # windows to overlap with the first val windows by up to (num_frames - 1) frames.
+        n_total = len(self.frame_data)
+        split_frame = int(n_total * 0.8)
+        if split == "train":
+            self.window_frames = self.frame_data[:split_frame]
+        else:
+            self.window_frames = self.frame_data[split_frame:]
+
         total_span = (num_frames - 1) * frame_stride + 1
-        self.valid_starts = list(range(0, len(self.frame_data) - total_span + 1))
+        self.valid_starts = list(range(0, len(self.window_frames) - total_span + 1))
 
         if len(self.valid_starts) == 0:
             raise ValueError(
-                f"Not enough frames. Have {len(self.frame_data)}, "
+                f"Not enough frames for split='{split}'. Have {len(self.window_frames)}, "
                 f"need at least {total_span} for {num_frames} frames with stride {frame_stride}"
             )
 
-        # Split into train/val (80/20)
-        split_idx = int(len(self.valid_starts) * 0.8)
-        if split == "train":
-            self.valid_starts = self.valid_starts[:split_idx]
-        else:
-            self.valid_starts = self.valid_starts[split_idx:]
-
-        has_poses = any(pose is not None for _, pose in self.frame_data)
+        has_poses = any(pose is not None for _, pose in self.window_frames)
         print(f"[{split}] {len(self.valid_starts)} sequences, "
-              f"{len(self.frame_data)} total frames, GT poses: {has_poses}")
+              f"{len(self.window_frames)} frames, GT poses: {has_poses}")
 
     def __len__(self):
         return len(self.valid_starts)
@@ -364,7 +367,7 @@ class VideoFrameDataset(Dataset):
 
         for i in range(self.num_frames):
             frame_idx = start_idx + i * self.frame_stride
-            frame_path, c2w_pose = self.frame_data[frame_idx]
+            frame_path, c2w_pose = self.window_frames[frame_idx]
 
             # Load image, squash-resize to target size, output [0, 1]
             # Using squash resize (not aspect-ratio crop) so intrinsics
@@ -440,7 +443,7 @@ def create_model(config: TrainingConfig) -> AnySplat:
         enable_dynamic_detection=config.enable_dynamic_detection,
         dynamic_mask_threshold=None,
         dynamic_n_clusters=64,
-        suppress_dynamic_gaussians=True,
+        suppress_dynamic_gaussians=False,  # Bonn task: reconstruct dynamic objects, not suppress them
         # Temporal attention settings
         use_temporal_attention=config.use_temporal_attention,
         temporal_num_heads=config.temporal_num_heads,
@@ -812,6 +815,7 @@ def validate(
 
     total_mse = 0.0
     total_psnr = 0.0
+    total_ssim = 0.0
     num_batches = 0
 
     with torch.no_grad():
@@ -845,21 +849,37 @@ def validate(
                     render_intrinsics[:, :, 2],
                 ], dim=2)
 
-            mse_loss, _ = compute_rendering_loss(
+            mse_loss, render_output = compute_rendering_loss(
                 model, images, gaussians, render_extrinsics, render_intrinsics
             )
 
+            # PSNR from MSE
             total_mse += mse_loss.item()
             psnr = -10 * torch.log10(mse_loss + 1e-8).item()
             total_psnr += psnr
+
+            # SSIM: compute_ssim expects [B, C, H, W] in [0, 1]
+            pred_rgb = render_output.color  # [B, V, 3, H, W]
+            gt_rgb = images                 # [B, V, 3, H, W]
+            bv = pred_rgb.shape[0] * pred_rgb.shape[1]
+            ssim_val = compute_ssim(
+                gt_rgb.view(bv, *gt_rgb.shape[2:]),
+                pred_rgb.view(bv, *pred_rgb.shape[2:]),
+            ).mean().item()
+            total_ssim += ssim_val
+
             num_batches += 1
 
+    n = max(num_batches, 1)
     metrics = {
-        'val_mse': total_mse / num_batches if num_batches > 0 else 0.0,
-        'val_psnr': total_psnr / num_batches if num_batches > 0 else 0.0,
+        'val_mse':  total_mse  / n,
+        'val_psnr': total_psnr / n,
+        'val_ssim': total_ssim / n,
     }
 
-    print(f"Validation - MSE: {metrics['val_mse']:.4f}, PSNR: {metrics['val_psnr']:.2f} dB")
+    print(f"Validation - MSE: {metrics['val_mse']:.4f}, "
+          f"PSNR: {metrics['val_psnr']:.2f} dB, "
+          f"SSIM: {metrics['val_ssim']:.4f}")
     return metrics
 
 

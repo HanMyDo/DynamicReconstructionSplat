@@ -35,6 +35,8 @@ def export_ply(
     path: Path,
     shift_and_scale: bool = False,
     save_sh_dc_only: bool = True,
+    dyn_mask_flat: np.ndarray | None = None,
+    dyn_opacity_scale: float = 0.05,
 ):
     if shift_and_scale:
         # Shift the scene so that the median Gaussian is at the origin.
@@ -63,6 +65,14 @@ def export_ply(
           f"mean={f_dc_np.mean():.3f}")
     print(f"[PLY export] Implied RGB from DC: min={rgb_from_dc.min(axis=0)}, "
           f"max={rgb_from_dc.max(axis=0)}, mean={rgb_from_dc.mean(axis=0)}")
+
+    # Optionally suppress dynamic Gaussians for cleaner PLY presentation.
+    # dyn_mask_flat: 1 = dynamic, 0 = static, same length as opacities.
+    if dyn_mask_flat is not None and len(dyn_mask_flat) == len(opacities):
+        dyn_weights = 1.0 - (1.0 - dyn_opacity_scale) * dyn_mask_flat
+        opacities = opacities * torch.from_numpy(dyn_weights).to(opacities.device, opacities.dtype)
+    elif dyn_mask_flat is not None:
+        print(f"[PLY export] dyn_mask length {len(dyn_mask_flat)} != gaussians {len(opacities)}, skipping mask")
 
     # Opacity: PLY format expects pre-sigmoid logit; fix the original AnySplat bug.
     opacity_logit = opacities.clamp(1e-6, 1 - 1e-6).logit()

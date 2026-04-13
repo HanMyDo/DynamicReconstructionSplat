@@ -20,7 +20,7 @@ mkdir -p $ENROOT_RUNTIME_PATH $ENROOT_CACHE_PATH $ENROOT_DATA_PATH
 mkdir -p slurm_logs
 
 echo "=============================================="
-echo "Cross-Sequence Eval on held-out: rgbd_bonn_crowd2"
+echo "Cross-Sequence Eval on held-out: rgbd_bonn_kidnapping_box"
 echo "=============================================="
 echo "Job started on node: $(hostname)"
 echo "Time: $(date)"
@@ -55,7 +55,7 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp eval_crossseq bash 
     --data_dir /tmp/bonn_data/rgbd_bonn_dataset \
     --dataset_name ${HELD_OUT} \
     --intrinsics bonn \
-    --num_frames 4 \
+    --num_frames 12 \
     --split val \
     --no_vggt4d \
     --output_dir output_crossseq_vggt_baseline
@@ -71,7 +71,7 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp eval_crossseq bash 
     --data_dir /tmp/bonn_data/rgbd_bonn_dataset \
     --dataset_name ${HELD_OUT} \
     --intrinsics bonn \
-    --num_frames 4 \
+    --num_frames 12 \
     --split val \
     --output_dir output_crossseq_vggt4d_baseline
 "
@@ -86,7 +86,7 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp eval_crossseq bash 
     --data_dir /tmp/bonn_data/rgbd_bonn_dataset \
     --dataset_name ${HELD_OUT} \
     --intrinsics bonn \
-    --num_frames 4 \
+    --num_frames 12 \
     --split val \
     --checkpoint output_finetune_initial/checkpoint_best.pt \
     --use_temporal_attention \
@@ -103,7 +103,7 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp eval_crossseq bash 
     --data_dir /tmp/bonn_data/rgbd_bonn_dataset \
     --dataset_name ${HELD_OUT} \
     --intrinsics bonn \
-    --num_frames 4 \
+    --num_frames 12 \
     --split val \
     --checkpoint output_finetune_multiseq/checkpoint_best.pt \
     --use_temporal_attention \

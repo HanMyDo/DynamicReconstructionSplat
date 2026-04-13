@@ -110,6 +110,7 @@ def evaluate(model, dataloader, config, output_dir, device):
     last_gaussians = None
     last_pred_pose = None
     last_h, last_w = None, None
+    last_dyn_mask = None
 
     for batch_idx, batch in enumerate(dataloader):
         images = batch["images"].to(device)
@@ -122,17 +123,11 @@ def evaluate(model, dataloader, config, output_dir, device):
         infos = encoder_output.infos
         pred_pose = encoder_output.pred_context_pose
 
-        # GT poses for metric rendering (same as training)
-        if "gt_extrinsics" in batch:
-            ext = batch["gt_extrinsics"].to(device)
-            intr = batch["gt_intrinsics"].to(device)
-            if ext.dim() == 3:
-                ext = ext.unsqueeze(0)
-                intr = intr.unsqueeze(0)
-        else:
-            ext = pred_pose["extrinsic"]
-            intr = pred_pose["intrinsic"].clone()
-            intr = torch.stack([intr[:, :, 0] * w, intr[:, :, 1] * h, intr[:, :, 2]], dim=2)
+        # Always use predicted poses — GT poses are in Bonn world frame,
+        # incompatible with VGGT4D's predicted world frame (Gaussians would project outside frustum).
+        ext = pred_pose["extrinsic"]
+        intr = pred_pose["intrinsic"].clone()
+        intr = torch.stack([intr[:, :, 0] * w, intr[:, :, 1] * h, intr[:, :, 2]], dim=2)
 
         _, decoder_out = compute_rendering_loss(model, images, gaussians, ext, intr)
         pred_rgb = decoder_out.color  # [B, V, 3, H, W] in [0, 1]
@@ -179,6 +174,7 @@ def evaluate(model, dataloader, config, output_dir, device):
         last_gaussians = gaussians
         last_pred_pose = pred_pose
         last_h, last_w = h, w
+        last_dyn_mask = dyn_mask  # [B, V, H, W] or None
 
     # --- Video output (interpolated predicted poses, last batch) ---
     if last_gaussians is not None and last_pred_pose is not None:
@@ -196,6 +192,11 @@ def evaluate(model, dataloader, config, output_dir, device):
     if last_gaussians is not None:
         print("Saving gaussians.ply...")
         ply_path = os.path.join(output_dir, "gaussians.ply")
+        # Flatten dynamic mask to match Gaussian layout [V*H*W] (assumes no voxelization)
+        dyn_mask_flat = None
+        if last_dyn_mask is not None:
+            dyn_mask_flat = last_dyn_mask[0].cpu().numpy().reshape(-1).astype(np.float32)
+
         export_ply(
             last_gaussians.means[0],
             last_gaussians.scales[0],
@@ -204,6 +205,8 @@ def evaluate(model, dataloader, config, output_dir, device):
             last_gaussians.opacities[0],
             Path(ply_path),
             save_sh_dc_only=True,
+            dyn_mask_flat=dyn_mask_flat,
+            dyn_opacity_scale=0.05,
         )
 
     # --- Metrics summary ---
