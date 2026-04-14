@@ -9,7 +9,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 #SBATCH --exclude=essen,koblenz
-#SBATCH --time=03:00:00
+#SBATCH --time=08:00:00
 
 export ENROOT_RUNTIME_PATH=/tmp/$USER/runtime
 export ENROOT_CACHE_PATH=/tmp/$USER/cache
@@ -45,12 +45,17 @@ echo ""
 enroot remove -f eval_crossseq 2>/dev/null || true
 enroot create --name eval_crossseq ~/anysplat.sqsh
 
-# --- Run 1: VGGT original (no VGGT4D) ---
-echo "=============================================="
-echo "[1/4] VGGT original baseline..."
-echo "=============================================="
+# All 4 runs in a single container start to avoid repeated startup/weight-loading overhead
 enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp eval_crossseq bash -c "
   cd /mnt/home/hanmydo/DynamicReconstructionSplat
+  echo 'Current directory:' \$(pwd)
+  python --version
+  nvidia-smi
+  echo ''
+
+  echo '=============================================='
+  echo '[1/4] VGGT original baseline...'
+  echo '=============================================='
   python eval_gaussian_head.py \
     --data_dir /tmp/bonn_data/rgbd_bonn_dataset \
     --dataset_name ${HELD_OUT} \
@@ -59,14 +64,10 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp eval_crossseq bash 
     --split val \
     --no_vggt4d \
     --output_dir output_crossseq_vggt_baseline
-"
 
-# --- Run 2: VGGT4D baseline (no fine-tuning) ---
-echo "=============================================="
-echo "[2/4] VGGT4D baseline (no fine-tuning)..."
-echo "=============================================="
-enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp eval_crossseq bash -c "
-  cd /mnt/home/hanmydo/DynamicReconstructionSplat
+  echo '=============================================='
+  echo '[2/4] VGGT4D baseline (no fine-tuning)...'
+  echo '=============================================='
   python eval_gaussian_head.py \
     --data_dir /tmp/bonn_data/rgbd_bonn_dataset \
     --dataset_name ${HELD_OUT} \
@@ -74,14 +75,10 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp eval_crossseq bash 
     --num_frames 12 \
     --split val \
     --output_dir output_crossseq_vggt4d_baseline
-"
 
-# --- Run 3: Single-sequence fine-tuned (crowd3 only) ---
-echo "=============================================="
-echo "[3/4] Single-sequence fine-tuned (crowd3 only)..."
-echo "=============================================="
-enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp eval_crossseq bash -c "
-  cd /mnt/home/hanmydo/DynamicReconstructionSplat
+  echo '=============================================='
+  echo '[3/4] Single-sequence fine-tuned (crowd3 only)...'
+  echo '=============================================='
   python eval_gaussian_head.py \
     --data_dir /tmp/bonn_data/rgbd_bonn_dataset \
     --dataset_name ${HELD_OUT} \
@@ -91,14 +88,10 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp eval_crossseq bash 
     --checkpoint output_finetune_initial/checkpoint_best.pt \
     --use_temporal_attention \
     --output_dir output_crossseq_finetuned_singleseq
-"
 
-# --- Run 4: Multi-sequence fine-tuned ---
-echo "=============================================="
-echo "[4/4] Multi-sequence fine-tuned (5 sequences)..."
-echo "=============================================="
-enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp eval_crossseq bash -c "
-  cd /mnt/home/hanmydo/DynamicReconstructionSplat
+  echo '=============================================='
+  echo '[4/4] Multi-sequence fine-tuned (5 sequences)...'
+  echo '=============================================='
   python eval_gaussian_head.py \
     --data_dir /tmp/bonn_data/rgbd_bonn_dataset \
     --dataset_name ${HELD_OUT} \
