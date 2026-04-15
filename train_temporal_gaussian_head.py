@@ -503,16 +503,21 @@ def freeze_backbone(model: AnySplat):
         for param in model.encoder.point_head.parameters():
             param.requires_grad = False
 
-    # Keep Gaussian head trainable
+    # Freeze entire gaussian_param_head first, then selectively unfreeze temporal attention only.
+    # Training the full head (SH/opacity/scales/rotations conv layers) causes SH divergence
+    # because predicted poses are not pixel-perfect, leading to noisy color gradients.
+    # The thesis contribution is temporal consistency — only the temporal attention weights need training.
     trainable_names = []
     for name, param in model.encoder.gaussian_param_head.named_parameters():
-        param.requires_grad = True
-        trainable_names.append(f"gaussian_param_head.{name}")
+        if name.startswith("temporal_attention"):
+            param.requires_grad = True
+            trainable_names.append(f"gaussian_param_head.{name}")
+        else:
+            param.requires_grad = False
 
-    # Keep Gaussian adapter trainable
+    # Freeze gaussian_adapter — it converts pretrained features to Gaussian params correctly already
     for name, param in model.encoder.gaussian_adapter.named_parameters():
-        param.requires_grad = True
-        trainable_names.append(f"gaussian_adapter.{name}")
+        param.requires_grad = False
 
     # Count parameters
     total_params = sum(p.numel() for p in model.parameters())
