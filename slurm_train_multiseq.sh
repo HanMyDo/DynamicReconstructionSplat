@@ -5,7 +5,7 @@
 #SBATCH --output=slurm_logs/train_multiseq_%j.out
 #SBATCH --error=slurm_logs/train_multiseq_%j.err
 #SBATCH --cpus-per-task=4
-#SBATCH --mem=30G
+#SBATCH --mem=60G
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 #SBATCH --exclude=essen,koblenz
