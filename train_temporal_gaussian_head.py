@@ -339,8 +339,10 @@ class VideoFrameDataset(Dataset):
         split_frame = int(n_total * 0.8)
         if split == "train":
             self.window_frames = self.frame_data[:split_frame]
-        else:
+        elif split == "val":
             self.window_frames = self.frame_data[split_frame:]
+        else:  # "all" — use every frame, for held-out sequence evaluation
+            self.window_frames = self.frame_data
 
         total_span = (num_frames - 1) * frame_stride + 1
         self.valid_starts = list(range(0, len(self.window_frames) - total_span + 1))

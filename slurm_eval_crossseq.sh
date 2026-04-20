@@ -100,7 +100,7 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp eval_crossseq bash 
     --dataset_name ${HELD_OUT} \
     --intrinsics bonn \
     --num_frames 12 \
-    --split val \
+    --split all \
     --checkpoint output_finetune_smoketest2/checkpoint_best.pt \
     --use_temporal_attention \
     --output_dir output_crossseq_smoketest2

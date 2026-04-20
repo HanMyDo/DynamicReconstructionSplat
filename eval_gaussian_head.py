@@ -248,7 +248,7 @@ def main():
                         help="Path to fine-tuned checkpoint. Omit for baseline.")
     parser.add_argument("--output_dir", type=str, required=True)
     parser.add_argument("--num_frames", type=int, default=4)
-    parser.add_argument("--split", type=str, default="val", choices=["train", "val"])
+    parser.add_argument("--split", type=str, default="all", choices=["train", "val", "all"])
     parser.add_argument("--num_workers", type=int, default=2)
     parser.add_argument("--use_temporal_attention", action="store_true",
                         help="Enable temporal attention (set if checkpoint was trained with it)")
