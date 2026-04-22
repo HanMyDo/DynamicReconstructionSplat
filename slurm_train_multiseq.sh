@@ -8,7 +8,7 @@
 #SBATCH --mem=60G
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
-#SBATCH --exclude=essen,koblenz
+#SBATCH --exclude=essen,koblenz,essen.garching.camp.cluster,koblenz.garching.camp.cluster
 #SBATCH --time=23:00:00
 
 export ENROOT_RUNTIME_PATH=/tmp/$USER/runtime
@@ -50,6 +50,7 @@ enroot create --name train_multiseq ~/anysplat.sqsh
 
 enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp train_multiseq bash -c "
   cd /mnt/home/hanmydo/DynamicReconstructionSplat
+  export CUDA_VISIBLE_DEVICES=0
   echo 'Current directory:' \$(pwd)
   python --version
   nvidia-smi

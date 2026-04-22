@@ -8,7 +8,7 @@
 #SBATCH --mem=30G
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
-#SBATCH --exclude=essen,koblenz
+#SBATCH --exclude=essen,koblenz,essen.garching.camp.cluster,koblenz.garching.camp.cluster
 #SBATCH --time=08:00:00
 
 export ENROOT_RUNTIME_PATH=/tmp/$USER/runtime
@@ -48,6 +48,7 @@ enroot create --name eval_crossseq ~/anysplat.sqsh
 # All 4 runs in a single container start to avoid repeated startup/weight-loading overhead
 enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp eval_crossseq bash -c "
   cd /mnt/home/hanmydo/DynamicReconstructionSplat
+  export CUDA_VISIBLE_DEVICES=0
   echo 'Current directory:' \$(pwd)
   python --version
   nvidia-smi
