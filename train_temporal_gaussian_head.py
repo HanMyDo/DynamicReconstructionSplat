@@ -505,19 +505,19 @@ def freeze_backbone(model: AnySplat):
         for param in model.encoder.point_head.parameters():
             param.requires_grad = False
 
-    # Freeze entire gaussian_param_head first, then selectively unfreeze temporal attention only.
-    # Training the full head (SH/opacity/scales/rotations conv layers) causes SH divergence
-    # because predicted poses are not pixel-perfect, leading to noisy color gradients.
-    # The thesis contribution is temporal consistency — only the temporal attention weights need training.
+    # Trainable: temporal_attention (main contribution) + scratch.output_conv2 (final output conv).
+    # output_conv2 must also be trainable because temporal_attention shifts the intermediate feature
+    # distribution — the frozen output conv then maps those features to uniform (grey) SH.
+    # output_conv2 gets a very low LR (0.01x) to adapt without diverging.
     trainable_names = []
     for name, param in model.encoder.gaussian_param_head.named_parameters():
-        if name.startswith("temporal_attention"):
+        if name.startswith("temporal_attention") or name.startswith("scratch.output_conv2"):
             param.requires_grad = True
             trainable_names.append(f"gaussian_param_head.{name}")
         else:
             param.requires_grad = False
 
-    # Freeze gaussian_adapter — it converts pretrained features to Gaussian params correctly already
+    # Freeze gaussian_adapter
     for name, param in model.encoder.gaussian_adapter.named_parameters():
         param.requires_grad = False
 
@@ -529,6 +529,9 @@ def freeze_backbone(model: AnySplat):
     print(f"Total parameters: {total_params:,}")
     print(f"Trainable parameters: {trainable_count:,} ({100*trainable_count/total_params:.2f}%)")
     print(f"Frozen parameters: {frozen_count:,} ({100*frozen_count/total_params:.2f}%)")
+    print(f"Trainable param names ({len(trainable_names)}):")
+    for n in trainable_names:
+        print(f"  {n}")
 
     return model
 
@@ -549,7 +552,7 @@ def compute_rendering_loss(
 
     Args:
         model: AnySplat model (for the decoder)
-        images: Input images [B, V, 3, H, W] in [-1, 1]
+        images: Input images [B, V, 3, H, W] in [0, 1]
         gaussians: Predicted Gaussians
         extrinsics: 4x4 world-to-camera matrices [B, V, 4, 4]
         intrinsics: 3x3 intrinsic matrices [B, V, 3, 3]
@@ -658,7 +661,7 @@ def check_gaussian_health(gaussians, loss, step) -> bool:
     Check for divergence in Gaussian parameters. Returns True if training should stop.
     Thresholds:
       - f_dc abs max > 5  → warning  (pretrained baseline peaks at ~2.25)
-      - f_dc abs max > 15 → critical, stop training
+      - f_dc abs max > 25 → critical, stop training (raised from 15 since output_conv2 is now trainable)
       - scale max > 0.5   → warning
       - scale max > 2.0   → critical, stop training
       - loss NaN/inf      → stop immediately
@@ -673,8 +676,8 @@ def check_gaussian_health(gaussians, loss, step) -> bool:
         scale_max = gaussians.scales.max().item()
         scale_mean = gaussians.scales.mean().item()
 
-    if f_dc_absmax > 15.0:
-        print(f"\n[HEALTH] CRITICAL at step {step}: f_dc abs_max={f_dc_absmax:.2f} (>15) — SH diverged, stopping training.")
+    if f_dc_absmax > 25.0:
+        print(f"\n[HEALTH] CRITICAL at step {step}: f_dc abs_max={f_dc_absmax:.2f} (>25) — SH diverged, stopping training.")
         return True
     if scale_max > 2.0:
         print(f"\n[HEALTH] CRITICAL at step {step}: scale_max={scale_max:.4f} (>2.0) — scales exploded, stopping training.")
@@ -794,12 +797,14 @@ def train_epoch(
         total_scale_reg += scale_reg.item()
         num_batches += 1
 
+        last_lrs = scheduler.get_last_lr()
         pbar.set_postfix({
             'loss': f'{total_loss/num_batches:.4f}',
             'mse': f'{total_mse_loss/num_batches:.4f}',
             'temporal': f'{total_temporal_loss/num_batches:.4f}',
             'scale': f'{total_scale_reg/num_batches:.4f}',
-            'lr': f'{scheduler.get_last_lr()[0]:.2e}',
+            'lr_ta': f'{last_lrs[0]:.2e}',
+            'lr_c2': f'{last_lrs[1]:.2e}' if len(last_lrs) > 1 else 'N/A',
         })
 
         # Save checkpoint periodically
@@ -1069,13 +1074,29 @@ def main():
     print("\nFreezing backbone...")
     model = freeze_backbone(model)
 
-    # Optimizer — lower LR for gaussian_param_head to prevent SH coefficient divergence
-    gs_head_params = [p for p in model.encoder.gaussian_param_head.parameters() if p.requires_grad]
-    adapter_params = [p for p in model.encoder.gaussian_adapter.parameters() if p.requires_grad]
+    # Three LR groups:
+    #   temporal_attention: full LR * 0.1  (new module, learns temporal consistency)
+    #   output_conv2:       full LR * 0.01 (adapts to shifted feature distribution, must stay slow)
+    #   adapter:            frozen, no params
+    temporal_attn_params = [
+        p for n, p in model.encoder.gaussian_param_head.named_parameters()
+        if p.requires_grad and "temporal_attention" in n
+    ]
+    output_conv2_params = [
+        p for n, p in model.encoder.gaussian_param_head.named_parameters()
+        if p.requires_grad and "scratch.output_conv2" in n
+    ]
+    print(f"Optimizer param groups: temporal_attention={len(temporal_attn_params)} tensors, "
+          f"output_conv2={len(output_conv2_params)} tensors")
+    if len(temporal_attn_params) == 0:
+        raise RuntimeError("temporal_attn_params is empty — check param name filter 'temporal_attention'")
+    if len(output_conv2_params) == 0:
+        raise RuntimeError("output_conv2_params is empty — check param name filter 'scratch.output_conv2'")
+
     optimizer = AdamW(
         [
-            {"params": gs_head_params, "lr": config.learning_rate * 0.1},
-            {"params": adapter_params, "lr": config.learning_rate},
+            {"params": temporal_attn_params, "lr": config.learning_rate * 0.1},
+            {"params": output_conv2_params,  "lr": config.learning_rate * 0.01},
         ],
         weight_decay=config.weight_decay,
     )
