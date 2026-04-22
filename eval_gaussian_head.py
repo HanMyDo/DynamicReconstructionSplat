@@ -206,7 +206,7 @@ def evaluate(model, dataloader, config, output_dir, device):
             Path(ply_path),
             save_sh_dc_only=True,
             dyn_mask_flat=dyn_mask_flat,
-            dyn_opacity_scale=0.05,
+            dyn_opacity_scale=0.5,  # dim dynamic Gaussians to 50% rather than near-invisible
         )
 
     # --- Metrics summary ---
