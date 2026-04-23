@@ -421,11 +421,20 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
         if self.cfg.dynamic_mask_threshold is not None:
             threshold = self.cfg.dynamic_mask_threshold
         else:
-            # Use adaptive multi-Otsu thresholding
+            # Use adaptive multi-Otsu thresholding, then raise the threshold if needed
+            # so that at most 30% of patches are flagged as dynamic.
+            # This prevents high-motion sequences (where Otsu finds a low split)
+            # from flagging the entire scene, while still being sensitive in low-motion scenes.
             threshold = adaptive_multiotsu_variance(clustered_map.numpy())
+            max_dynamic_fraction = 0.30
+            fraction_flagged = (clustered_map > threshold).float().mean().item()
+            if fraction_flagged > max_dynamic_fraction:
+                threshold = float(clustered_map.flatten().quantile(1.0 - max_dynamic_fraction))
+                print(f"[DynMask] Otsu flagged {fraction_flagged*100:.1f}% → capped at {max_dynamic_fraction*100:.0f}%, threshold raised to {threshold:.3f}")
 
         # Create binary mask at patch resolution
         dyn_mask_patch = (clustered_map > threshold).float()  # [V, h, w]
+        print(f"[DynMask] threshold={threshold:.3f}, dynamic patches={dyn_mask_patch.mean()*100:.1f}%")
 
         # Upsample to full resolution
         dyn_mask_full = F.interpolate(
