@@ -8,7 +8,7 @@
 #SBATCH --mem=30G
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
-#SBATCH --exclude=essen,koblenz
+#SBATCH --nodelist=bonn,heidelberg,muenchen,stuttgart
 #SBATCH --time=08:00:00
 
 export ENROOT_RUNTIME_PATH=/tmp/$USER/runtime
@@ -20,14 +20,14 @@ mkdir -p $ENROOT_RUNTIME_PATH $ENROOT_CACHE_PATH $ENROOT_DATA_PATH
 mkdir -p slurm_logs
 
 echo "=============================================="
-echo "Cross-Sequence Eval on held-out: rgbd_bonn_kidnapping_box"
+echo "Cross-Sequence Eval on held-out: rgbd_bonn_balloon2"
 echo "=============================================="
 echo "Job started on node: $(hostname)"
 echo "Time: $(date)"
 echo ""
 
 # Held-out sequence — never seen during any training
-HELD_OUT="rgbd_bonn_kidnapping_box"
+HELD_OUT="rgbd_bonn_balloon2"
 
 echo "Extracting ${HELD_OUT} to /tmp/bonn_data/ ..."
 mkdir -p /tmp/bonn_data
@@ -54,47 +54,8 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp eval_crossseq bash 
   nvidia-smi
   echo ''
 
-  # Smoke test: only run [4] with smoketest2 checkpoint to verify eval pipeline.
-  # Restore all 4 runs for the real experiment later.
-
-  # echo '=============================================='
-  # echo '[1/4] VGGT original baseline...'
-  # echo '=============================================='
-  # python eval_gaussian_head.py \
-  #   --data_dir /tmp/bonn_data/rgbd_bonn_dataset \
-  #   --dataset_name ${HELD_OUT} \
-  #   --intrinsics bonn \
-  #   --num_frames 12 \
-  #   --split val \
-  #   --no_vggt4d \
-  #   --output_dir output_crossseq_vggt_baseline
-
-  # echo '=============================================='
-  # echo '[2/4] VGGT4D baseline (no fine-tuning)...'
-  # echo '=============================================='
-  # python eval_gaussian_head.py \
-  #   --data_dir /tmp/bonn_data/rgbd_bonn_dataset \
-  #   --dataset_name ${HELD_OUT} \
-  #   --intrinsics bonn \
-  #   --num_frames 12 \
-  #   --split val \
-  #   --output_dir output_crossseq_vggt4d_baseline
-
-  # echo '=============================================='
-  # echo '[3/4] Single-sequence fine-tuned (crowd3 only)...'
-  # echo '=============================================='
-  # python eval_gaussian_head.py \
-  #   --data_dir /tmp/bonn_data/rgbd_bonn_dataset \
-  #   --dataset_name ${HELD_OUT} \
-  #   --intrinsics bonn \
-  #   --num_frames 12 \
-  #   --split val \
-  #   --checkpoint output_finetune_initial/checkpoint_best.pt \
-  #   --use_temporal_attention \
-  #   --output_dir output_crossseq_finetuned_singleseq
-
   echo '=============================================='
-  echo '[4/4] Smoke test: smoketest2 checkpoint...'
+  echo '[1/4] VGGT original baseline...'
   echo '=============================================='
   python eval_gaussian_head.py \
     --data_dir /tmp/bonn_data/rgbd_bonn_dataset \
@@ -102,9 +63,45 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp eval_crossseq bash 
     --intrinsics bonn \
     --num_frames 12 \
     --split all \
-    --checkpoint output_finetune_smoketest2/checkpoint_best.pt \
+    --no_vggt4d \
+    --output_dir output_crossseq_vggt_baseline
+
+  echo '=============================================='
+  echo '[2/4] VGGT4D baseline (no fine-tuning)...'
+  echo '=============================================='
+  python eval_gaussian_head.py \
+    --data_dir /tmp/bonn_data/rgbd_bonn_dataset \
+    --dataset_name ${HELD_OUT} \
+    --intrinsics bonn \
+    --num_frames 12 \
+    --split all \
+    --output_dir output_crossseq_vggt4d_baseline
+
+  echo '=============================================='
+  echo '[3/4] Single-sequence fine-tuned (crowd3 only)...'
+  echo '=============================================='
+  python eval_gaussian_head.py \
+    --data_dir /tmp/bonn_data/rgbd_bonn_dataset \
+    --dataset_name ${HELD_OUT} \
+    --intrinsics bonn \
+    --num_frames 12 \
+    --split all \
+    --checkpoint output_finetune_initial/checkpoint_best.pt \
     --use_temporal_attention \
-    --output_dir output_crossseq_smoketest2
+    --output_dir output_crossseq_finetuned_singleseq
+
+  echo '=============================================='
+  echo '[4/4] Multi-sequence fine-tuned (4 seqs)...'
+  echo '=============================================='
+  python eval_gaussian_head.py \
+    --data_dir /tmp/bonn_data/rgbd_bonn_dataset \
+    --dataset_name ${HELD_OUT} \
+    --intrinsics bonn \
+    --num_frames 12 \
+    --split all \
+    --checkpoint output_finetune_multiseq/checkpoint_best.pt \
+    --use_temporal_attention \
+    --output_dir output_crossseq_finetuned_multiseq
 "
 
 enroot remove -f eval_crossseq
@@ -115,6 +112,6 @@ echo "Cross-sequence results on ${HELD_OUT}:"
 echo "  [1] VGGT original:          output_crossseq_vggt_baseline/metrics.json"
 echo "  [2] VGGT4D baseline:        output_crossseq_vggt4d_baseline/metrics.json"
 echo "  [3] Fine-tuned (1 seq):     output_crossseq_finetuned_singleseq/metrics.json"
-echo "  [4] Fine-tuned (5 seqs):    output_crossseq_finetuned_multiseq/metrics.json"
+echo "  [4] Fine-tuned (4 seqs):    output_crossseq_finetuned_multiseq/metrics.json"
 echo "=============================================="
 echo "Job finished at: $(date)"

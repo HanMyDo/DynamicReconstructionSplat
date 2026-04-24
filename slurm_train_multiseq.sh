@@ -8,7 +8,7 @@
 #SBATCH --mem=60G
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
-#SBATCH --exclude=essen,koblenz
+#SBATCH --nodelist=bonn,heidelberg,muenchen,stuttgart
 #SBATCH --time=23:00:00
 
 export ENROOT_RUNTIME_PATH=/tmp/$USER/runtime
