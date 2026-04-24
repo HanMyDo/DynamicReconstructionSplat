@@ -4,7 +4,6 @@
 #SBATCH --qos=students_normal
 #SBATCH --output=slurm_logs/eval_crossseq_%j.out
 #SBATCH --error=slurm_logs/eval_crossseq_%j.err
-#SBATCH --mem=30G
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 #SBATCH --nodelist=bonn,heidelberg,muenchen,stuttgart
