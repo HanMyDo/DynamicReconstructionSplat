@@ -59,7 +59,7 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp eval_crossseq bash 
     --data_dir /tmp/bonn_data/rgbd_bonn_dataset \
     --dataset_name ${HELD_OUT} \
     --intrinsics bonn \
-    --num_frames 12 \
+    --num_frames 24 \
     --split all \
     --no_vggt4d \
     --output_dir output_crossseq_vggt_baseline
@@ -71,7 +71,7 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp eval_crossseq bash 
     --data_dir /tmp/bonn_data/rgbd_bonn_dataset \
     --dataset_name ${HELD_OUT} \
     --intrinsics bonn \
-    --num_frames 12 \
+    --num_frames 24 \
     --split all \
     --output_dir output_crossseq_vggt4d_baseline
 
@@ -82,7 +82,7 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp eval_crossseq bash 
     --data_dir /tmp/bonn_data/rgbd_bonn_dataset \
     --dataset_name ${HELD_OUT} \
     --intrinsics bonn \
-    --num_frames 12 \
+    --num_frames 24 \
     --split all \
     --checkpoint output_finetune_initial/checkpoint_best.pt \
     --use_temporal_attention \
@@ -95,7 +95,7 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp eval_crossseq bash 
     --data_dir /tmp/bonn_data/rgbd_bonn_dataset \
     --dataset_name ${HELD_OUT} \
     --intrinsics bonn \
-    --num_frames 12 \
+    --num_frames 24 \
     --split all \
     --checkpoint output_finetune_multiseq/checkpoint_best.pt \
     --use_temporal_attention \
