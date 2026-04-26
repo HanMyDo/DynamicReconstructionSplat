@@ -4,12 +4,10 @@
 #SBATCH --qos=students_normal
 #SBATCH --output=slurm_logs/train_multiseq_%j.out
 #SBATCH --error=slurm_logs/train_multiseq_%j.err
-#SBATCH --cpus-per-task=4
-#SBATCH --mem=60G
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 #SBATCH --nodelist=bonn,heidelberg,muenchen,stuttgart
-#SBATCH --time=23:00:00
+#SBATCH --time=48:00:00
 
 export ENROOT_RUNTIME_PATH=/tmp/$USER/runtime
 export ENROOT_CACHE_PATH=/tmp/$USER/cache
@@ -26,8 +24,9 @@ echo "Job started on node: $(hostname)"
 echo "Time: $(date)"
 echo ""
 
-# Training sequences (held-out for eval: rgbd_bonn_kidnapping_box)
-TRAIN_SEQUENCES="rgbd_bonn_crowd3 rgbd_bonn_balloon rgbd_bonn_synchronous rgbd_bonn_person_tracking"
+# 8 training sequences — held-out for eval: rgbd_bonn_balloon2
+# Covers: crowds, people, balloons, synchronous objects, box kidnapping
+TRAIN_SEQUENCES="rgbd_bonn_crowd3 rgbd_bonn_crowd2 rgbd_bonn_balloon rgbd_bonn_balloon_tracking rgbd_bonn_synchronous rgbd_bonn_synchronous2 rgbd_bonn_person_tracking rgbd_bonn_kidnapping_box"
 
 echo "Extracting training sequences to /tmp/bonn_data/ ..."
 mkdir -p /tmp/bonn_data
@@ -58,9 +57,9 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp train_multiseq bash
 
   python train_temporal_gaussian_head.py \
     --data_dir /tmp/bonn_data/rgbd_bonn_dataset \
-    --dataset_names rgbd_bonn_crowd3,rgbd_bonn_balloon,rgbd_bonn_synchronous,rgbd_bonn_person_tracking \
+    --dataset_names rgbd_bonn_crowd3,rgbd_bonn_crowd2,rgbd_bonn_balloon,rgbd_bonn_balloon_tracking,rgbd_bonn_synchronous,rgbd_bonn_synchronous2,rgbd_bonn_person_tracking,rgbd_bonn_kidnapping_box \
     --output_dir output_finetune_multiseq_16f \
-    --num_epochs 5 \
+    --num_epochs 10 \
     --batch_size 1 \
     --learning_rate 1e-4 \
     --num_frames 16 \
