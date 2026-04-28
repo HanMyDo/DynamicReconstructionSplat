@@ -6,7 +6,7 @@
 #SBATCH --error=slurm_logs/train_multiseq_%j.err
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
-#SBATCH --nodelist=bonn,heidelberg,muenchen,stuttgart,koblenz
+#SBATCH --nodelist=heidelberg,muenchen,koblenz
 #SBATCH --time=23:59:00
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=Han-My.Do@tum.de
