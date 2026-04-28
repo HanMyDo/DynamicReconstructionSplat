@@ -574,9 +574,6 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
                             image.to(torch.bfloat16),
                             dyn_masks=None,
                         )
-                self.qk_dict = qk_dict
-                self.enc_feat = enc_feat
-
                 # Compute coarse dynamic mask from Pass 1 attention patterns
                 print("Computing dynamic mask from attention patterns...")
                 dyn_mask, dyn_map = self.compute_attention_dynamic_mask(
@@ -585,7 +582,9 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
                 self.dyn_mask = dyn_mask
                 self.dyn_map = dyn_map
 
-                # Free Pass 1 Q/K before Pass 2 — peak memory stays the same as a single pass
+                # Free all Pass 1 tensors immediately — do NOT store as instance variables.
+                # Q/K are ~8GB on CPU; keeping them alive across batches causes double-allocation
+                # at the start of each new Pass 1, exceeding the SLURM 30GB RAM limit.
                 del qk_dict, enc_feat
                 torch.cuda.empty_cache()
 
