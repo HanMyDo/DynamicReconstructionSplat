@@ -6,8 +6,10 @@
 #SBATCH --error=slurm_logs/eval_crossseq_%j.err
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
-#SBATCH --nodelist=bonn,heidelberg,muenchen,stuttgart
+#SBATCH --nodelist=bonn,heidelberg,muenchen,stuttgart,koblenz
 #SBATCH --time=08:00:00
+#SBATCH --mail-type=END,FAIL
+#SBATCH --mail-user=Han-My.Do@tum.de
 
 export ENROOT_RUNTIME_PATH=/tmp/$USER/runtime
 export ENROOT_CACHE_PATH=/tmp/$USER/cache
