@@ -561,31 +561,48 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
                 del distill_depth_map, distill_depth_conf
                 torch.cuda.empty_cache()
 
-        with torch.amp.autocast("cuda", enabled=True, dtype=torch.bfloat16):
-            if self.use_vggt4d:
-                aggregated_tokens_list, patch_start_idx, qk_dict, enc_feat = self.aggregator(
-                    image.to(torch.bfloat16),
-                    dyn_masks=None,
-                )
+        dyn_mask = None
+        dyn_map = None
+
+        if self.use_vggt4d:
+            if self.cfg.enable_dynamic_detection:
+                # Pass 1 (no grad): run backbone without masks to get Q/K for dynamic detection.
+                # Gradients not needed here — mask computation is non-differentiable anyway.
+                with torch.no_grad():
+                    with torch.amp.autocast("cuda", enabled=True, dtype=torch.bfloat16):
+                        _, _, qk_dict, enc_feat = self.aggregator(
+                            image.to(torch.bfloat16),
+                            dyn_masks=None,
+                        )
                 self.qk_dict = qk_dict
                 self.enc_feat = enc_feat
-            else:
-                # Original VGGT returns 2 values
+
+                # Compute coarse dynamic mask from Pass 1 attention patterns
+                print("Computing dynamic mask from attention patterns...")
+                dyn_mask, dyn_map = self.compute_attention_dynamic_mask(
+                    image, qk_dict, enc_feat
+                )
+                self.dyn_mask = dyn_mask
+                self.dyn_map = dyn_map
+
+                # Free Pass 1 Q/K before Pass 2 — peak memory stays the same as a single pass
+                del qk_dict, enc_feat
+                torch.cuda.empty_cache()
+
+            # Pass 2: run backbone with dynamic masks so shallow attention layers
+            # suppress dynamic tokens → cleaner pose/depth/Gaussian features
+            with torch.amp.autocast("cuda", enabled=True, dtype=torch.bfloat16):
+                aggregated_tokens_list, patch_start_idx, _, _ = self.aggregator(
+                    image.to(torch.bfloat16),
+                    dyn_masks=dyn_mask.to(image.device) if dyn_mask is not None else None,
+                )
+        else:
+            # Original VGGT: single pass, no dynamic detection
+            with torch.amp.autocast("cuda", enabled=True, dtype=torch.bfloat16):
                 aggregated_tokens_list, patch_start_idx = self.aggregator(
                     image.to(torch.bfloat16),
                     intermediate_layer_idx=self.cfg.intermediate_layer_idx,
                 )
-
-        # Compute dynamic mask if enabled and using VGGT4D
-        dyn_mask = None
-        dyn_map = None
-        if self.use_vggt4d and self.cfg.enable_dynamic_detection:
-            print("Computing dynamic mask from attention patterns...")
-            dyn_mask, dyn_map = self.compute_attention_dynamic_mask(
-                image, self.qk_dict, self.enc_feat
-            )
-            self.dyn_mask = dyn_mask  # Store for visualization/debugging
-            self.dyn_map = dyn_map
 
         with torch.amp.autocast("cuda", enabled=False):
             pred_pose_enc_list = self.camera_head(aggregated_tokens_list)
