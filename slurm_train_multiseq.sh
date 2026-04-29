@@ -26,9 +26,9 @@ echo "Job started on node: $(hostname)"
 echo "Time: $(date)"
 echo ""
 
-# 8 training sequences — held-out for eval: rgbd_bonn_balloon2
-# Covers: crowds, people, balloons, synchronous objects, box kidnapping
-TRAIN_SEQUENCES="rgbd_bonn_crowd3 rgbd_bonn_crowd2 rgbd_bonn_balloon rgbd_bonn_balloon_tracking rgbd_bonn_synchronous rgbd_bonn_synchronous2 rgbd_bonn_person_tracking rgbd_bonn_kidnapping_box"
+# 4 training sequences — held-out for eval: rgbd_bonn_balloon2
+# Covers: crowds, balloon, synchronous objects
+TRAIN_SEQUENCES="rgbd_bonn_crowd3 rgbd_bonn_crowd2 rgbd_bonn_balloon rgbd_bonn_synchronous"
 
 echo "Extracting training sequences to /tmp/bonn_data/ ..."
 mkdir -p /tmp/bonn_data
@@ -57,11 +57,15 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp train_multiseq bash
   nvidia-smi
   echo ''
 
+  echo 'Installing open3d for Stage 3 dynamic mask refinement...'
+  pip install open3d --quiet
+  echo ''
+
   python train_temporal_gaussian_head.py \
     --data_dir /tmp/bonn_data/rgbd_bonn_dataset \
-    --dataset_names rgbd_bonn_crowd3,rgbd_bonn_crowd2,rgbd_bonn_balloon,rgbd_bonn_balloon_tracking,rgbd_bonn_synchronous,rgbd_bonn_synchronous2,rgbd_bonn_person_tracking,rgbd_bonn_kidnapping_box \
+    --dataset_names rgbd_bonn_crowd3,rgbd_bonn_crowd2,rgbd_bonn_balloon,rgbd_bonn_synchronous \
     --output_dir output_finetune_multiseq_12f \
-    --num_epochs 10 \
+    --num_epochs 3 \
     --batch_size 1 \
     --learning_rate 1e-4 \
     --num_frames 12 \

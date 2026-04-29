@@ -54,6 +54,7 @@ from src.model.encoder.vggt4d.masks import (
     extract_dyn_map,
     cluster_attention_maps,
     adaptive_multiotsu_variance,
+    RefineDynMask,
 )
 
 inf = float("inf")
@@ -432,22 +433,65 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
                 threshold = float(clustered_map.flatten().quantile(1.0 - max_dynamic_fraction))
                 print(f"[DynMask] Otsu flagged {fraction_flagged*100:.1f}% → capped at {max_dynamic_fraction*100:.0f}%, threshold raised to {threshold:.3f}")
 
-        # Create binary mask at patch resolution
-        dyn_mask_patch = (clustered_map > threshold).float()  # [V, h, w]
-        print(f"[DynMask] threshold={threshold:.3f}, dynamic patches={dyn_mask_patch.mean()*100:.1f}%")
-
-        # Upsample to full resolution
-        dyn_mask_full = F.interpolate(
-            dyn_mask_patch.unsqueeze(1),  # [V, 1, h, w]
+        # Upsample continuous score to full resolution (bilinear for smooth boundaries),
+        # then threshold — avoids blocky 14×14 artifacts from nearest-neighbour upsample
+        dyn_score_full = F.interpolate(
+            clustered_map.unsqueeze(1),  # [V, 1, h, w]
             size=(h, w),
-            mode='nearest'
+            mode='bilinear',
+            align_corners=False,
         ).squeeze(1)  # [V, H, W]
+
+        dyn_mask_full = (dyn_score_full > threshold).float()
+        print(f"[DynMask] threshold={threshold:.3f}, dynamic pixels={dyn_mask_full.mean()*100:.1f}%")
 
         # Reshape back to batch format
         dyn_mask = dyn_mask_full.view(b, v, h, w)
         dyn_map = clustered_map.view(b, v, patch_h, patch_w)
 
         return dyn_mask, dyn_map
+
+    @torch.no_grad()
+    def refine_dynamic_mask(
+        self,
+        images: torch.Tensor,
+        depth_map: torch.Tensor,
+        extrinsic: torch.Tensor,
+        intrinsic: torch.Tensor,
+        coarse_dyn_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """Refine coarse attention-based mask using 3D geometry (Stage 3).
+
+        Args:
+            images: [B, V, C, H, W]
+            depth_map: [B, V, H, W]
+            extrinsic: world2cam [B, V, 4, 4]
+            intrinsic: [B, V, 3, 3]
+            coarse_dyn_mask: float mask [B, V, H, W]
+
+        Returns:
+            Refined float mask [B, V, H, W]
+        """
+        if RefineDynMask is None:
+            print("[DynMask] open3d not available — skipping Stage 3 refinement")
+            return coarse_dyn_mask
+        try:
+            b, v, c, h, w = images.shape
+            images_flat = images.view(b * v, c, h, w).float().cpu()
+            depths_flat = depth_map.view(b * v, h, w).cpu()
+            coarse_masks_flat = coarse_dyn_mask.view(b * v, h, w).bool().cpu()
+            cam2world_flat = torch.inverse(extrinsic.view(b * v, 4, 4)).cpu()
+            intrinsics_flat = intrinsic.view(b * v, 3, 3).cpu()
+
+            refiner = RefineDynMask(
+                images_flat, depths_flat, coarse_masks_flat,
+                cam2world_flat, intrinsics_flat, device=torch.device("cpu"),
+            )
+            refined = refiner.refine_masks()  # [B*V, H, W] bool, on cpu
+            return refined.float().view(b, v, h, w)
+        except Exception as e:
+            print(f"[DynMask] Stage 3 failed ({e}) — falling back to coarse mask")
+            return coarse_dyn_mask
 
     def apply_dynamic_mask_to_gaussians(
         self,
@@ -565,16 +609,17 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
         dyn_map = None
 
         if self.use_vggt4d:
+            # Single pass: frozen backbone, extract Q/K and aggregated tokens together.
+            # No need for a separate no-grad pass — everything here is no_grad since
+            # the backbone is frozen during fine-tuning.
+            with torch.no_grad():
+                with torch.amp.autocast("cuda", enabled=True, dtype=torch.bfloat16):
+                    aggregated_tokens_list, patch_start_idx, qk_dict, enc_feat = self.aggregator(
+                        image.to(torch.bfloat16),
+                        dyn_masks=None,
+                    )
+
             if self.cfg.enable_dynamic_detection:
-                # Pass 1 (no grad): run backbone without masks to get Q/K for dynamic detection.
-                # Gradients not needed here — mask computation is non-differentiable anyway.
-                with torch.no_grad():
-                    with torch.amp.autocast("cuda", enabled=True, dtype=torch.bfloat16):
-                        _, _, qk_dict, enc_feat = self.aggregator(
-                            image.to(torch.bfloat16),
-                            dyn_masks=None,
-                        )
-                # Compute coarse dynamic mask from Pass 1 attention patterns
                 print("Computing dynamic mask from attention patterns...")
                 dyn_mask, dyn_map = self.compute_attention_dynamic_mask(
                     image, qk_dict, enc_feat
@@ -582,19 +627,8 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
                 self.dyn_mask = dyn_mask
                 self.dyn_map = dyn_map
 
-                # Free all Pass 1 tensors immediately — do NOT store as instance variables.
-                # Q/K are ~8GB on CPU; keeping them alive across batches causes double-allocation
-                # at the start of each new Pass 1, exceeding the SLURM 30GB RAM limit.
-                del qk_dict, enc_feat
-                torch.cuda.empty_cache()
-
-            # Pass 2: run backbone with dynamic masks so shallow attention layers
-            # suppress dynamic tokens → cleaner pose/depth/Gaussian features
-            with torch.amp.autocast("cuda", enabled=True, dtype=torch.bfloat16):
-                aggregated_tokens_list, patch_start_idx, _, _ = self.aggregator(
-                    image.to(torch.bfloat16),
-                    dyn_masks=dyn_mask.to(image.device) if dyn_mask is not None else None,
-                )
+            del qk_dict, enc_feat
+            torch.cuda.empty_cache()
         else:
             # Original VGGT: single pass, no dynamic detection
             with torch.amp.autocast("cuda", enabled=True, dtype=torch.bfloat16):
@@ -625,6 +659,13 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
                 pts_all = batchify_unproject_depth_map_to_point_map(
                     depth_map, extrinsic, intrinsic
                 )
+                # Stage 3: geometric refinement of coarse dynamic mask
+                if dyn_mask is not None and self.cfg.enable_dynamic_detection:
+                    print("Refining dynamic mask with Stage 3 (geometric)...")
+                    dyn_mask = self.refine_dynamic_mask(
+                        image, depth_map, extrinsic, intrinsic, dyn_mask
+                    )
+                    self.dyn_mask = dyn_mask
             else:
                 raise ValueError(f"Invalid pred_head_type: {self.cfg.pred_head_type}")
 

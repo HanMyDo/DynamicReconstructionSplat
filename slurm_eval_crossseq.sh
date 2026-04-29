@@ -54,6 +54,10 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp eval_crossseq bash 
   nvidia-smi
   echo ''
 
+  echo 'Installing open3d for Stage 3 dynamic mask refinement...'
+  pip install open3d --quiet
+  echo ''
+
   echo '=============================================='
   echo '[1/4] VGGT original baseline...'
   echo '=============================================='
