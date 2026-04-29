@@ -480,7 +480,15 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
             images_flat = images.view(b * v, c, h, w).float().cpu()
             depths_flat = depth_map.view(b * v, h, w).cpu()
             coarse_masks_flat = coarse_dyn_mask.view(b * v, h, w).bool().cpu()
-            cam2world_flat = torch.inverse(extrinsic.view(b * v, 4, 4)).cpu()
+
+            # extrinsic may be [B, V, 3, 4] — pad to [B*V, 4, 4] before inverting
+            ext_flat = extrinsic.view(b * v, extrinsic.shape[-2], 4)
+            if ext_flat.shape[1] == 3:
+                bottom = torch.zeros(b * v, 1, 4, dtype=ext_flat.dtype, device=ext_flat.device)
+                bottom[:, 0, 3] = 1.0
+                ext_flat = torch.cat([ext_flat, bottom], dim=1)
+            cam2world_flat = torch.inverse(ext_flat).cpu()
+
             intrinsics_flat = intrinsic.view(b * v, 3, 3).cpu()
 
             refiner = RefineDynMask(
