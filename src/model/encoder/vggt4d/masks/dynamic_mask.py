@@ -200,9 +200,9 @@ def extract_dyn_map(qk_dict: dict, images: torch.Tensor) -> torch.Tensor:
     dyn_maps = []
     n_img = images.shape[0]
     print(f"Extracting dynamic maps for {n_img} images")
-    global_q = qk_dict["global_tok_q"]
-    global_k = qk_dict["global_tok_k"]
-    global_cam_q = qk_dict["global_cam_q"]
+    global_q = qk_dict["global_tok_q"].to("cuda")
+    global_k = qk_dict["global_tok_k"].to("cuda")
+    global_cam_q = qk_dict["global_cam_q"].to("cuda")
     for ref_id in tqdm(range(n_img)):
         mean1_map = extract_mean1_map(ref_id, global_q, global_k, images)
         mean2_map = extract_mean2_map(ref_id, global_q, global_k, images)
