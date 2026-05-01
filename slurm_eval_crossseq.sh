@@ -7,7 +7,6 @@
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 #SBATCH --nodelist=bonn,heidelberg,muenchen,stuttgart,koblenz
-#SBATCH --time=08:00:00
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=Han-My.Do@tum.de
 
@@ -65,7 +64,7 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp eval_crossseq bash 
     --data_dir /tmp/bonn_data/rgbd_bonn_dataset \
     --dataset_name ${HELD_OUT} \
     --intrinsics bonn \
-    --num_frames 16 \
+    --num_frames 12 \
     --split all \
     --no_vggt4d \
     --output_dir output_crossseq_vggt_baseline
@@ -77,7 +76,7 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp eval_crossseq bash 
     --data_dir /tmp/bonn_data/rgbd_bonn_dataset \
     --dataset_name ${HELD_OUT} \
     --intrinsics bonn \
-    --num_frames 16 \
+    --num_frames 12 \
     --split all \
     --output_dir output_crossseq_vggt4d_baseline
 
@@ -88,7 +87,7 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp eval_crossseq bash 
     --data_dir /tmp/bonn_data/rgbd_bonn_dataset \
     --dataset_name ${HELD_OUT} \
     --intrinsics bonn \
-    --num_frames 16 \
+    --num_frames 12 \
     --split all \
     --checkpoint output_finetune_initial/checkpoint_best.pt \
     --use_temporal_attention \
@@ -101,7 +100,7 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp eval_crossseq bash 
     --data_dir /tmp/bonn_data/rgbd_bonn_dataset \
     --dataset_name ${HELD_OUT} \
     --intrinsics bonn \
-    --num_frames 16 \
+    --num_frames 12 \
     --split all \
     --checkpoint output_finetune_multiseq_12f/checkpoint_latest.pt \
     --use_temporal_attention \
