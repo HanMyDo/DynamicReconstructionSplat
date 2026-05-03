@@ -128,7 +128,7 @@ class EncoderAnySplatCfg:
     enable_dynamic_detection: bool = False
     dynamic_mask_threshold: Optional[float] = None  # None = use adaptive threshold
     dynamic_n_clusters: int = 64  # Number of clusters for KMeans refinement
-    suppress_dynamic_gaussians: bool = True  # If True, reduce opacity of dynamic regions
+    suppress_dynamic_gaussians: bool = False
     # Temporal attention options for Gaussian head (Fix 2 for dynamic handling)
     use_temporal_attention: bool = False
     temporal_num_heads: int = 4
