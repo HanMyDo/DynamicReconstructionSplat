@@ -102,7 +102,7 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp eval_crossseq bash 
     --intrinsics bonn \
     --num_frames 12 \
     --split all \
-    --checkpoint output_finetune_multiseq_12f/checkpoint_latest.pt \
+    --checkpoint output_finetune_multiseq_frozen_conv2/checkpoint_latest.pt \
     --use_temporal_attention \
     --output_dir output_crossseq_finetuned_multiseq
 "

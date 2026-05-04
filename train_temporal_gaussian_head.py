@@ -505,13 +505,14 @@ def freeze_backbone(model: AnySplat):
         for param in model.encoder.point_head.parameters():
             param.requires_grad = False
 
-    # Trainable: temporal_attention (main contribution) + scratch.output_conv2 (final output conv).
-    # output_conv2 must also be trainable because temporal_attention shifts the intermediate feature
-    # distribution — the frozen output conv then maps those features to uniform (grey) SH.
-    # output_conv2 gets a very low LR (0.01x) to adapt without diverging.
+    # Trainable: temporal_attention only.
+    # output_conv2 is frozen to protect pretrained rendering quality — empirically,
+    # training it even at 0.01x LR caused 4 dB degradation over 5 epochs.
+    # temporal_attention.output_scale starts near 0 so the feature distribution
+    # seen by frozen output_conv2 shifts only gradually during training.
     trainable_names = []
     for name, param in model.encoder.gaussian_param_head.named_parameters():
-        if name.startswith("temporal_attention") or name.startswith("scratch.output_conv2"):
+        if name.startswith("temporal_attention"):
             param.requires_grad = True
             trainable_names.append(f"gaussian_param_head.{name}")
         else:
@@ -1074,30 +1075,17 @@ def main():
     print("\nFreezing backbone...")
     model = freeze_backbone(model)
 
-    # Three LR groups:
-    #   temporal_attention: full LR * 0.1  (new module, learns temporal consistency)
-    #   output_conv2:       full LR * 0.01 (adapts to shifted feature distribution, must stay slow)
-    #   adapter:            frozen, no params
     temporal_attn_params = [
         p for n, p in model.encoder.gaussian_param_head.named_parameters()
         if p.requires_grad and "temporal_attention" in n
     ]
-    output_conv2_params = [
-        p for n, p in model.encoder.gaussian_param_head.named_parameters()
-        if p.requires_grad and "scratch.output_conv2" in n
-    ]
-    print(f"Optimizer param groups: temporal_attention={len(temporal_attn_params)} tensors, "
-          f"output_conv2={len(output_conv2_params)} tensors")
+    print(f"Optimizer param groups: temporal_attention={len(temporal_attn_params)} tensors")
     if len(temporal_attn_params) == 0:
         raise RuntimeError("temporal_attn_params is empty — check param name filter 'temporal_attention'")
-    if len(output_conv2_params) == 0:
-        raise RuntimeError("output_conv2_params is empty — check param name filter 'scratch.output_conv2'")
 
     optimizer = AdamW(
-        [
-            {"params": temporal_attn_params, "lr": config.learning_rate * 0.1},
-            {"params": output_conv2_params,  "lr": config.learning_rate * 0.01},
-        ],
+        temporal_attn_params,
+        lr=config.learning_rate,
         weight_decay=config.weight_decay,
     )
 

@@ -63,7 +63,7 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp train_multiseq bash
   python train_temporal_gaussian_head.py \
     --data_dir /tmp/bonn_data/rgbd_bonn_dataset \
     --dataset_names rgbd_bonn_crowd3,rgbd_bonn_crowd2,rgbd_bonn_balloon,rgbd_bonn_synchronous \
-    --output_dir output_finetune_multiseq_12f \
+    --output_dir output_finetune_multiseq_frozen_conv2 \
     --num_epochs 3 \
     --batch_size 1 \
     --learning_rate 1e-4 \
