@@ -59,6 +59,9 @@ from src.model.encoder.vggt4d.masks import (
 
 inf = float("inf")
 
+# bfloat16 requires CUDA compute capability >= 8.0 (Ampere+); fall back to float16
+_AMP_DTYPE = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float16
+
 
 @dataclass
 class OpacityMappingCfg:
@@ -173,7 +176,7 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
         else:
             model_full = VGGT.from_pretrained("facebook/VGGT-1B")
 
-        self.aggregator = model_full.aggregator.to(torch.bfloat16)
+        self.aggregator = model_full.aggregator.to(_AMP_DTYPE)
         self.freeze_backbone = cfg.freeze_backbone
         self.distill = cfg.distill
         self.pred_pose = cfg.pred_pose
@@ -558,10 +561,10 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
 
             with torch.no_grad():
                 # Process with bfloat16 precision
-                with torch.amp.autocast("cuda", enabled=True, dtype=torch.bfloat16):
+                with torch.amp.autocast("cuda", enabled=True, dtype=_AMP_DTYPE,):
                     distill_aggregated_tokens_list, distill_patch_start_idx = (
                         self.distill_aggregator(
-                            distill_image.to(torch.bfloat16),
+                            distill_image.to(_AMP_DTYPE),
                             intermediate_layer_idx=self.cfg.intermediate_layer_idx,
                         )
                     )
@@ -621,9 +624,9 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
             # No need for a separate no-grad pass — everything here is no_grad since
             # the backbone is frozen during fine-tuning.
             with torch.no_grad():
-                with torch.amp.autocast("cuda", enabled=True, dtype=torch.bfloat16):
+                with torch.amp.autocast("cuda", enabled=True, dtype=_AMP_DTYPE,):
                     aggregated_tokens_list, patch_start_idx, qk_dict, enc_feat = self.aggregator(
-                        image.to(torch.bfloat16),
+                        image.to(_AMP_DTYPE),
                         dyn_masks=None,
                     )
 
@@ -639,9 +642,9 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
             torch.cuda.empty_cache()
         else:
             # Original VGGT: single pass, no dynamic detection
-            with torch.amp.autocast("cuda", enabled=True, dtype=torch.bfloat16):
+            with torch.amp.autocast("cuda", enabled=True, dtype=_AMP_DTYPE,):
                 aggregated_tokens_list, patch_start_idx = self.aggregator(
-                    image.to(torch.bfloat16),
+                    image.to(_AMP_DTYPE),
                     intermediate_layer_idx=self.cfg.intermediate_layer_idx,
                 )
 
