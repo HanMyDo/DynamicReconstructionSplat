@@ -232,6 +232,7 @@ class TrainingConfig:
     # Model
     use_vggt4d: bool = True
     enable_dynamic_detection: bool = True
+    vggt4d_weights_path: str = None
     use_temporal_attention: bool = True
     temporal_num_heads: int = 4
     temporal_spatial_downsample: int = 4
