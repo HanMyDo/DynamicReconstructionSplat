@@ -620,12 +620,10 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
         dyn_map = None
 
         if self.use_vggt4d:
-            # Single pass: frozen backbone, extract Q/K and aggregated tokens together.
-            # No need for a separate no-grad pass — everything here is no_grad since
-            # the backbone is frozen during fine-tuning.
+            # Pass 1: extract Q/K for dynamic mask computation
             with torch.no_grad():
                 with torch.amp.autocast("cuda", enabled=True, dtype=_AMP_DTYPE,):
-                    aggregated_tokens_list, patch_start_idx, qk_dict, enc_feat = self.aggregator(
+                    _, _, qk_dict, enc_feat = self.aggregator(
                         image.to(_AMP_DTYPE),
                         dyn_masks=None,
                     )
@@ -639,6 +637,17 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
                 self.dyn_map = dyn_map
 
             del qk_dict, enc_feat
+            torch.cuda.empty_cache()
+
+            # Pass 2: backbone with token suppression in layers 0–4 using dynamic mask.
+            # This is the core VGGT4D mechanism — dynamic tokens are masked out so the
+            # backbone builds cleaner spatial features for static regions.
+            with torch.no_grad():
+                with torch.amp.autocast("cuda", enabled=True, dtype=_AMP_DTYPE,):
+                    aggregated_tokens_list, patch_start_idx, _, _ = self.aggregator(
+                        image.to(_AMP_DTYPE),
+                        dyn_masks=dyn_mask.to(image.device) if dyn_mask is not None else None,
+                    )
             torch.cuda.empty_cache()
         else:
             # Original VGGT: single pass, no dynamic detection

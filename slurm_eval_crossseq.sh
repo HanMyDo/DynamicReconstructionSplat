@@ -58,7 +58,7 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp eval_crossseq bash 
   echo ''
 
   echo '=============================================='
-  echo '[1/4] VGGT original baseline...'
+  echo '[1/2] VGGT original baseline...'
   echo '=============================================='
   python eval_gaussian_head.py \
     --data_dir /tmp/bonn_data/rgbd_bonn_dataset \
@@ -70,7 +70,7 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp eval_crossseq bash 
     --output_dir output_crossseq_vggt_baseline
 
   echo '=============================================='
-  echo '[2/4] VGGT4D baseline (no fine-tuning)...'
+  echo '[2/2] VGGT4D with dynamic token suppression...'
   echo '=============================================='
   python eval_gaussian_head.py \
     --data_dir /tmp/bonn_data/rgbd_bonn_dataset \
@@ -78,33 +78,7 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp eval_crossseq bash 
     --intrinsics bonn \
     --num_frames 12 \
     --split all \
-    --output_dir output_crossseq_vggt4d_baseline
-
-  echo '=============================================='
-  echo '[3/4] Single-sequence fine-tuned (crowd3 only)...'
-  echo '=============================================='
-  python eval_gaussian_head.py \
-    --data_dir /tmp/bonn_data/rgbd_bonn_dataset \
-    --dataset_name ${HELD_OUT} \
-    --intrinsics bonn \
-    --num_frames 12 \
-    --split all \
-    --checkpoint output_finetune_initial/checkpoint_best.pt \
-    --use_temporal_attention \
-    --output_dir output_crossseq_finetuned_singleseq
-
-  echo '=============================================='
-  echo '[4/4] Multi-sequence fine-tuned (4 seqs)...'
-  echo '=============================================='
-  python eval_gaussian_head.py \
-    --data_dir /tmp/bonn_data/rgbd_bonn_dataset \
-    --dataset_name ${HELD_OUT} \
-    --intrinsics bonn \
-    --num_frames 12 \
-    --split all \
-    --checkpoint output_finetune_multiseq_frozen_conv2/checkpoint_latest.pt \
-    --use_temporal_attention \
-    --output_dir output_crossseq_finetuned_multiseq
+    --output_dir output_crossseq_vggt4d_tokensuppress
 "
 
 enroot remove -f eval_crossseq
@@ -112,9 +86,7 @@ enroot remove -f eval_crossseq
 echo ""
 echo "=============================================="
 echo "Cross-sequence results on ${HELD_OUT}:"
-echo "  [1] VGGT original:          output_crossseq_vggt_baseline/metrics.json"
-echo "  [2] VGGT4D baseline:        output_crossseq_vggt4d_baseline/metrics.json"
-echo "  [3] Fine-tuned (1 seq):     output_crossseq_finetuned_singleseq/metrics.json"
-echo "  [4] Fine-tuned (4 seqs):    output_crossseq_finetuned_multiseq/metrics.json"
+echo "  [1] VGGT original:               output_crossseq_vggt_baseline/metrics.json"
+echo "  [2] VGGT4D + token suppression:  output_crossseq_vggt4d_tokensuppress/metrics.json"
 echo "=============================================="
 echo "Job finished at: $(date)"
