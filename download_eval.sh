@@ -24,14 +24,14 @@ download_model() {
 
   # Middle 10 batches of images
   rsync -av \
-    --filter='+ b022[0-9]_*.png' \
+    --filter='+ b00[0-4][0-9]_*.png' \
     --filter='- *' \
     "$REMOTE/$remote_dir/images/" \
     "$local_dir/images/" 2>/dev/null || true
 
   # Middle 10 batches of dyn_mask
   rsync -av \
-    --filter='+ b022[0-9]_*.png' \
+    --filter='+ b00[0-4][0-9]_*.png' \
     --filter='- *' \
     "$REMOTE/$remote_dir/dyn_mask/" \
     "$local_dir/dyn_mask/" 2>/dev/null || true

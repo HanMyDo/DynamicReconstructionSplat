@@ -96,7 +96,7 @@ def save_dynamic_mask_overlay(image, dyn_mask, path):
 
 
 @torch.no_grad()
-def evaluate(model, dataloader, config, output_dir, device):
+def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50):
     os.makedirs(output_dir, exist_ok=True)
     images_dir = os.path.join(output_dir, "images")
     dyn_mask_dir = os.path.join(output_dir, "dyn_mask")
@@ -172,17 +172,17 @@ def evaluate(model, dataloader, config, output_dir, device):
                     total_ssim_static += compute_ssim(pred_s.unsqueeze(0), gt_s.unsqueeze(0)).mean().item()
                     n_static_frames += 1
 
-            # Save GT | predicted comparison image
-            comparison = torch.cat([gt_frame, pred_frame], dim=2)  # side by side [3, H, 2W]
-            save_image(comparison, os.path.join(images_dir, f"b{batch_idx:04d}_v{v_idx:02d}.png"))
+            # Save GT | predicted comparison image (limited batches to avoid disk quota)
+            if batch_idx < max_image_batches:
+                comparison = torch.cat([gt_frame, pred_frame], dim=2)  # side by side [3, H, 2W]
+                save_image(comparison, os.path.join(images_dir, f"b{batch_idx:04d}_v{v_idx:02d}.png"))
 
-            # Save dynamic mask overlay
-            if dyn_mask is not None:
-                os.makedirs(dyn_mask_dir, exist_ok=True)
-                save_dynamic_mask_overlay(
-                    gt_frame, dyn_mask[0, v_idx],
-                    os.path.join(dyn_mask_dir, f"b{batch_idx:04d}_v{v_idx:02d}.png")
-                )
+                if dyn_mask is not None:
+                    os.makedirs(dyn_mask_dir, exist_ok=True)
+                    save_dynamic_mask_overlay(
+                        gt_frame, dyn_mask[0, v_idx],
+                        os.path.join(dyn_mask_dir, f"b{batch_idx:04d}_v{v_idx:02d}.png")
+                    )
 
         # Keep last batch for video + PLY output
         last_gaussians = gaussians
@@ -276,6 +276,8 @@ def main():
                         help="Use original VGGT backbone instead of VGGT4D (no dynamic detection)")
     parser.add_argument("--vggt4d_weights_path", type=str, default=None,
                         help="Path to VGGT4D fine-tuned weights (.pt). If omitted, initializes from VGGT-1B.")
+    parser.add_argument("--max_image_batches", type=int, default=50,
+                        help="Save comparison images only for the first N batches (avoids disk quota).")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -327,7 +329,8 @@ def main():
         }, f, indent=2)
 
     print(f"\nRunning evaluation on {args.split} split ({len(dataset)} batches)...")
-    evaluate(model, dataloader, config, args.output_dir, device)
+    evaluate(model, dataloader, config, args.output_dir, device,
+             max_image_batches=args.max_image_batches)
 
 
 if __name__ == "__main__":

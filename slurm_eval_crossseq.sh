@@ -43,12 +43,17 @@ echo ""
 
 echo "Downloading VGGT4D pretrained weights..."
 mkdir -p /mnt/home/hanmydo/DynamicReconstructionSplat/ckpts
-if [ ! -f /mnt/home/hanmydo/DynamicReconstructionSplat/ckpts/vggt4d_model_tracker_fixed_e20.pt ]; then
-  wget -q -c "https://huggingface.co/facebook/VGGT_tracker_fixed/resolve/main/model_tracker_fixed_e20.pt?download=true" \
-    -O /mnt/home/hanmydo/DynamicReconstructionSplat/ckpts/vggt4d_model_tracker_fixed_e20.pt
-  echo "Download complete."
+VGGT4D_CKPT=/mnt/home/hanmydo/DynamicReconstructionSplat/ckpts/vggt4d_model_tracker_fixed_e20.pt
+if [ ! -f "$VGGT4D_CKPT" ]; then
+  wget -c "https://huggingface.co/facebook/VGGT_tracker_fixed/resolve/main/model_tracker_fixed_e20.pt?download=true" \
+    -O "$VGGT4D_CKPT"
+  if [ $? -ne 0 ] || [ ! -s "$VGGT4D_CKPT" ]; then
+    echo "ERROR: Failed to download VGGT4D weights. Aborting."
+    exit 1
+  fi
+  echo "Download complete: $(du -h "$VGGT4D_CKPT" | cut -f1)"
 else
-  echo "Weights already cached."
+  echo "Weights already cached: $(du -h "$VGGT4D_CKPT" | cut -f1)"
 fi
 echo ""
 
