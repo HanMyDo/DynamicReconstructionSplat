@@ -104,7 +104,9 @@ def evaluate(model, dataloader, config, output_dir, device):
 
     total_psnr, total_ssim = 0.0, 0.0
     total_psnr_dyn, total_ssim_dyn = 0.0, 0.0
+    total_psnr_static, total_ssim_static = 0.0, 0.0
     n_dyn_frames = 0
+    n_static_frames = 0
     n_frames = 0
 
     last_gaussians = None
@@ -157,6 +159,18 @@ def evaluate(model, dataloader, config, output_dir, device):
                     total_psnr_dyn += -10 * torch.log10(mse_dyn + 1e-8).item()
                     total_ssim_dyn += compute_ssim(pred_m.unsqueeze(0), gt_m.unsqueeze(0)).mean().item()
                     n_dyn_frames += 1
+
+                # Static-masked metrics (complement of dyn_mask)
+                static_mask = (1.0 - mask).clamp(0, 1)
+                if static_mask.sum() >= 10:
+                    smask3 = static_mask.unsqueeze(0).expand(3, -1, -1)
+                    pred_s = pred_frame * smask3
+                    gt_s = gt_frame * smask3
+                    n_px_s = static_mask.sum().item()
+                    mse_static = ((pred_s - gt_s) ** 2).sum() / (3 * n_px_s)
+                    total_psnr_static += -10 * torch.log10(mse_static + 1e-8).item()
+                    total_ssim_static += compute_ssim(pred_s.unsqueeze(0), gt_s.unsqueeze(0)).mean().item()
+                    n_static_frames += 1
 
             # Save GT | predicted comparison image
             comparison = torch.cat([gt_frame, pred_frame], dim=2)  # side by side [3, H, 2W]
@@ -215,8 +229,11 @@ def evaluate(model, dataloader, config, output_dir, device):
         "ssim": total_ssim / n_frames if n_frames > 0 else 0.0,
         "psnr_dynamic": total_psnr_dyn / n_dyn_frames if n_dyn_frames > 0 else None,
         "ssim_dynamic": total_ssim_dyn / n_dyn_frames if n_dyn_frames > 0 else None,
+        "psnr_static": total_psnr_static / n_static_frames if n_static_frames > 0 else None,
+        "ssim_static": total_ssim_static / n_static_frames if n_static_frames > 0 else None,
         "n_frames": n_frames,
         "n_dynamic_frames": n_dyn_frames,
+        "n_static_frames": n_static_frames,
     }
 
     print(f"\nResults:")
@@ -225,8 +242,11 @@ def evaluate(model, dataloader, config, output_dir, device):
     if metrics["psnr_dynamic"] is not None:
         print(f"  PSNR (dynamic regions):  {metrics['psnr_dynamic']:.2f} dB")
         print(f"  SSIM (dynamic regions):  {metrics['ssim_dynamic']:.4f}")
+        print(f"  PSNR (static  regions):  {metrics['psnr_static']:.2f} dB")
+        print(f"  SSIM (static  regions):  {metrics['ssim_static']:.4f}")
     else:
         print(f"  PSNR (dynamic regions):  N/A")
+        print(f"  PSNR (static  regions):  N/A")
 
     with open(os.path.join(output_dir, "metrics.json"), "w") as f:
         json.dump(metrics, f, indent=2)
