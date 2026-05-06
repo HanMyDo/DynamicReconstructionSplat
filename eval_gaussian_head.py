@@ -274,12 +274,16 @@ def main():
                         help="Enable temporal attention (set if checkpoint was trained with it)")
     parser.add_argument("--no_vggt4d", action="store_true",
                         help="Use original VGGT backbone instead of VGGT4D (no dynamic detection)")
+    parser.add_argument("--vggt4d_weights_path", type=str, default=None,
+                        help="Path to VGGT4D fine-tuned weights (.pt). If omitted, initializes from VGGT-1B.")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
     print(f"Mode:     {'Fine-tuned' if args.checkpoint else 'Baseline'}")
-    print(f"Backbone: {'VGGT (original)' if args.no_vggt4d else 'VGGT4D'}")
+    backbone_label = "VGGT (original)" if args.no_vggt4d else \
+        f"VGGT4D (weights: {args.vggt4d_weights_path or 'init from VGGT-1B'})"
+    print(f"Backbone: {backbone_label}")
 
     intrinsics = INTRINSICS_PRESETS[args.intrinsics]
 
@@ -290,6 +294,7 @@ def main():
         use_temporal_attention=args.use_temporal_attention,
         use_vggt4d=not args.no_vggt4d,
         enable_dynamic_detection=not args.no_vggt4d,
+        vggt4d_weights_path=args.vggt4d_weights_path,
     )
 
     print(f"\nLoading {args.split} dataset...")
