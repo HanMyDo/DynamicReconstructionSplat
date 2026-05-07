@@ -1,9 +1,9 @@
 #!/bin/sh
-#SBATCH --job-name=train_multiseq
+#SBATCH --job-name=train_vggt4d_opp
 #SBATCH --partition=24g
-#SBATCH --qos=students_normal
-#SBATCH --output=slurm_logs/train_multiseq_%j.out
-#SBATCH --error=slurm_logs/train_multiseq_%j.err
+#SBATCH --qos=students_opportunistic
+#SBATCH --output=slurm_logs/train_vggt4d_opp_%j.out
+#SBATCH --error=slurm_logs/train_vggt4d_opp_%j.err
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 #SBATCH --nodelist=heidelberg,muenchen,koblenz
@@ -19,7 +19,7 @@ mkdir -p $ENROOT_RUNTIME_PATH $ENROOT_CACHE_PATH $ENROOT_DATA_PATH
 mkdir -p slurm_logs
 
 echo "=============================================="
-echo "Multi-Sequence Training - Cross-Seq Experiment"
+echo "Multi-Sequence Training - VGGT4D Opportunistic"
 echo "=============================================="
 echo "Job started on node: $(hostname)"
 echo "Time: $(date)"
@@ -61,10 +61,10 @@ else
 fi
 echo ""
 
-enroot remove -f train_multiseq 2>/dev/null || true
-enroot create --name train_multiseq ~/anysplat.sqsh
+enroot remove -f train_vggt4d_opp 2>/dev/null || true
+enroot create --name train_vggt4d_opp ~/anysplat.sqsh
 
-enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp train_multiseq bash -c "
+enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp train_vggt4d_opp bash -c "
   cd /mnt/home/hanmydo/DynamicReconstructionSplat
   export CUDA_VISIBLE_DEVICES=0
   echo 'Current directory:' \$(pwd)
@@ -80,16 +80,17 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp train_multiseq bash
     --data_dir /tmp/bonn_data/rgbd_bonn_dataset \
     --dataset_names rgbd_bonn_crowd3,rgbd_bonn_crowd2,rgbd_bonn_balloon,rgbd_bonn_synchronous \
     --output_dir output_finetune_vggt4d \
-    --num_epochs 3 \
+    --num_epochs 20 \
     --batch_size 1 \
     --learning_rate 1e-4 \
     --num_frames 12 \
     --temporal_weight 0.1 \
     --intrinsics bonn \
-    --vggt4d_weights_path /mnt/home/hanmydo/DynamicReconstructionSplat/ckpts/vggt4d_model_tracker_fixed_e20.pt
+    --vggt4d_weights_path /mnt/home/hanmydo/DynamicReconstructionSplat/ckpts/vggt4d_model_tracker_fixed_e20.pt \
+    --resume /mnt/home/hanmydo/DynamicReconstructionSplat/output_finetune_vggt4d/checkpoint_latest.pt
 "
 
-enroot remove -f train_multiseq
+enroot remove -f train_vggt4d_opp
 
 echo ""
 echo "Job finished at: $(date)"

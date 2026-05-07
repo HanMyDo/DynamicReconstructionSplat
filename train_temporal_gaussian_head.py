@@ -1120,8 +1120,11 @@ def main():
     start_epoch = 0
     global_step = 0
     if args.resume:
-        start_epoch, global_step = load_checkpoint(model, optimizer, scheduler, args.resume)
-        start_epoch += 1
+        if os.path.exists(args.resume):
+            start_epoch, global_step = load_checkpoint(model, optimizer, scheduler, args.resume)
+            start_epoch += 1
+        else:
+            print(f"Resume checkpoint not found at {args.resume}, starting fresh.")
 
     # Training loop
     print("\n" + "=" * 60)
