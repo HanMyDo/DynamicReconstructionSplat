@@ -442,7 +442,7 @@ def create_model(config: TrainingConfig) -> AnySplat:
         pred_head_type="depth",
         # VGGT4D settings
         use_vggt4d=config.use_vggt4d,
-        vggt4d_weights_path=None,
+        vggt4d_weights_path=config.vggt4d_weights_path,
         enable_dynamic_detection=config.enable_dynamic_detection,
         dynamic_mask_threshold=None,
         dynamic_n_clusters=64,
@@ -914,11 +914,18 @@ def save_checkpoint(model, optimizer, scheduler, epoch, global_step, config):
         'config': config.__dict__,
     }
 
+    latest_path = os.path.join(config.output_dir, 'checkpoint_latest.pt')
+
+    # Remove previous step checkpoint to avoid accumulating large files on disk
+    prev_step_glob = os.path.join(config.output_dir, 'checkpoint_step*.pt')
+    import glob as _glob
+    for old in _glob.glob(prev_step_glob):
+        os.remove(old)
+
     path = os.path.join(config.output_dir, f'checkpoint_step{global_step}.pt')
     torch.save(checkpoint, path)
     print(f"Saved checkpoint to {path}")
 
-    latest_path = os.path.join(config.output_dir, 'checkpoint_latest.pt')
     torch.save(checkpoint, latest_path)
 
 
@@ -970,6 +977,8 @@ def main():
                         help="Weight for L1 scale regularization (prevents Gaussian size collapse)")
     parser.add_argument("--no_gt_poses", action="store_true",
                         help="Use predicted poses instead of GT (not recommended)")
+    parser.add_argument("--vggt4d_weights_path", type=str, default=None,
+                        help="Path to pretrained VGGT4D weights (.pt). If omitted, initializes from VGGT-1B.")
 
     args = parser.parse_args()
 
@@ -995,6 +1004,7 @@ def main():
         temporal_consistency_weight=args.temporal_weight,
         scale_reg_weight=args.scale_reg_weight,
         use_gt_poses=not args.no_gt_poses,
+        vggt4d_weights_path=args.vggt4d_weights_path,
     )
 
     print("=" * 60)

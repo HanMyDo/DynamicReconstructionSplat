@@ -162,7 +162,9 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
             model_full = VGGTFor4D()
             if cfg.vggt4d_weights_path is not None:
                 print(f"Loading VGGT4D weights from {cfg.vggt4d_weights_path}")
-                model_full.load_state_dict(torch.load(cfg.vggt4d_weights_path, weights_only=True))
+                ckpt = torch.load(cfg.vggt4d_weights_path, map_location="cpu", weights_only=False)
+                state_dict = ckpt.get("model_state_dict", ckpt) if isinstance(ckpt, dict) else ckpt
+                model_full.load_state_dict(state_dict)
             else:
                 print("Initializing VGGT4D from pretrained VGGT-1B weights")
                 vggt_model = VGGT.from_pretrained("facebook/VGGT-1B")

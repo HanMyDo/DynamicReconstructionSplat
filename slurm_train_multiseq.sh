@@ -25,7 +25,7 @@ echo "Job started on node: $(hostname)"
 echo "Time: $(date)"
 echo ""
 
-# 4 training sequences — held-out for eval: rgbd_bonn_balloon2
+# 4 training sequences — held-out for eval: rgbd_bonn_crowd
 # Covers: crowds, balloon, synchronous objects
 TRAIN_SEQUENCES="rgbd_bonn_crowd3 rgbd_bonn_crowd2 rgbd_bonn_balloon rgbd_bonn_synchronous"
 
@@ -43,6 +43,22 @@ with zipfile.ZipFile('/mnt/projects/theses/dynrecsplat/rgbd_bonn_dataset.zip', '
         zf.extractall('/tmp/bonn_data/', members)
 print('Extraction done.')
 "
+echo ""
+
+VGGT4D_CKPT="/mnt/home/hanmydo/DynamicReconstructionSplat/ckpts/vggt4d_model_tracker_fixed_e20.pt"
+if [ ! -f "$VGGT4D_CKPT" ]; then
+  echo "Downloading VGGT4D pretrained weights..."
+  mkdir -p "$(dirname "$VGGT4D_CKPT")"
+  wget -c "https://huggingface.co/facebook/VGGT_tracker_fixed/resolve/main/model_tracker_fixed_e20.pt" \
+    -O "$VGGT4D_CKPT"
+  if [ $? -ne 0 ] || [ ! -s "$VGGT4D_CKPT" ]; then
+    echo "ERROR: Failed to download VGGT4D weights. Aborting."
+    exit 1
+  fi
+  echo "Download complete: $(du -sh "$VGGT4D_CKPT" | cut -f1)"
+else
+  echo "VGGT4D weights already present: $(du -sh "$VGGT4D_CKPT" | cut -f1)"
+fi
 echo ""
 
 enroot remove -f train_multiseq 2>/dev/null || true
@@ -63,13 +79,14 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp train_multiseq bash
   python train_temporal_gaussian_head.py \
     --data_dir /tmp/bonn_data/rgbd_bonn_dataset \
     --dataset_names rgbd_bonn_crowd3,rgbd_bonn_crowd2,rgbd_bonn_balloon,rgbd_bonn_synchronous \
-    --output_dir output_finetune_multiseq_frozen_conv2 \
+    --output_dir output_finetune_vggt4d \
     --num_epochs 3 \
     --batch_size 1 \
     --learning_rate 1e-4 \
     --num_frames 12 \
     --temporal_weight 0.1 \
-    --intrinsics bonn
+    --intrinsics bonn \
+    --vggt4d_weights_path /mnt/home/hanmydo/DynamicReconstructionSplat/ckpts/vggt4d_model_tracker_fixed_e20.pt
 "
 
 enroot remove -f train_multiseq

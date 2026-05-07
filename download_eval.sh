@@ -37,6 +37,5 @@ download_model() {
     "$local_dir/dyn_mask/" 2>/dev/null || true
 }
 
-download_model "vggt_baseline"        "output_crossseq_vggt_baseline"        "$LOCAL/vggt_baseline"
-download_model "vggt4d_tokensuppress" "output_crossseq_vggt4d_tokensuppress" "$LOCAL/vggt4d_tokensuppress"
-download_model "vggt4d_pretrained"    "output_crossseq_vggt4d_pretrained"    "$LOCAL/vggt4d_pretrained"
+download_model "vggt_baseline"     "output_crossseq_vggt_baseline"     "$LOCAL/vggt_baseline"
+download_model "vggt4d_pretrained" "output_crossseq_vggt4d_pretrained" "$LOCAL/vggt4d_pretrained"
