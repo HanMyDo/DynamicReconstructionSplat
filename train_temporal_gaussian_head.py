@@ -930,10 +930,21 @@ def save_checkpoint(model, optimizer, scheduler, epoch, global_step, config):
 
 
 def load_checkpoint(model, optimizer, scheduler, checkpoint_path):
-    """Load training checkpoint."""
+    """Load training checkpoint.
+
+    Only restores temporal_attention weights — never the frozen backbone — so
+    that the backbone always reflects the freshly loaded pretrained weights
+    regardless of what was serialised in an older checkpoint.
+    """
     checkpoint = torch.load(checkpoint_path, map_location='cpu')
 
-    model.load_state_dict(checkpoint['model_state_dict'])
+    saved = checkpoint['model_state_dict']
+    current = model.state_dict()
+    temporal_keys = {k: v for k, v in saved.items() if 'temporal_attention' in k}
+    restored = len(temporal_keys)
+    current.update(temporal_keys)
+    model.load_state_dict(current)
+
     optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
     scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
 
@@ -941,6 +952,7 @@ def load_checkpoint(model, optimizer, scheduler, checkpoint_path):
     global_step = checkpoint['global_step']
 
     print(f"Loaded checkpoint from {checkpoint_path} (epoch {epoch}, step {global_step})")
+    print(f"  Restored {restored} temporal_attention tensors; backbone left as freshly loaded.")
     return epoch, global_step
 
 
