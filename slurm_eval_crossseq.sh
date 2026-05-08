@@ -44,23 +44,6 @@ echo ""
 enroot remove -f eval_crossseq 2>/dev/null || true
 enroot create --name eval_crossseq ~/anysplat.sqsh
 
-VGGT4D_CKPT="/mnt/home/hanmydo/DynamicReconstructionSplat/ckpts/vggt4d_model_tracker_fixed_e20.pt"
-
-if [ ! -f "$VGGT4D_CKPT" ]; then
-  echo "Downloading VGGT4D pretrained weights..."
-  mkdir -p "$(dirname "$VGGT4D_CKPT")"
-  wget -c "https://huggingface.co/facebook/VGGT_tracker_fixed/resolve/main/model_tracker_fixed_e20.pt" \
-    -O "$VGGT4D_CKPT"
-  if [ $? -ne 0 ] || [ ! -s "$VGGT4D_CKPT" ]; then
-    echo "ERROR: Failed to download VGGT4D weights. Aborting."
-    exit 1
-  fi
-  echo "Download complete: $(du -sh "$VGGT4D_CKPT" | cut -f1)"
-else
-  echo "VGGT4D weights already present: $(du -sh "$VGGT4D_CKPT" | cut -f1)"
-fi
-echo ""
-
 enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp eval_crossseq bash -c "
   cd /mnt/home/hanmydo/DynamicReconstructionSplat
   export CUDA_VISIBLE_DEVICES=0
@@ -74,7 +57,7 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp eval_crossseq bash 
   echo ''
 
   echo '=============================================='
-  echo '[1/2] VGGT original baseline...'
+  echo 'VGGT original baseline...'
   echo '=============================================='
   python eval_gaussian_head.py \
     --data_dir /tmp/bonn_data/rgbd_bonn_dataset \
@@ -83,27 +66,15 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp eval_crossseq bash 
     --num_frames 12 \
     --split all \
     --no_vggt4d \
+    --image_batch_start 400 \
     --output_dir output_crossseq_vggt_baseline
-
-  echo '=============================================='
-  echo '[2/2] VGGT4D with pretrained weights + token suppression...'
-  echo '=============================================='
-  python eval_gaussian_head.py \
-    --data_dir /tmp/bonn_data/rgbd_bonn_dataset \
-    --dataset_name ${HELD_OUT} \
-    --intrinsics bonn \
-    --num_frames 12 \
-    --split all \
-    --vggt4d_weights_path /mnt/home/hanmydo/DynamicReconstructionSplat/ckpts/vggt4d_model_tracker_fixed_e20.pt \
-    --output_dir output_crossseq_vggt4d_pretrained
 "
 
 enroot remove -f eval_crossseq
 
 echo ""
 echo "=============================================="
-echo "Cross-sequence results on ${HELD_OUT}:"
-echo "  [1] VGGT original:        output_crossseq_vggt_baseline/metrics.json"
-echo "  [2] VGGT4D (pretrained):  output_crossseq_vggt4d_pretrained/metrics.json"
+echo "Cross-sequence baseline on ${HELD_OUT}:"
+echo "  VGGT original: output_crossseq_vggt_baseline/metrics.json"
 echo "=============================================="
 echo "Job finished at: $(date)"

@@ -96,15 +96,16 @@ def save_dynamic_mask_overlay(image, dyn_mask, path):
 
 
 @torch.no_grad()
-def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50):
+def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50, image_batch_start=0):
     os.makedirs(output_dir, exist_ok=True)
     images_dir = os.path.join(output_dir, "images")
     dyn_mask_dir = os.path.join(output_dir, "dyn_mask")
     os.makedirs(images_dir, exist_ok=True)
 
     total_psnr, total_ssim = 0.0, 0.0
-    total_psnr_dyn, total_ssim_dyn = 0.0, 0.0
-    total_psnr_static, total_ssim_static = 0.0, 0.0
+    total_psnr_dyn = 0.0
+    total_psnr_static = 0.0
+    total_dyn_pixel_fraction = 0.0
     n_dyn_frames = 0
     n_static_frames = 0
     n_frames = 0
@@ -147,33 +148,29 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
             total_ssim += ssim_val
             n_frames += 1
 
-            # Dynamic-masked metrics
+            # Dynamic-masked metrics (PSNR only — masked SSIM is unreliable due to zero-padding bias)
             if dyn_mask is not None:
                 mask = dyn_mask[0, v_idx].to(device)   # [H, W]
-                if mask.sum() >= 10:
+                n_total_px = mask.numel()
+                n_px = mask.sum().item()
+                total_dyn_pixel_fraction += n_px / n_total_px
+
+                if n_px >= 10:
                     mask3 = mask.unsqueeze(0).expand(3, -1, -1)
-                    pred_m = pred_frame * mask3
-                    gt_m = gt_frame * mask3
-                    n_px = mask.sum().item()
-                    mse_dyn = ((pred_m - gt_m) ** 2).sum() / (3 * n_px)
+                    mse_dyn = ((pred_frame * mask3 - gt_frame * mask3) ** 2).sum() / (3 * n_px)
                     total_psnr_dyn += -10 * torch.log10(mse_dyn + 1e-8).item()
-                    total_ssim_dyn += compute_ssim(pred_m.unsqueeze(0), gt_m.unsqueeze(0)).mean().item()
                     n_dyn_frames += 1
 
                 # Static-masked metrics (complement of dyn_mask)
-                static_mask = (1.0 - mask).clamp(0, 1)
-                if static_mask.sum() >= 10:
-                    smask3 = static_mask.unsqueeze(0).expand(3, -1, -1)
-                    pred_s = pred_frame * smask3
-                    gt_s = gt_frame * smask3
-                    n_px_s = static_mask.sum().item()
-                    mse_static = ((pred_s - gt_s) ** 2).sum() / (3 * n_px_s)
+                n_px_s = n_total_px - n_px
+                if n_px_s >= 10:
+                    static_mask3 = (1.0 - mask).clamp(0, 1).unsqueeze(0).expand(3, -1, -1)
+                    mse_static = ((pred_frame * static_mask3 - gt_frame * static_mask3) ** 2).sum() / (3 * n_px_s)
                     total_psnr_static += -10 * torch.log10(mse_static + 1e-8).item()
-                    total_ssim_static += compute_ssim(pred_s.unsqueeze(0), gt_s.unsqueeze(0)).mean().item()
                     n_static_frames += 1
 
-            # Save GT | predicted comparison image (limited batches to avoid disk quota)
-            if batch_idx < max_image_batches:
+            # Save GT | predicted comparison image for a window of batches
+            if image_batch_start <= batch_idx < image_batch_start + max_image_batches:
                 comparison = torch.cat([gt_frame, pred_frame], dim=2)  # side by side [3, H, 2W]
                 save_image(comparison, os.path.join(images_dir, f"b{batch_idx:04d}_v{v_idx:02d}.png"))
 
@@ -224,13 +221,13 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
         )
 
     # --- Metrics summary ---
+    avg_dyn_pixel_frac = total_dyn_pixel_fraction / n_frames if n_frames > 0 else None
     metrics = {
         "psnr": total_psnr / n_frames if n_frames > 0 else 0.0,
         "ssim": total_ssim / n_frames if n_frames > 0 else 0.0,
         "psnr_dynamic": total_psnr_dyn / n_dyn_frames if n_dyn_frames > 0 else None,
-        "ssim_dynamic": total_ssim_dyn / n_dyn_frames if n_dyn_frames > 0 else None,
         "psnr_static": total_psnr_static / n_static_frames if n_static_frames > 0 else None,
-        "ssim_static": total_ssim_static / n_static_frames if n_static_frames > 0 else None,
+        "avg_dyn_pixel_fraction": avg_dyn_pixel_frac,
         "n_frames": n_frames,
         "n_dynamic_frames": n_dyn_frames,
         "n_static_frames": n_static_frames,
@@ -241,9 +238,8 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
     print(f"  SSIM (overall):          {metrics['ssim']:.4f}")
     if metrics["psnr_dynamic"] is not None:
         print(f"  PSNR (dynamic regions):  {metrics['psnr_dynamic']:.2f} dB")
-        print(f"  SSIM (dynamic regions):  {metrics['ssim_dynamic']:.4f}")
         print(f"  PSNR (static  regions):  {metrics['psnr_static']:.2f} dB")
-        print(f"  SSIM (static  regions):  {metrics['ssim_static']:.4f}")
+        print(f"  Avg dynamic pixel frac:  {metrics['avg_dyn_pixel_fraction']:.1%}")
     else:
         print(f"  PSNR (dynamic regions):  N/A")
         print(f"  PSNR (static  regions):  N/A")
@@ -277,7 +273,9 @@ def main():
     parser.add_argument("--vggt4d_weights_path", type=str, default=None,
                         help="Path to VGGT4D fine-tuned weights (.pt). If omitted, initializes from VGGT-1B.")
     parser.add_argument("--max_image_batches", type=int, default=50,
-                        help="Save comparison images only for the first N batches (avoids disk quota).")
+                        help="Save comparison images for N batches (avoids disk quota).")
+    parser.add_argument("--image_batch_start", type=int, default=0,
+                        help="First batch index to start saving images from. Use ~half total batches for mid-sequence.")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -330,7 +328,8 @@ def main():
 
     print(f"\nRunning evaluation on {args.split} split ({len(dataset)} batches)...")
     evaluate(model, dataloader, config, args.output_dir, device,
-             max_image_batches=args.max_image_batches)
+             max_image_batches=args.max_image_batches,
+             image_batch_start=args.image_batch_start)
 
 
 if __name__ == "__main__":

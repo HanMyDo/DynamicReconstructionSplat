@@ -24,18 +24,18 @@ download_model() {
 
   # Middle 10 batches of images
   rsync -av \
-    --filter='+ b00[0-4][0-9]_*.png' \
+    --filter='+ b04[0-4][0-9]_*.png' \
     --filter='- *' \
     "$REMOTE/$remote_dir/images/" \
     "$local_dir/images/" 2>/dev/null || true
 
-  # Middle 10 batches of dyn_mask
+  # Mid-sequence dyn_mask (batches 400-449)
   rsync -av \
-    --filter='+ b00[0-4][0-9]_*.png' \
+    --filter='+ b04[0-4][0-9]_*.png' \
     --filter='- *' \
     "$REMOTE/$remote_dir/dyn_mask/" \
     "$local_dir/dyn_mask/" 2>/dev/null || true
 }
 
-download_model "vggt_baseline"     "output_crossseq_vggt_baseline"     "$LOCAL/vggt_baseline"
-download_model "vggt4d_pretrained" "output_crossseq_vggt4d_pretrained" "$LOCAL/vggt4d_pretrained"
+download_model "vggt_baseline"     "output_crossseq_vggt_baseline"   "$LOCAL/vggt_baseline"
+download_model "vggt4d_finetuned"  "output_eval_finetuned_vggt4d"    "$LOCAL/vggt4d_finetuned"
