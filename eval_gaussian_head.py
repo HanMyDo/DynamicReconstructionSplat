@@ -69,10 +69,16 @@ def load_model(checkpoint_path, config, device):
     if checkpoint_path is not None:
         print(f"Loading checkpoint: {checkpoint_path}")
         ckpt = torch.load(checkpoint_path, map_location="cpu")
-        model.load_state_dict(ckpt["model_state_dict"])
+        # Only restore temporal_attention weights — never the frozen backbone —
+        # so the backbone always reflects the freshly loaded pretrained weights.
+        saved = ckpt["model_state_dict"]
+        current = model.state_dict()
+        temporal_keys = {k: v for k, v in saved.items() if "temporal_attention" in k}
+        current.update(temporal_keys)
+        model.load_state_dict(current)
         epoch = ckpt.get("epoch", "?")
         step = ckpt.get("global_step", "?")
-        print(f"  -> epoch {epoch}, step {step}")
+        print(f"  -> epoch {epoch}, step {step}, restored {len(temporal_keys)} temporal_attention tensors")
     else:
         print("No checkpoint — running pretrained weights only")
 
