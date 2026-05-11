@@ -25,7 +25,6 @@ Usage:
         --data_dir /tmp/bonn_data/rgbd_bonn_dataset \
         --dataset_name rgbd_bonn_crowd3 \
         --checkpoint output_finetune_initial/checkpoint_best.pt \
-        --use_temporal_attention \
         --output_dir output_eval_finetuned
 
     # Original VGGT (no VGGT4D)
@@ -69,16 +68,17 @@ def load_model(checkpoint_path, config, device):
     if checkpoint_path is not None:
         print(f"Loading checkpoint: {checkpoint_path}")
         ckpt = torch.load(checkpoint_path, map_location="cpu")
-        # Only restore temporal_attention weights — never the frozen backbone —
+        # Only restore gaussian head weights — never the frozen VGGT4D backbone —
         # so the backbone always reflects the freshly loaded pretrained weights.
         saved = ckpt["model_state_dict"]
         current = model.state_dict()
-        temporal_keys = {k: v for k, v in saved.items() if "temporal_attention" in k}
-        current.update(temporal_keys)
+        head_keys = {k: v for k, v in saved.items()
+                     if "gaussian_param_head" in k or "gaussian_adapter" in k}
+        current.update(head_keys)
         model.load_state_dict(current)
         epoch = ckpt.get("epoch", "?")
         step = ckpt.get("global_step", "?")
-        print(f"  -> epoch {epoch}, step {step}, restored {len(temporal_keys)} temporal_attention tensors")
+        print(f"  -> epoch {epoch}, step {step}, restored {len(head_keys)} gaussian head tensors")
     else:
         print("No checkpoint — running pretrained weights only")
 
@@ -272,8 +272,6 @@ def main():
     parser.add_argument("--num_frames", type=int, default=4)
     parser.add_argument("--split", type=str, default="all", choices=["train", "val", "all"])
     parser.add_argument("--num_workers", type=int, default=2)
-    parser.add_argument("--use_temporal_attention", action="store_true",
-                        help="Enable temporal attention (set if checkpoint was trained with it)")
     parser.add_argument("--no_vggt4d", action="store_true",
                         help="Use original VGGT backbone instead of VGGT4D (no dynamic detection)")
     parser.add_argument("--vggt4d_weights_path", type=str, default=None,
@@ -297,7 +295,6 @@ def main():
         data_dir=args.data_dir,
         dataset_name=args.dataset_name,
         num_frames=args.num_frames,
-        use_temporal_attention=args.use_temporal_attention,
         use_vggt4d=not args.no_vggt4d,
         enable_dynamic_detection=not args.no_vggt4d,
         vggt4d_weights_path=args.vggt4d_weights_path,

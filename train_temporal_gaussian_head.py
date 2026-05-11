@@ -1,9 +1,9 @@
 """
-Fine-tuning script for the Temporal Gaussian Head.
+Fine-tuning script for the Gaussian Head on top of a frozen VGGT4D backbone.
 
-This script fine-tunes only the Gaussian head (with temporal attention) while keeping
-the VGGT4D backbone frozen. This enables the model to learn temporal consistency
-for dynamic scene handling.
+Trains the AnySplat gaussian_param_head and gaussian_adapter on the features
+produced by the frozen VGGT4D backbone. Loss: rendering (MSE) + temporal
+consistency on Gaussian parameters + scale regularization.
 
 Supports TUM-format datasets (Bonn RGB-D, TUM RGB-D Dynamic Scenes) with
 ground truth camera poses from groundtruth.txt.
@@ -233,9 +233,6 @@ class TrainingConfig:
     use_vggt4d: bool = True
     enable_dynamic_detection: bool = True
     vggt4d_weights_path: str = None
-    use_temporal_attention: bool = True
-    temporal_num_heads: int = 4
-    temporal_spatial_downsample: int = 4
 
     # Training
     batch_size: int = 1
@@ -447,13 +444,7 @@ def create_model(config: TrainingConfig) -> AnySplat:
         dynamic_mask_threshold=None,
         dynamic_n_clusters=64,
         suppress_dynamic_gaussians=False,  # Bonn task: reconstruct dynamic objects, not suppress them
-        # Temporal attention settings
-        use_temporal_attention=config.use_temporal_attention,
-        temporal_num_heads=config.temporal_num_heads,
-        temporal_dropout=0.0,
-        temporal_spatial_downsample=config.temporal_spatial_downsample,
-        temporal_use_pe=True,
-        temporal_max_frames=32,
+        use_temporal_attention=False,
     )
 
     decoder_cfg = DecoderSplattingCUDACfg(
@@ -487,53 +478,28 @@ def create_model(config: TrainingConfig) -> AnySplat:
 
 
 def freeze_backbone(model: AnySplat):
-    """Freeze backbone, only train Gaussian head + temporal attention."""
-    # Freeze aggregator
+    """Freeze VGGT4D backbone; train only the Gaussian head (gaussian_param_head + gaussian_adapter)."""
     for param in model.encoder.aggregator.parameters():
         param.requires_grad = False
-
-    # Freeze camera head
     for param in model.encoder.camera_head.parameters():
         param.requires_grad = False
-
-    # Freeze depth head
     if hasattr(model.encoder, 'depth_head'):
         for param in model.encoder.depth_head.parameters():
             param.requires_grad = False
-
-    # Freeze point head if exists
     if hasattr(model.encoder, 'point_head'):
         for param in model.encoder.point_head.parameters():
             param.requires_grad = False
 
-    # Trainable: temporal_attention only.
-    # output_conv2 is frozen to protect pretrained rendering quality — empirically,
-    # training it even at 0.01x LR caused 4 dB degradation over 5 epochs.
-    # temporal_attention.output_scale starts near 0 so the feature distribution
-    # seen by frozen output_conv2 shifts only gradually during training.
-    trainable_names = []
-    for name, param in model.encoder.gaussian_param_head.named_parameters():
-        if name.startswith("temporal_attention"):
-            param.requires_grad = True
-            trainable_names.append(f"gaussian_param_head.{name}")
-        else:
-            param.requires_grad = False
+    for param in model.encoder.gaussian_param_head.parameters():
+        param.requires_grad = True
+    for param in model.encoder.gaussian_adapter.parameters():
+        param.requires_grad = True
 
-    # Freeze gaussian_adapter
-    for name, param in model.encoder.gaussian_adapter.named_parameters():
-        param.requires_grad = False
-
-    # Count parameters
     total_params = sum(p.numel() for p in model.parameters())
     trainable_count = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    frozen_count = total_params - trainable_count
-
     print(f"Total parameters: {total_params:,}")
     print(f"Trainable parameters: {trainable_count:,} ({100*trainable_count/total_params:.2f}%)")
-    print(f"Frozen parameters: {frozen_count:,} ({100*frozen_count/total_params:.2f}%)")
-    print(f"Trainable param names ({len(trainable_names)}):")
-    for n in trainable_names:
-        print(f"  {n}")
+    print(f"Frozen parameters: {total_params - trainable_count:,}")
 
     return model
 
@@ -805,8 +771,7 @@ def train_epoch(
             'mse': f'{total_mse_loss/num_batches:.4f}',
             'temporal': f'{total_temporal_loss/num_batches:.4f}',
             'scale': f'{total_scale_reg/num_batches:.4f}',
-            'lr_ta': f'{last_lrs[0]:.2e}',
-            'lr_c2': f'{last_lrs[1]:.2e}' if len(last_lrs) > 1 else 'N/A',
+            'lr': f'{last_lrs[0]:.2e}',
         })
 
         # Save checkpoint periodically
@@ -932,17 +897,17 @@ def save_checkpoint(model, optimizer, scheduler, epoch, global_step, config):
 def load_checkpoint(model, optimizer, scheduler, checkpoint_path):
     """Load training checkpoint.
 
-    Only restores temporal_attention weights — never the frozen backbone — so
-    that the backbone always reflects the freshly loaded pretrained weights
-    regardless of what was serialised in an older checkpoint.
+    Only restores gaussian_param_head and gaussian_adapter weights — never the
+    frozen VGGT4D backbone — so the backbone always reflects the freshly loaded
+    pretrained weights regardless of what was serialised in an older checkpoint.
     """
     checkpoint = torch.load(checkpoint_path, map_location='cpu')
 
     saved = checkpoint['model_state_dict']
     current = model.state_dict()
-    temporal_keys = {k: v for k, v in saved.items() if 'temporal_attention' in k}
-    restored = len(temporal_keys)
-    current.update(temporal_keys)
+    head_keys = {k: v for k, v in saved.items()
+                 if 'gaussian_param_head' in k or 'gaussian_adapter' in k}
+    current.update(head_keys)
     model.load_state_dict(current)
 
     optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
@@ -952,7 +917,7 @@ def load_checkpoint(model, optimizer, scheduler, checkpoint_path):
     global_step = checkpoint['global_step']
 
     print(f"Loaded checkpoint from {checkpoint_path} (epoch {epoch}, step {global_step})")
-    print(f"  Restored {restored} temporal_attention tensors; backbone left as freshly loaded.")
+    print(f"  Restored {len(head_keys)} gaussian head tensors; backbone left as freshly loaded.")
     return epoch, global_step
 
 
@@ -981,10 +946,8 @@ def main():
                              "Overrides --dataset_name if provided.")
     parser.add_argument("--resume", type=str, default=None,
                         help="Path to checkpoint to resume from")
-    parser.add_argument("--no_temporal_attention", action="store_true",
-                        help="Disable temporal attention (for ablation)")
     parser.add_argument("--temporal_weight", type=float, default=0.1,
-                        help="Weight for temporal consistency loss")
+                        help="Weight for temporal consistency loss on Gaussian parameters")
     parser.add_argument("--scale_reg_weight", type=float, default=0.01,
                         help="Weight for L1 scale regularization (prevents Gaussian size collapse)")
     parser.add_argument("--no_gt_poses", action="store_true",
@@ -1012,7 +975,6 @@ def main():
         num_frames=args.num_frames,
         frame_stride=args.frame_stride,
         intrinsics_preset=args.intrinsics,
-        use_temporal_attention=not args.no_temporal_attention,
         temporal_consistency_weight=args.temporal_weight,
         scale_reg_weight=args.scale_reg_weight,
         use_gt_poses=not args.no_gt_poses,
@@ -1025,7 +987,6 @@ def main():
     print(f"Dataset: {config.data_dir}/{config.dataset_name}")
     print(f"Intrinsics: {config.intrinsics_preset}")
     print(f"GT poses: {config.use_gt_poses}")
-    print(f"Temporal attention: {config.use_temporal_attention}")
     print(f"Temporal loss weight: {config.temporal_consistency_weight}")
 
     os.makedirs(config.output_dir, exist_ok=True)
@@ -1098,16 +1059,11 @@ def main():
     print("\nFreezing backbone...")
     model = freeze_backbone(model)
 
-    temporal_attn_params = [
-        p for n, p in model.encoder.gaussian_param_head.named_parameters()
-        if p.requires_grad and "temporal_attention" in n
-    ]
-    print(f"Optimizer param groups: temporal_attention={len(temporal_attn_params)} tensors")
-    if len(temporal_attn_params) == 0:
-        raise RuntimeError("temporal_attn_params is empty — check param name filter 'temporal_attention'")
+    trainable_params = [p for p in model.parameters() if p.requires_grad]
+    print(f"Optimizer: {len(trainable_params)} trainable tensors")
 
     optimizer = AdamW(
-        temporal_attn_params,
+        trainable_params,
         lr=config.learning_rate,
         weight_decay=config.weight_decay,
     )

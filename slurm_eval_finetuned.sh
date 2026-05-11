@@ -81,7 +81,6 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp eval_finetuned bash
     --num_frames 12 \
     --split all \
     --checkpoint ${CHECKPOINT} \
-    --use_temporal_attention \
     --vggt4d_weights_path ${VGGT4D_CKPT} \
     --image_batch_start 400 \
     --output_dir output_eval_finetuned_vggt4d
