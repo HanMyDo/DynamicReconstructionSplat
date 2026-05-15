@@ -82,7 +82,7 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp train_vggt4d_opp ba
     --output_dir output_finetune_vggt4d \
     --num_epochs 20 \
     --batch_size 1 \
-    --learning_rate 1e-4 \
+    --learning_rate 1e-6 \
     --num_frames 12 \
     --temporal_weight 0.1 \
     --intrinsics bonn \

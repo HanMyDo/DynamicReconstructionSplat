@@ -18,26 +18,13 @@ mkdir -p $ENROOT_RUNTIME_PATH $ENROOT_CACHE_PATH $ENROOT_DATA_PATH
 
 mkdir -p slurm_logs
 
-# Same held-out sequence as crossseq eval
 EVAL_SEQ="rgbd_bonn_crowd"
+VGGT4D_CKPT="/mnt/home/hanmydo/DynamicReconstructionSplat/ckpts/vggt4d_model_tracker_fixed_e20.pt"
 BEST_CKPT="/mnt/home/hanmydo/DynamicReconstructionSplat/output_finetune_vggt4d/checkpoint_best.pt"
 LATEST_CKPT="/mnt/home/hanmydo/DynamicReconstructionSplat/output_finetune_vggt4d/checkpoint_latest.pt"
-VGGT4D_CKPT="/mnt/home/hanmydo/DynamicReconstructionSplat/ckpts/vggt4d_model_tracker_fixed_e20.pt"
-
-if [ -f "$BEST_CKPT" ]; then
-  CHECKPOINT="$BEST_CKPT"
-  echo "Using best checkpoint: ${CHECKPOINT}"
-elif [ -f "$LATEST_CKPT" ]; then
-  CHECKPOINT="$LATEST_CKPT"
-  echo "checkpoint_best.pt not found, using latest: ${CHECKPOINT}"
-else
-  echo "ERROR: No checkpoint found in output_finetune_vggt4d/. Has training started?"
-  exit 1
-fi
 
 echo "=============================================="
-echo "Fine-tuned Eval on: ${EVAL_SEQ}"
-echo "Checkpoint: ${CHECKPOINT}"
+echo "Eval on held-out: ${EVAL_SEQ}"
 echo "=============================================="
 echo "Job started on node: $(hostname)"
 echo "Time: $(date)"
@@ -72,7 +59,7 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp eval_finetuned bash
   echo ''
 
   echo '=============================================='
-  echo 'VGGT4D + fine-tuned temporal attention...'
+  echo '1/3  VGGT original baseline (no VGGT4D)...'
   echo '=============================================='
   python eval_gaussian_head.py \
     --data_dir /tmp/bonn_data/rgbd_bonn_dataset \
@@ -80,21 +67,60 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp eval_finetuned bash
     --intrinsics bonn \
     --num_frames 12 \
     --split all \
-    --checkpoint ${CHECKPOINT} \
+    --no_vggt4d \
+    --image_batch_start 400 \
+    --output_dir output_eval_vggt_baseline
+
+  echo ''
+  echo '=============================================='
+  echo '2/3  VGGT4D pretrained (no fine-tuning)...'
+  echo '=============================================='
+  python eval_gaussian_head.py \
+    --data_dir /tmp/bonn_data/rgbd_bonn_dataset \
+    --dataset_name ${EVAL_SEQ} \
+    --intrinsics bonn \
+    --num_frames 12 \
+    --split all \
     --vggt4d_weights_path ${VGGT4D_CKPT} \
     --image_batch_start 400 \
-    --output_dir output_eval_finetuned_vggt4d
+    --output_dir output_eval_vggt4d_pretrained
+
+  echo ''
+  echo '=============================================='
+  echo '3/3  VGGT4D fine-tuned Gaussian head...'
+  echo '=============================================='
+  if [ -f \"${BEST_CKPT}\" ]; then
+    CHECKPOINT=\"${BEST_CKPT}\"
+    echo \"Using best checkpoint: \${CHECKPOINT}\"
+  elif [ -f \"${LATEST_CKPT}\" ]; then
+    CHECKPOINT=\"${LATEST_CKPT}\"
+    echo \"checkpoint_best.pt not found, using latest: \${CHECKPOINT}\"
+  else
+    echo 'No fine-tuned checkpoint found — skipping finetuned eval.'
+    CHECKPOINT=\"\"
+  fi
+
+  if [ -n \"\${CHECKPOINT}\" ]; then
+    python eval_gaussian_head.py \
+      --data_dir /tmp/bonn_data/rgbd_bonn_dataset \
+      --dataset_name ${EVAL_SEQ} \
+      --intrinsics bonn \
+      --num_frames 12 \
+      --split all \
+      --checkpoint \${CHECKPOINT} \
+      --vggt4d_weights_path ${VGGT4D_CKPT} \
+      --image_batch_start 400 \
+      --output_dir output_eval_vggt4d_finetuned
+  fi
 "
 
 enroot remove -f eval_finetuned
 
 echo ""
 echo "=============================================="
-echo "Fine-tuned results on ${EVAL_SEQ}:"
-echo "  Fine-tuned: output_eval_finetuned_vggt4d/metrics.json"
-echo ""
-echo "Compare against crossseq baselines:"
-echo "  VGGT baseline:    output_crossseq_vggt_baseline/metrics.json"
-echo "  VGGT4D pretrained: output_crossseq_vggt4d_pretrained/metrics.json"
+echo "Results on ${EVAL_SEQ}:"
+echo "  VGGT baseline:       output_eval_vggt_baseline/metrics.json"
+echo "  VGGT4D pretrained:   output_eval_vggt4d_pretrained/metrics.json"
+echo "  VGGT4D fine-tuned:   output_eval_vggt4d_finetuned/metrics.json"
 echo "=============================================="
 echo "Job finished at: $(date)"

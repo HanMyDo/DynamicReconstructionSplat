@@ -116,6 +116,15 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
     n_static_frames = 0
     n_frames = 0
 
+    # Temporal flicker accumulators: mean absolute difference between adjacent frames.
+    # Ratio = pred_flicker / gt_flicker; lower means less flickering than GT (more stable).
+    total_flicker_pred = 0.0
+    total_flicker_gt = 0.0
+    total_flicker_pred_static = 0.0
+    total_flicker_gt_static = 0.0
+    n_flicker_pairs = 0
+    n_flicker_pairs_static = 0
+
     last_gaussians = None
     last_pred_pose = None
     last_h, last_w = None, None
@@ -187,6 +196,31 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
                         os.path.join(dyn_mask_dir, f"b{batch_idx:04d}_v{v_idx:02d}.png")
                     )
 
+        # Temporal flicker: adjacent-frame absolute difference within this batch.
+        pred_seq = pred_rgb[0].clamp(0, 1)   # [V, 3, H, W]
+        gt_seq   = images[0].clamp(0, 1)     # [V, 3, H, W]
+        for v_idx in range(1, v):
+            diff_pred = (pred_seq[v_idx] - pred_seq[v_idx - 1]).abs().mean().item()
+            diff_gt   = (gt_seq[v_idx]   - gt_seq[v_idx - 1]).abs().mean().item()
+            total_flicker_pred += diff_pred
+            total_flicker_gt   += diff_gt
+            n_flicker_pairs += 1
+
+            if dyn_mask is not None:
+                # Static mask = complement of dynamic mask, averaged over the frame pair
+                static = (1.0 - ((dyn_mask[0, v_idx] + dyn_mask[0, v_idx - 1]) / 2.0)
+                          .clamp(0, 1)).to(device)
+                n_static_px = static.sum().item()
+                if n_static_px >= 10:
+                    m3 = static.unsqueeze(0).expand(3, -1, -1)
+                    total_flicker_pred_static += (
+                        (pred_seq[v_idx] - pred_seq[v_idx - 1]).abs() * m3
+                    ).sum().item() / (3 * n_static_px)
+                    total_flicker_gt_static += (
+                        (gt_seq[v_idx] - gt_seq[v_idx - 1]).abs() * m3
+                    ).sum().item() / (3 * n_static_px)
+                    n_flicker_pairs_static += 1
+
         # Keep last batch for video + PLY output
         last_gaussians = gaussians
         last_pred_pose = pred_pose
@@ -228,6 +262,13 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
 
     # --- Metrics summary ---
     avg_dyn_pixel_frac = total_dyn_pixel_fraction / n_frames if n_frames > 0 else None
+    flicker_pred   = total_flicker_pred / n_flicker_pairs if n_flicker_pairs > 0 else None
+    flicker_gt     = total_flicker_gt   / n_flicker_pairs if n_flicker_pairs > 0 else None
+    flicker_ratio  = (total_flicker_pred / total_flicker_gt) if total_flicker_gt > 0 else None
+    flicker_pred_s = total_flicker_pred_static / n_flicker_pairs_static if n_flicker_pairs_static > 0 else None
+    flicker_gt_s   = total_flicker_gt_static   / n_flicker_pairs_static if n_flicker_pairs_static > 0 else None
+    flicker_ratio_s = (total_flicker_pred_static / total_flicker_gt_static) if total_flicker_gt_static > 0 else None
+
     metrics = {
         "psnr": total_psnr / n_frames if n_frames > 0 else 0.0,
         "ssim": total_ssim / n_frames if n_frames > 0 else 0.0,
@@ -237,18 +278,34 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
         "n_frames": n_frames,
         "n_dynamic_frames": n_dyn_frames,
         "n_static_frames": n_static_frames,
+        # Temporal flicker: mean absolute difference between adjacent rendered frames.
+        # ratio < 1 means less flickering than GT (more stable); ratio > 1 means over-flickering.
+        "temporal_flicker": flicker_pred,
+        "temporal_flicker_gt": flicker_gt,
+        "temporal_flicker_ratio": flicker_ratio,
+        "temporal_flicker_static": flicker_pred_s,
+        "temporal_flicker_static_gt": flicker_gt_s,
+        "temporal_flicker_static_ratio": flicker_ratio_s,
     }
 
     print(f"\nResults:")
-    print(f"  PSNR (overall):          {metrics['psnr']:.2f} dB")
-    print(f"  SSIM (overall):          {metrics['ssim']:.4f}")
+    print(f"  PSNR (overall):               {metrics['psnr']:.2f} dB")
+    print(f"  SSIM (overall):               {metrics['ssim']:.4f}")
     if metrics["psnr_dynamic"] is not None:
-        print(f"  PSNR (dynamic regions):  {metrics['psnr_dynamic']:.2f} dB")
-        print(f"  PSNR (static  regions):  {metrics['psnr_static']:.2f} dB")
-        print(f"  Avg dynamic pixel frac:  {metrics['avg_dyn_pixel_fraction']:.1%}")
+        print(f"  PSNR (dynamic regions):       {metrics['psnr_dynamic']:.2f} dB")
+        print(f"  PSNR (static  regions):       {metrics['psnr_static']:.2f} dB")
+        print(f"  Avg dynamic pixel frac:       {metrics['avg_dyn_pixel_fraction']:.1%}")
     else:
-        print(f"  PSNR (dynamic regions):  N/A")
-        print(f"  PSNR (static  regions):  N/A")
+        print(f"  PSNR (dynamic regions):       N/A")
+        print(f"  PSNR (static  regions):       N/A")
+    if flicker_pred is not None:
+        print(f"  Temporal flicker (rendered):  {flicker_pred:.5f}")
+        print(f"  Temporal flicker (GT ref):    {flicker_gt:.5f}")
+        print(f"  Temporal flicker ratio:       {flicker_ratio:.3f}x  (1.0 = matches GT motion)")
+    if flicker_pred_s is not None:
+        print(f"  Static flicker (rendered):    {flicker_pred_s:.5f}")
+        print(f"  Static flicker (GT ref):      {flicker_gt_s:.5f}")
+        print(f"  Static flicker ratio:         {flicker_ratio_s:.3f}x  (lower = more temporally stable)")
 
     with open(os.path.join(output_dir, "metrics.json"), "w") as f:
         json.dump(metrics, f, indent=2)
