@@ -248,6 +248,7 @@ class TrainingConfig:
     mse_weight: float = 1.0
     temporal_consistency_weight: float = 0.1
     scale_reg_weight: float = 0.01  # L1 penalty on Gaussian scales to prevent size collapse
+    dynamic_loss_downweight: float = 0.9  # Fraction to reduce dynamic-pixel MSE weight (0=uniform, 1=fully masked)
 
     # Pose handling
     use_gt_poses: bool = False  # Use predicted poses — GT poses are in Bonn world frame, incompatible with VGGT4D's predicted world frame
@@ -456,9 +457,6 @@ def create_model(config: TrainingConfig) -> AnySplat:
     model = AnySplat(encoder_cfg, decoder_cfg)
 
     # Load pretrained GS head weights from the official AnySplat checkpoint.
-    # The VGGT backbone (aggregator, camera/depth head) is already loaded above
-    # from VGGT-1B, but the gaussian_param_head and gaussian_adapter start with
-    # random weights — that's why the baseline produces no colors.
     print("Loading pretrained GS head weights from lhjiang/anysplat ...")
     pretrained = AnySplat.from_pretrained("lhjiang/anysplat")
     gs_head_result = model.encoder.gaussian_param_head.load_state_dict(
@@ -514,6 +512,8 @@ def compute_rendering_loss(
     gaussians,
     extrinsics: torch.Tensor,
     intrinsics: torch.Tensor,
+    dyn_mask: Optional[torch.Tensor] = None,
+    dynamic_loss_downweight: float = 0.0,
 ) -> tuple:
     """
     Compute MSE rendering loss by rendering predicted Gaussians with given poses.
@@ -524,6 +524,9 @@ def compute_rendering_loss(
         gaussians: Predicted Gaussians
         extrinsics: 4x4 world-to-camera matrices [B, V, 4, 4]
         intrinsics: 3x3 intrinsic matrices [B, V, 3, 3]
+        dyn_mask: Optional binary dynamic mask [B, V, H, W] (1=dynamic, 0=static)
+        dynamic_loss_downweight: Fraction to reduce dynamic-pixel loss weight.
+            0.0 = uniform loss, 0.9 = dynamic pixels get 0.1× weight, 1.0 = fully masked.
 
     Returns:
         (mse_loss, decoder_output)
@@ -549,11 +552,17 @@ def compute_rendering_loss(
         "depth",
     )
 
-    # Compute MSE loss
     pred_rgb = output.color  # [B, V, 3, H, W]
     gt_rgb = images  # Already in [0, 1]
 
-    mse_loss = F.mse_loss(pred_rgb, gt_rgb)
+    if dyn_mask is not None and dynamic_loss_downweight > 0.0:
+        # Static pixels keep weight 1.0; dynamic pixels are downweighted.
+        # Unsqueeze over channel dim so weights broadcast to [B, V, 3, H, W].
+        weights = 1.0 - dynamic_loss_downweight * dyn_mask.float().to(pred_rgb.device)
+        weights = weights.unsqueeze(2)
+        mse_loss = (F.mse_loss(pred_rgb, gt_rgb, reduction='none') * weights).mean()
+    else:
+        mse_loss = F.mse_loss(pred_rgb, gt_rgb)
 
     return mse_loss, output
 
@@ -721,7 +730,9 @@ def train_epoch(
 
             # Compute losses
             mse_loss, _ = compute_rendering_loss(
-                model, images, gaussians, render_extrinsics, render_intrinsics
+                model, images, gaussians, render_extrinsics, render_intrinsics,
+                dyn_mask=infos.get('dyn_mask', None),
+                dynamic_loss_downweight=config.dynamic_loss_downweight,
             )
 
             temporal_loss = compute_temporal_loss(infos)
@@ -795,6 +806,8 @@ def validate(
     total_mse = 0.0
     total_psnr = 0.0
     total_ssim = 0.0
+    total_psnr_static = 0.0
+    n_static_frames = 0
     num_batches = 0
 
     with torch.no_grad():
@@ -808,6 +821,7 @@ def validate(
             encoder_output = model.encoder(images, global_step=global_step)
             gaussians = encoder_output.gaussians
             pred_context_pose = encoder_output.pred_context_pose
+            infos = encoder_output.infos
 
             # Use GT poses for validation too
             if config.use_gt_poses and "gt_extrinsics" in batch:
@@ -847,18 +861,35 @@ def validate(
             ).mean().item()
             total_ssim += ssim_val
 
+            # Static-region PSNR using the dynamic mask from the encoder
+            dyn_mask = infos.get('dyn_mask', None)
+            if dyn_mask is not None:
+                for bi in range(b):
+                    for vi in range(v):
+                        mask = dyn_mask[bi, vi].to(device)  # [H, W]
+                        n_static = (mask.numel() - mask.sum()).item()
+                        if n_static >= 10:
+                            static_w = (1.0 - mask).clamp(0, 1).unsqueeze(0).expand(3, -1, -1)
+                            mse_s = ((pred_rgb[bi, vi] * static_w - gt_rgb[bi, vi] * static_w) ** 2).sum() / (3 * n_static)
+                            total_psnr_static += -10 * torch.log10(mse_s + 1e-8).item()
+                            n_static_frames += 1
+
             num_batches += 1
 
     n = max(num_batches, 1)
     metrics = {
-        'val_mse':  total_mse  / n,
-        'val_psnr': total_psnr / n,
-        'val_ssim': total_ssim / n,
+        'val_mse':         total_mse  / n,
+        'val_psnr':        total_psnr / n,
+        'val_ssim':        total_ssim / n,
+        'val_psnr_static': total_psnr_static / n_static_frames if n_static_frames > 0 else None,
     }
 
+    static_str = (f", PSNR-static: {metrics['val_psnr_static']:.2f} dB"
+                  if metrics['val_psnr_static'] is not None else "")
     print(f"Validation - MSE: {metrics['val_mse']:.4f}, "
           f"PSNR: {metrics['val_psnr']:.2f} dB, "
-          f"SSIM: {metrics['val_ssim']:.4f}")
+          f"SSIM: {metrics['val_ssim']:.4f}"
+          f"{static_str}")
     return metrics
 
 
@@ -954,6 +985,9 @@ def main():
                         help="Use predicted poses instead of GT (not recommended)")
     parser.add_argument("--vggt4d_weights_path", type=str, default=None,
                         help="Path to pretrained VGGT4D weights (.pt). If omitted, initializes from VGGT-1B.")
+    parser.add_argument("--dynamic_loss_downweight", type=float, default=0.9,
+                        help="How much to reduce MSE weight for dynamic pixels (0=uniform, 0.9=10%% weight, 1=fully masked). "
+                             "Requires VGGT4D dynamic detection.")
 
     args = parser.parse_args()
 
@@ -977,6 +1011,7 @@ def main():
         intrinsics_preset=args.intrinsics,
         temporal_consistency_weight=args.temporal_weight,
         scale_reg_weight=args.scale_reg_weight,
+        dynamic_loss_downweight=args.dynamic_loss_downweight,
         use_gt_poses=not args.no_gt_poses,
         vggt4d_weights_path=args.vggt4d_weights_path,
     )
@@ -1117,16 +1152,22 @@ def main():
         if (epoch + 1) % 5 == 0 or epoch == config.num_epochs - 1:
             val_metrics = validate(model, val_loader, config, global_step)
 
-            if val_metrics['val_psnr'] > best_val_psnr:
-                best_val_psnr = val_metrics['val_psnr']
+            # Prefer static PSNR for selection (aligns with thesis goal of improving
+            # static reconstruction). Falls back to overall PSNR when no dynamic
+            # mask is available (e.g. --no_vggt4d runs).
+            psnr_for_selection = val_metrics['val_psnr_static'] or val_metrics['val_psnr']
+            if psnr_for_selection > best_val_psnr:
+                best_val_psnr = psnr_for_selection
                 best_path = os.path.join(config.output_dir, 'checkpoint_best.pt')
                 torch.save({
                     'epoch': epoch,
                     'global_step': global_step,
                     'model_state_dict': model.state_dict(),
-                    'val_psnr': best_val_psnr,
+                    'val_psnr': val_metrics['val_psnr'],
+                    'val_psnr_static': val_metrics['val_psnr_static'],
                 }, best_path)
-                print(f"New best model: PSNR {best_val_psnr:.2f} dB")
+                criterion = "PSNR-static" if val_metrics['val_psnr_static'] is not None else "PSNR"
+                print(f"New best model: {criterion} {best_val_psnr:.2f} dB")
 
     # Save final
     save_checkpoint(model, optimizer, scheduler, config.num_epochs - 1, global_step, config)
