@@ -79,15 +79,14 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp train_vggt4d_opp ba
   python train_temporal_gaussian_head.py \
     --data_dir /tmp/bonn_data/rgbd_bonn_dataset \
     --dataset_names rgbd_bonn_crowd3,rgbd_bonn_crowd2,rgbd_bonn_balloon,rgbd_bonn_synchronous \
-    --output_dir output_finetune_vggt4d \
+    --output_dir output_weighted_mse \
     --num_epochs 20 \
     --batch_size 1 \
     --learning_rate 1e-6 \
     --num_frames 12 \
     --temporal_weight 0.1 \
     --intrinsics bonn \
-    --vggt4d_weights_path /mnt/home/hanmydo/DynamicReconstructionSplat/ckpts/vggt4d_model_tracker_fixed_e20.pt \
-    --resume /mnt/home/hanmydo/DynamicReconstructionSplat/output_finetune_vggt4d/checkpoint_latest.pt
+    --vggt4d_weights_path /mnt/home/hanmydo/DynamicReconstructionSplat/ckpts/vggt4d_model_tracker_fixed_e20.pt
 "
 
 enroot remove -f train_vggt4d_opp
