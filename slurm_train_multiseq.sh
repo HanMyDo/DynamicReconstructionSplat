@@ -86,7 +86,8 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp train_vggt4d_opp ba
     --num_frames 12 \
     --temporal_weight 0.1 \
     --intrinsics bonn \
-    --vggt4d_weights_path /mnt/home/hanmydo/DynamicReconstructionSplat/ckpts/vggt4d_model_tracker_fixed_e20.pt
+    --vggt4d_weights_path /mnt/home/hanmydo/DynamicReconstructionSplat/ckpts/vggt4d_model_tracker_fixed_e20.pt \
+    --resume /mnt/home/hanmydo/DynamicReconstructionSplat/output_weighted_mse/checkpoint_latest.pt
 "
 
 enroot remove -f train_vggt4d_opp
