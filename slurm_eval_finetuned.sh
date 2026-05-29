@@ -20,8 +20,8 @@ mkdir -p slurm_logs
 
 EVAL_SEQ="rgbd_bonn_crowd"
 VGGT4D_CKPT="/mnt/home/hanmydo/DynamicReconstructionSplat/ckpts/vggt4d_model_tracker_fixed_e20.pt"
-BEST_CKPT="/mnt/home/hanmydo/DynamicReconstructionSplat/output_finetune_vggt4d/checkpoint_best.pt"
-LATEST_CKPT="/mnt/home/hanmydo/DynamicReconstructionSplat/output_finetune_vggt4d/checkpoint_latest.pt"
+BEST_CKPT="/mnt/home/hanmydo/DynamicReconstructionSplat/output_finetune_lr6/checkpoint_best.pt"
+LATEST_CKPT="/mnt/home/hanmydo/DynamicReconstructionSplat/output_finetune_lr6/checkpoint_latest.pt"
 
 echo "=============================================="
 echo "Eval on held-out: ${EVAL_SEQ}"
