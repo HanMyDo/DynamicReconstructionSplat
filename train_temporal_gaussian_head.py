@@ -36,6 +36,14 @@ import numpy as np
 from PIL import Image
 import torchvision.transforms.functional as TF
 
+# Optional: wandb for real-time training-metrics dashboard. Soft import so the
+# script still runs in environments without wandb installed.
+try:
+    import wandb
+    WANDB_AVAILABLE = True
+except ImportError:
+    WANDB_AVAILABLE = False
+
 # Add project to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -235,12 +243,16 @@ class TrainingConfig:
     vggt4d_weights_path: str = None
 
     # Training
+    # LR schedule follows VGGT-Ω §6: linear warmup -> cosine decay over full cycle.
+    # Ω recommends 10-15% warmup ratio for non-reconstruction downstream tasks
+    # (Gaussian splatting head qualifies). Peak LR kept small for fine-tuning.
     batch_size: int = 1
     num_workers: int = 4
     learning_rate: float = 1e-4
     weight_decay: float = 0.01
     num_epochs: int = 50
-    warmup_steps: int = 500
+    warmup_ratio: float = 0.10  # Fraction of total optimizer steps used for linear warmup.
+    warmup_steps: int = 0       # If > 0, overrides warmup_ratio with an absolute step count.
     gradient_clip: float = 1.0
     accumulate_grad_batches: int = 4  # Effective batch size = batch_size * accumulate
 
@@ -257,6 +269,11 @@ class TrainingConfig:
     output_dir: str = "output_finetune"
     save_every_n_steps: int = 1000
     log_every_n_steps: int = 100
+
+    # Telemetry (wandb)
+    use_wandb: bool = True
+    wandb_project: str = "dynrecsplat"
+    wandb_run_name: Optional[str] = None  # If None, wandb auto-generates.
 
     # Device
     device: str = "cuda"
@@ -613,8 +630,13 @@ def compute_temporal_loss(
                 ).view(*static_mask.shape[:2], *diff.shape[2:4], *([1] * (diff.dim() - 4)))
 
             diff = diff * static_mask
+            # Denominator must count the same elements the numerator sums over;
+            # static_mask is shape [..., 1] and broadcasts across the channel dim,
+            # so without expand_as opacity (C=1) reads correctly but scales (C=3) /
+            # rotations (C=4) are inflated by their channel count.
+            denom = static_mask.expand_as(diff).sum().clamp_min(1e-8)
             if static_mask.sum() > 0:
-                loss = diff.sum() / (static_mask.sum() + 1e-8)
+                loss = diff.sum() / denom
             else:
                 loss = diff.mean()
         else:
@@ -632,6 +654,12 @@ def compute_temporal_loss(
 # ============================================================================
 # Training loop
 # ============================================================================
+
+def wandb_log(metrics: dict, step: Optional[int] = None) -> None:
+    """No-op if wandb isn't initialized; logs scalars otherwise."""
+    if WANDB_AVAILABLE and wandb.run is not None:
+        wandb.log(metrics, step=step)
+
 
 def check_gaussian_health(gaussians, loss, step) -> bool:
     """
@@ -785,11 +813,36 @@ def train_epoch(
             'lr': f'{last_lrs[0]:.2e}',
         })
 
+        # wandb per-batch logging at log_every_n_steps cadence.
+        # Log raw mse for an immediate, batch-local read; tqdm running averages
+        # are deliberately not logged (they'd lag and smear epoch boundaries).
+        if global_step > 0 and batch_idx % config.log_every_n_steps == 0:
+            batch_mse = mse_loss.item()
+            wandb_log({
+                'train/loss': loss.item() * config.accumulate_grad_batches,
+                'train/mse': batch_mse,
+                'train/psnr_proxy_db': -10.0 * np.log10(max(batch_mse, 1e-8)),
+                'train/temporal': temporal_loss.item(),
+                'train/scale_reg': scale_reg.item(),
+                'train/lr': last_lrs[0],
+                'train/epoch_frac': epoch + batch_idx / max(len(dataloader), 1),
+            }, step=global_step)
+
         # Save checkpoint periodically
         if global_step > 0 and global_step % config.save_every_n_steps == 0:
             save_checkpoint(model, optimizer, scheduler, epoch, global_step, config)
 
     avg_loss = total_loss / num_batches if num_batches > 0 else 0.0
+    if num_batches > 0:
+        avg_mse = total_mse_loss / num_batches
+        wandb_log({
+            'train_epoch/loss': avg_loss,
+            'train_epoch/mse': avg_mse,
+            'train_epoch/psnr_proxy_db': -10.0 * np.log10(max(avg_mse, 1e-8)),
+            'train_epoch/temporal': total_temporal_loss / num_batches,
+            'train_epoch/scale_reg': total_scale_reg / num_batches,
+            'train_epoch/epoch': epoch + 1,
+        }, step=global_step)
     return avg_loss, global_step, False
 
 
@@ -890,6 +943,16 @@ def validate(
           f"PSNR: {metrics['val_psnr']:.2f} dB, "
           f"SSIM: {metrics['val_ssim']:.4f}"
           f"{static_str}")
+
+    wandb_payload = {
+        'val/mse': metrics['val_mse'],
+        'val/psnr_db': metrics['val_psnr'],
+        'val/ssim': metrics['val_ssim'],
+    }
+    if metrics['val_psnr_static'] is not None:
+        wandb_payload['val/psnr_static_db'] = metrics['val_psnr_static']
+    wandb_log(wandb_payload, step=global_step)
+
     return metrics
 
 
@@ -969,6 +1032,10 @@ def main():
     parser.add_argument("--num_epochs", type=int, default=50)
     parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument("--learning_rate", type=float, default=1e-4)
+    parser.add_argument("--warmup_ratio", type=float, default=0.10,
+                        help="Linear-warmup fraction of total steps (VGGT-Ω §6: 10-15%% for non-recon fine-tuning).")
+    parser.add_argument("--warmup_steps", type=int, default=0,
+                        help="Absolute warmup steps; overrides --warmup_ratio when > 0.")
     parser.add_argument("--num_frames", type=int, default=8)
     parser.add_argument("--frame_stride", type=int, default=1,
                         help="Stride between sampled frames")
@@ -988,6 +1055,12 @@ def main():
     parser.add_argument("--dynamic_loss_downweight", type=float, default=0.9,
                         help="How much to reduce MSE weight for dynamic pixels (0=uniform, 0.9=10%% weight, 1=fully masked). "
                              "Requires VGGT4D dynamic detection.")
+    parser.add_argument("--no_wandb", action="store_true",
+                        help="Disable wandb logging (otherwise enabled by default).")
+    parser.add_argument("--wandb_project", type=str, default="dynrecsplat",
+                        help="wandb project name.")
+    parser.add_argument("--wandb_run_name", type=str, default=None,
+                        help="wandb run name; if omitted, wandb auto-generates one.")
 
     args = parser.parse_args()
 
@@ -1006,6 +1079,8 @@ def main():
         num_epochs=args.num_epochs,
         batch_size=args.batch_size,
         learning_rate=args.learning_rate,
+        warmup_ratio=args.warmup_ratio,
+        warmup_steps=args.warmup_steps,
         num_frames=args.num_frames,
         frame_stride=args.frame_stride,
         intrinsics_preset=args.intrinsics,
@@ -1014,6 +1089,9 @@ def main():
         dynamic_loss_downweight=args.dynamic_loss_downweight,
         use_gt_poses=not args.no_gt_poses,
         vggt4d_weights_path=args.vggt4d_weights_path,
+        use_wandb=not args.no_wandb,
+        wandb_project=args.wandb_project,
+        wandb_run_name=args.wandb_run_name,
     )
 
     print("=" * 60)
@@ -1027,6 +1105,20 @@ def main():
     os.makedirs(config.output_dir, exist_ok=True)
     with open(os.path.join(config.output_dir, 'config.json'), 'w') as f:
         json.dump(config.__dict__, f, indent=2)
+
+    # Initialize wandb (no-op if disabled or unavailable; offline mode if no API key).
+    if config.use_wandb:
+        if not WANDB_AVAILABLE:
+            print("wandb requested but not installed; continuing without telemetry.")
+        else:
+            wandb.init(
+                project=config.wandb_project,
+                name=config.wandb_run_name,
+                config=config.__dict__,
+                dir=config.output_dir,
+            )
+            print(f"wandb: project={config.wandb_project}, "
+                  f"run={wandb.run.name}, mode={wandb.run.settings.mode}")
 
     device = torch.device(config.device if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
@@ -1103,18 +1195,27 @@ def main():
         weight_decay=config.weight_decay,
     )
 
-    # Scheduler with warmup
+    # Scheduler: VGGT-Ω §6 recipe — linear warmup -> cosine decay across full cycle.
     total_steps = len(train_loader) * config.num_epochs // config.accumulate_grad_batches
+    if config.warmup_steps > 0:
+        warmup_steps = config.warmup_steps
+        warmup_source = "explicit"
+    else:
+        warmup_steps = max(1, int(config.warmup_ratio * total_steps))
+        warmup_source = f"ratio={config.warmup_ratio:.0%}"
+    print(f"LR schedule: peak={config.learning_rate:.1e}, total_steps={total_steps}, "
+          f"warmup={warmup_steps} ({warmup_source}), eta_min=1e-6")
+
     warmup_scheduler = LinearLR(
-        optimizer, start_factor=0.1, end_factor=1.0, total_iters=config.warmup_steps
+        optimizer, start_factor=0.1, end_factor=1.0, total_iters=warmup_steps
     )
     main_scheduler = CosineAnnealingLR(
-        optimizer, T_max=max(1, total_steps - config.warmup_steps), eta_min=1e-6
+        optimizer, T_max=max(1, total_steps - warmup_steps), eta_min=1e-6
     )
     scheduler = SequentialLR(
         optimizer,
         schedulers=[warmup_scheduler, main_scheduler],
-        milestones=[config.warmup_steps],
+        milestones=[warmup_steps],
     )
 
     scaler = GradScaler(enabled=config.mixed_precision)
@@ -1177,6 +1278,9 @@ def main():
     print(f"Best validation PSNR: {best_val_psnr:.2f} dB")
     print(f"Checkpoints: {config.output_dir}")
     print("=" * 60)
+
+    if WANDB_AVAILABLE and wandb.run is not None:
+        wandb.finish()
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 #!/bin/sh
 #SBATCH --job-name=train_vggt4d_opp
 #SBATCH --partition=24g
-#SBATCH --qos=students_opportunistic
+#SBATCH --qos=students_normal
 #SBATCH --output=slurm_logs/train_vggt4d_opp_%j.out
 #SBATCH --error=slurm_logs/train_vggt4d_opp_%j.err
 #SBATCH --gres=gpu:1
@@ -61,33 +61,48 @@ else
 fi
 echo ""
 
+# Source wandb API key from cluster home if present; otherwise run offline so
+# wandb.init() still works without contacting the cloud (logs sync later via
+# `wandb sync` from any machine that can read the run dir).
+if [ -f ~/.wandb_key ]; then
+  WANDB_SETUP="export WANDB_API_KEY='$(cat ~/.wandb_key)'"
+  echo "wandb: API key found, will log online."
+else
+  WANDB_SETUP="export WANDB_MODE=offline"
+  echo "wandb: no ~/.wandb_key found, will log in offline mode."
+fi
+echo ""
+
 enroot remove -f train_vggt4d_opp 2>/dev/null || true
 enroot create --name train_vggt4d_opp ~/anysplat.sqsh
 
 enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp train_vggt4d_opp bash -c "
   cd /mnt/home/hanmydo/DynamicReconstructionSplat
   export CUDA_VISIBLE_DEVICES=0
+  $WANDB_SETUP
   echo 'Current directory:' \$(pwd)
   python --version
   nvidia-smi
   echo ''
 
-  echo 'Installing open3d for Stage 3 dynamic mask refinement...'
-  pip install open3d --quiet
+  echo 'Installing open3d (mask refinement) and wandb (telemetry)...'
+  pip install open3d wandb --quiet
   echo ''
 
   python train_temporal_gaussian_head.py \
     --data_dir /tmp/bonn_data/rgbd_bonn_dataset \
     --dataset_names rgbd_bonn_crowd3,rgbd_bonn_crowd2,rgbd_bonn_balloon,rgbd_bonn_synchronous \
-    --output_dir output_finetune_lr6 \
+    --output_dir output_finetune_omega_recipe \
     --num_epochs 20 \
     --batch_size 1 \
-    --learning_rate 1e-6 \
+    --learning_rate 1e-4 \
+    --warmup_ratio 0.10 \
     --num_frames 12 \
-    --temporal_weight 0.1 \
+    --temporal_weight 0.25 \
     --intrinsics bonn \
     --vggt4d_weights_path /mnt/home/hanmydo/DynamicReconstructionSplat/ckpts/vggt4d_model_tracker_fixed_e20.pt \
-    --resume /mnt/home/hanmydo/DynamicReconstructionSplat/output_finetune_lr6/checkpoint_latest.pt
+    --wandb_project dynrecsplat \
+    --wandb_run_name omega_recipe_v1_\${SLURM_JOB_ID}
 "
 
 enroot remove -f train_vggt4d_opp
