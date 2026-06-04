@@ -268,7 +268,7 @@ class TrainingConfig:
     # Checkpointing
     output_dir: str = "output_finetune"
     save_every_n_steps: int = 1000
-    log_every_n_steps: int = 100
+    log_every_n_steps: int = 25  # wandb metric cadence: ~78 points per ~2K-batch epoch.
 
     # Telemetry (wandb)
     use_wandb: bool = True
@@ -1061,6 +1061,8 @@ def main():
                         help="wandb project name.")
     parser.add_argument("--wandb_run_name", type=str, default=None,
                         help="wandb run name; if omitted, wandb auto-generates one.")
+    parser.add_argument("--log_every_n_steps", type=int, default=25,
+                        help="Cadence of per-batch wandb metric logging (lower = denser curves).")
 
     args = parser.parse_args()
 
@@ -1092,6 +1094,7 @@ def main():
         use_wandb=not args.no_wandb,
         wandb_project=args.wandb_project,
         wandb_run_name=args.wandb_run_name,
+        log_every_n_steps=args.log_every_n_steps,
     )
 
     print("=" * 60)

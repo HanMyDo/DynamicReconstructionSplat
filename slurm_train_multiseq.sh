@@ -102,7 +102,7 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp train_vggt4d_opp ba
     --intrinsics bonn \
     --vggt4d_weights_path /mnt/home/hanmydo/DynamicReconstructionSplat/ckpts/vggt4d_model_tracker_fixed_e20.pt \
     --wandb_project dynrecsplat \
-    --wandb_run_name omega_recipe_v1_\${SLURM_JOB_ID}
+    --wandb_run_name omega_recipe_v1_${SLURM_JOB_ID}
 "
 
 enroot remove -f train_vggt4d_opp
