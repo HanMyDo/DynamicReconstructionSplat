@@ -758,9 +758,10 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
                 0
             )  # little bit hacky
 
-        # Apply dynamic mask to suppress dynamic regions
+        # Apply dynamic mask to suppress dynamic regions (no-op unless suppress_dynamic_gaussians=True).
         if dyn_mask is not None and self.cfg.enable_dynamic_detection:
-            print("Applying dynamic mask to Gaussian opacities...")
+            if self.cfg.suppress_dynamic_gaussians:
+                print("Applying dynamic mask to Gaussian opacities...")
             opacity = self.apply_dynamic_mask_to_gaussians(
                 opacity, pts_all, dyn_mask, conf_valid_mask
             )

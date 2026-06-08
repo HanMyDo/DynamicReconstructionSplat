@@ -884,6 +884,7 @@ def validate(
     total_ssim = 0.0
     total_psnr_static = 0.0
     n_static_frames = 0
+    n_frames = 0
     num_batches = 0
 
     with torch.no_grad():
@@ -918,45 +919,52 @@ def validate(
                     render_intrinsics[:, :, 2],
                 ], dim=2)
 
-            mse_loss, render_output = compute_rendering_loss(
+            _, render_output = compute_rendering_loss(
                 model, images, gaussians, render_extrinsics, render_intrinsics
             )
 
-            # PSNR from MSE
-            total_mse += mse_loss.item()
-            psnr = -10 * torch.log10(mse_loss + 1e-8).item()
-            total_psnr += psnr
-
-            # SSIM: compute_ssim expects [B, C, H, W] in [0, 1]
+            # Match eval_gaussian_head.py: clamp to [0,1] then accumulate PSNR/SSIM/MSE
+            # per frame, not per batch. Per-batch aggregation followed by log is biased
+            # vs per-frame log followed by mean (PSNR is non-linear).
             pred_rgb = render_output.color  # [B, V, 3, H, W]
             gt_rgb = images                 # [B, V, 3, H, W]
             bv = pred_rgb.shape[0] * pred_rgb.shape[1]
-            ssim_val = compute_ssim(
-                gt_rgb.view(bv, *gt_rgb.shape[2:]),
-                pred_rgb.view(bv, *pred_rgb.shape[2:]),
-            ).mean().item()
-            total_ssim += ssim_val
+            pred_flat = pred_rgb.view(bv, *pred_rgb.shape[2:]).clamp(0, 1)
+            gt_flat   = gt_rgb.view(bv, *gt_rgb.shape[2:]).clamp(0, 1)
+
+            # compute_psnr in metrics.py also clamps internally; using it here keeps
+            # train-time val PSNR numerically identical to eval_gaussian_head.py output.
+            psnr_per_frame = compute_psnr(gt_flat, pred_flat)  # [BV]
+            ssim_per_frame = compute_ssim(gt_flat, pred_flat)  # [BV]
+            mse_per_frame  = ((pred_flat - gt_flat) ** 2).mean(dim=[1, 2, 3])  # [BV]
+            total_psnr += psnr_per_frame.sum().item()
+            total_ssim += ssim_per_frame.sum().item()
+            total_mse  += mse_per_frame.sum().item()
+            n_frames   += bv
 
             # Static-region PSNR using the dynamic mask from the encoder
             dyn_mask = infos.get('dyn_mask', None)
             if dyn_mask is not None:
+                pred_c = pred_rgb.clamp(0, 1)
+                gt_c   = gt_rgb.clamp(0, 1)
                 for bi in range(b):
                     for vi in range(v):
                         mask = dyn_mask[bi, vi].to(device)  # [H, W]
                         n_static = (mask.numel() - mask.sum()).item()
                         if n_static >= 10:
                             static_w = (1.0 - mask).clamp(0, 1).unsqueeze(0).expand(3, -1, -1)
-                            mse_s = ((pred_rgb[bi, vi] * static_w - gt_rgb[bi, vi] * static_w) ** 2).sum() / (3 * n_static)
+                            mse_s = ((pred_c[bi, vi] * static_w - gt_c[bi, vi] * static_w) ** 2).sum() / (3 * n_static)
                             total_psnr_static += -10 * torch.log10(mse_s + 1e-8).item()
                             n_static_frames += 1
 
             num_batches += 1
 
-    n = max(num_batches, 1)
+    # Per-frame averaging (matches eval_gaussian_head.py).
+    nf = max(n_frames, 1)
     metrics = {
-        'val_mse':         total_mse  / n,
-        'val_psnr':        total_psnr / n,
-        'val_ssim':        total_ssim / n,
+        'val_mse':         total_mse  / nf,
+        'val_psnr':        total_psnr / nf,
+        'val_ssim':        total_ssim / nf,
         'val_psnr_static': total_psnr_static / n_static_frames if n_static_frames > 0 else None,
     }
 
