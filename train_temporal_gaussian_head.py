@@ -770,10 +770,14 @@ def train_epoch(
             # Scale regularization: L1 penalty on mean Gaussian scale to prevent size collapse
             scale_reg = gaussians.scales.mean()
 
-            # SH DC regularization: L1 penalty on mean abs(f_dc) keeps the DC color
-            # term bounded when fine-tuning on color distributions that differ from
-            # AnySplat's pretraining mix (see watchdog threshold of |f_dc|>25).
-            sh_reg = gaussians.harmonics[:, :, :, 0].abs().mean()
+            # SH DC regularization: L2 penalty on f_dc keeps the DC color term
+            # bounded when fine-tuning on color distributions that differ from
+            # AnySplat's pretraining mix. L2 (vs L1) specifically targets outlier
+            # Gaussians — gradient is proportional to f_dc itself, so a few large
+            # values get pulled back hard while well-behaved Gaussians barely feel
+            # the penalty. L1 mean was too weak against heavy-tailed distributions
+            # (max/mean ratio ~9× observed in v3).
+            sh_reg = gaussians.harmonics[:, :, :, 0].pow(2).mean()
 
             # Total loss
             loss = (
@@ -1070,7 +1074,8 @@ def main():
     parser.add_argument("--sh_reg_weight", type=float, default=0.01,
                         help="Weight for L1 regularization on f_dc (SH DC color). Damps SH drift on OOD color distributions.")
     parser.add_argument("--no_gt_poses", action="store_true",
-                        help="Use predicted poses instead of GT (not recommended)")
+                        help="Use predicted poses (required for VGGT4D — GT poses live in Bonn's "
+                             "world frame which is incompatible with the predicted world frame).")
     parser.add_argument("--vggt4d_weights_path", type=str, default=None,
                         help="Path to pretrained VGGT4D weights (.pt). If omitted, initializes from VGGT-1B.")
     parser.add_argument("--dynamic_loss_downweight", type=float, default=0.9,
@@ -1277,8 +1282,8 @@ def main():
             save_checkpoint(model, optimizer, scheduler, epoch, global_step, config)
             break
 
-        # Validate every 5 epochs and at the end
-        if (epoch + 1) % 5 == 0 or epoch == config.num_epochs - 1:
+        # Validate at epoch 1 (early sanity check) and then every 5 epochs / at end.
+        if epoch == 0 or (epoch + 1) % 5 == 0 or epoch == config.num_epochs - 1:
             val_metrics = validate(model, val_loader, config, global_step)
 
             # Prefer static PSNR for selection (aligns with thesis goal of improving

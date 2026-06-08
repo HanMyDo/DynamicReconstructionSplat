@@ -89,13 +89,18 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp train_vggt4d_opp ba
   pip install open3d wandb --quiet
   echo ''
 
-  # Stability recipe v3: v1 (LR=1e-4) diverged via SH blow-up; v2 (LR=3e-5)
-  # delayed but kept drifting. v3 keeps moderate LR but adds an L1 regularizer
-  # on f_dc directly, which dampens the actual diverging quantity.
+  # Recipe v4: discovered the actual root cause — training was running with
+  # use_gt_poses=True due to a CLI default that silently overrode the dataclass
+  # default. GT poses (Bonn world frame) are incompatible with VGGT4D's
+  # predicted world frame; this alone caps val PSNR at ~7 dB regardless of
+  # recipe. v4 fixes the pose handling (--no_gt_poses) and drops the SH
+  # regularizer entirely so the pose fix is the only variable changed from
+  # the earlier failing runs. Recipe otherwise: peak LR 5e-5, warmup 0.15,
+  # grad clip 0.5, temporal weight 0.25.
   python train_temporal_gaussian_head.py \
     --data_dir /tmp/bonn_data/rgbd_bonn_dataset \
     --dataset_names rgbd_bonn_crowd3,rgbd_bonn_crowd2,rgbd_bonn_balloon,rgbd_bonn_synchronous \
-    --output_dir output_finetune_omega_recipe_v3 \
+    --output_dir output_finetune_omega_recipe_v4 \
     --num_epochs 20 \
     --batch_size 1 \
     --learning_rate 5e-5 \
@@ -103,11 +108,12 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp train_vggt4d_opp ba
     --gradient_clip 0.5 \
     --num_frames 12 \
     --temporal_weight 0.25 \
-    --sh_reg_weight 0.01 \
+    --sh_reg_weight 0.0 \
+    --no_gt_poses \
     --intrinsics bonn \
     --vggt4d_weights_path /mnt/home/hanmydo/DynamicReconstructionSplat/ckpts/vggt4d_model_tracker_fixed_e20.pt \
     --wandb_project dynrecsplat \
-    --wandb_run_name omega_recipe_v3_${SLURM_JOB_ID}
+    --wandb_run_name omega_recipe_v4_${SLURM_JOB_ID}
 "
 
 enroot remove -f train_vggt4d_opp
