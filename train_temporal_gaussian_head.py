@@ -260,6 +260,7 @@ class TrainingConfig:
     mse_weight: float = 1.0
     temporal_consistency_weight: float = 0.1
     scale_reg_weight: float = 0.01  # L1 penalty on Gaussian scales to prevent size collapse
+    sh_reg_weight: float = 0.01     # L1 penalty on SH DC magnitude — keeps f_dc bounded when fine-tuning the GS head on OOD color distributions
     dynamic_loss_downweight: float = 0.9  # Fraction to reduce dynamic-pixel MSE weight (0=uniform, 1=fully masked)
 
     # Pose handling
@@ -713,6 +714,7 @@ def train_epoch(
     total_mse_loss = 0.0
     total_temporal_loss = 0.0
     total_scale_reg = 0.0
+    total_sh_reg = 0.0
     num_batches = 0
 
     pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}")
@@ -768,11 +770,17 @@ def train_epoch(
             # Scale regularization: L1 penalty on mean Gaussian scale to prevent size collapse
             scale_reg = gaussians.scales.mean()
 
+            # SH DC regularization: L1 penalty on mean abs(f_dc) keeps the DC color
+            # term bounded when fine-tuning on color distributions that differ from
+            # AnySplat's pretraining mix (see watchdog threshold of |f_dc|>25).
+            sh_reg = gaussians.harmonics[:, :, :, 0].abs().mean()
+
             # Total loss
             loss = (
                 config.mse_weight * mse_loss +
                 config.temporal_consistency_weight * temporal_loss +
-                config.scale_reg_weight * scale_reg
+                config.scale_reg_weight * scale_reg +
+                config.sh_reg_weight * sh_reg
             )
 
         # Health check before backward (use unscaled loss)
@@ -802,6 +810,7 @@ def train_epoch(
         total_mse_loss += mse_loss.item()
         total_temporal_loss += temporal_loss.item()
         total_scale_reg += scale_reg.item()
+        total_sh_reg += sh_reg.item()
         num_batches += 1
 
         last_lrs = scheduler.get_last_lr()
@@ -810,6 +819,7 @@ def train_epoch(
             'mse': f'{total_mse_loss/num_batches:.4f}',
             'temporal': f'{total_temporal_loss/num_batches:.4f}',
             'scale': f'{total_scale_reg/num_batches:.4f}',
+            'sh_reg': f'{total_sh_reg/num_batches:.4f}',
             'lr': f'{last_lrs[0]:.2e}',
         })
 
@@ -829,6 +839,7 @@ def train_epoch(
                 'train/psnr_proxy_db': -10.0 * np.log10(max(batch_mse, 1e-8)),
                 'train/temporal': temporal_loss.item(),
                 'train/scale_reg': scale_reg.item(),
+                'train/sh_reg': sh_reg.item(),
                 'train/f_dc_absmax': f_dc_absmax,
                 'train/scale_max': scale_max,
                 'train/lr': last_lrs[0],
@@ -848,6 +859,7 @@ def train_epoch(
             'train_epoch/psnr_proxy_db': -10.0 * np.log10(max(avg_mse, 1e-8)),
             'train_epoch/temporal': total_temporal_loss / num_batches,
             'train_epoch/scale_reg': total_scale_reg / num_batches,
+            'train_epoch/sh_reg': total_sh_reg / num_batches,
             'train_epoch/epoch': epoch + 1,
         }, step=global_step)
     return avg_loss, global_step, False
@@ -1055,6 +1067,8 @@ def main():
                         help="Weight for temporal consistency loss on Gaussian parameters")
     parser.add_argument("--scale_reg_weight", type=float, default=0.01,
                         help="Weight for L1 scale regularization (prevents Gaussian size collapse)")
+    parser.add_argument("--sh_reg_weight", type=float, default=0.01,
+                        help="Weight for L1 regularization on f_dc (SH DC color). Damps SH drift on OOD color distributions.")
     parser.add_argument("--no_gt_poses", action="store_true",
                         help="Use predicted poses instead of GT (not recommended)")
     parser.add_argument("--vggt4d_weights_path", type=str, default=None,
@@ -1097,6 +1111,7 @@ def main():
         intrinsics_preset=args.intrinsics,
         temporal_consistency_weight=args.temporal_weight,
         scale_reg_weight=args.scale_reg_weight,
+        sh_reg_weight=args.sh_reg_weight,
         dynamic_loss_downweight=args.dynamic_loss_downweight,
         use_gt_poses=not args.no_gt_poses,
         vggt4d_weights_path=args.vggt4d_weights_path,

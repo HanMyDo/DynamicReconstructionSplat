@@ -89,23 +89,25 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp train_vggt4d_opp ba
   pip install open3d wandb --quiet
   echo ''
 
-  # Stability recipe v2: prior run (v1) diverged at step 933 via SH (f_dc) blow-up
-  # near peak LR=1e-4. We lower peak LR, tighten grad clip, and extend warmup.
+  # Stability recipe v3: v1 (LR=1e-4) diverged via SH blow-up; v2 (LR=3e-5)
+  # delayed but kept drifting. v3 keeps moderate LR but adds an L1 regularizer
+  # on f_dc directly, which dampens the actual diverging quantity.
   python train_temporal_gaussian_head.py \
     --data_dir /tmp/bonn_data/rgbd_bonn_dataset \
     --dataset_names rgbd_bonn_crowd3,rgbd_bonn_crowd2,rgbd_bonn_balloon,rgbd_bonn_synchronous \
-    --output_dir output_finetune_omega_recipe_v2 \
+    --output_dir output_finetune_omega_recipe_v3 \
     --num_epochs 20 \
     --batch_size 1 \
-    --learning_rate 3e-5 \
+    --learning_rate 5e-5 \
     --warmup_ratio 0.15 \
     --gradient_clip 0.5 \
     --num_frames 12 \
     --temporal_weight 0.25 \
+    --sh_reg_weight 0.01 \
     --intrinsics bonn \
     --vggt4d_weights_path /mnt/home/hanmydo/DynamicReconstructionSplat/ckpts/vggt4d_model_tracker_fixed_e20.pt \
     --wandb_project dynrecsplat \
-    --wandb_run_name omega_recipe_v2_${SLURM_JOB_ID}
+    --wandb_run_name omega_recipe_v3_${SLURM_JOB_ID}
 "
 
 enroot remove -f train_vggt4d_opp
