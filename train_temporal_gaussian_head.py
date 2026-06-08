@@ -816,14 +816,21 @@ def train_epoch(
         # wandb per-batch logging at log_every_n_steps cadence.
         # Log raw mse for an immediate, batch-local read; tqdm running averages
         # are deliberately not logged (they'd lag and smear epoch boundaries).
+        # f_dc_absmax and scale_max are the actual quantities the health watchdog
+        # checks, so they appear on the dashboard as a leading divergence signal.
         if global_step > 0 and batch_idx % config.log_every_n_steps == 0:
             batch_mse = mse_loss.item()
+            with torch.no_grad():
+                f_dc_absmax = gaussians.harmonics[:, :, :, 0].abs().max().item()
+                scale_max = gaussians.scales.max().item()
             wandb_log({
                 'train/loss': loss.item() * config.accumulate_grad_batches,
                 'train/mse': batch_mse,
                 'train/psnr_proxy_db': -10.0 * np.log10(max(batch_mse, 1e-8)),
                 'train/temporal': temporal_loss.item(),
                 'train/scale_reg': scale_reg.item(),
+                'train/f_dc_absmax': f_dc_absmax,
+                'train/scale_max': scale_max,
                 'train/lr': last_lrs[0],
                 'train/epoch_frac': epoch + batch_idx / max(len(dataloader), 1),
             }, step=global_step)
@@ -1063,6 +1070,8 @@ def main():
                         help="wandb run name; if omitted, wandb auto-generates one.")
     parser.add_argument("--log_every_n_steps", type=int, default=25,
                         help="Cadence of per-batch wandb metric logging (lower = denser curves).")
+    parser.add_argument("--gradient_clip", type=float, default=1.0,
+                        help="Max gradient norm for clipping. Lower = safer against parameter blow-up.")
 
     args = parser.parse_args()
 
@@ -1095,6 +1104,7 @@ def main():
         wandb_project=args.wandb_project,
         wandb_run_name=args.wandb_run_name,
         log_every_n_steps=args.log_every_n_steps,
+        gradient_clip=args.gradient_clip,
     )
 
     print("=" * 60)
