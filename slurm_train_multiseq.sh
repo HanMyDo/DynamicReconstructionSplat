@@ -7,6 +7,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 #SBATCH --nodelist=heidelberg,muenchen,koblenz
+#SBATCH --time=23:59:00
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=Han-My.Do@tum.de
 

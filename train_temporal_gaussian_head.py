@@ -267,8 +267,12 @@ class TrainingConfig:
     use_gt_poses: bool = False  # Use predicted poses — GT poses are in Bonn world frame, incompatible with VGGT4D's predicted world frame
 
     # Checkpointing
+    # save_every_n_steps tuned so at least one save lands inside the cluster's
+    # 24h wallclock: at ~30s/batch × accumulate_grad_batches=4, 200 steps = ~6.7h
+    # per save → ~3 saves per wallclock window → at most ~6.7h of work lost if
+    # SLURM hard-kills mid-batch.
     output_dir: str = "output_finetune"
-    save_every_n_steps: int = 1000
+    save_every_n_steps: int = 200
     log_every_n_steps: int = 25  # wandb metric cadence: ~78 points per ~2K-batch epoch.
 
     # Telemetry (wandb)
