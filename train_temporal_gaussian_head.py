@@ -1285,7 +1285,21 @@ def main():
     print("Starting training...")
     print("=" * 60)
 
+    # Initialize the best-checkpoint guard from an existing checkpoint_best.pt
+    # if one is present. Without this, a resumed run would happily overwrite
+    # a strong best-checkpoint with the first (possibly worse) val it produces.
     best_val_psnr = 0.0
+    existing_best_path = os.path.join(config.output_dir, 'checkpoint_best.pt')
+    if os.path.exists(existing_best_path):
+        try:
+            existing = torch.load(existing_best_path, map_location='cpu', weights_only=False)
+            prior_best = existing.get('val_psnr_static') or existing.get('val_psnr') or 0.0
+            best_val_psnr = float(prior_best)
+            print(f"Found existing checkpoint_best.pt with PSNR {best_val_psnr:.2f} dB — "
+                  f"will only overwrite if a later val beats this.")
+            del existing
+        except Exception as e:
+            print(f"Could not read existing checkpoint_best.pt ({e}); starting best_val_psnr at 0.")
 
     for epoch in range(start_epoch, config.num_epochs):
         print(f"\nEpoch {epoch + 1}/{config.num_epochs}")
