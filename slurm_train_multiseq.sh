@@ -89,18 +89,23 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp train_vggt4d_opp ba
   pip install open3d wandb --quiet
   echo ''
 
-  # Recipe v4: discovered the actual root cause — training was running with
-  # use_gt_poses=True due to a CLI default that silently overrode the dataclass
-  # default. GT poses (Bonn world frame) are incompatible with VGGT4D's
-  # predicted world frame; this alone caps val PSNR at ~7 dB regardless of
-  # recipe. v4 fixes the pose handling (--no_gt_poses) and drops the SH
-  # regularizer entirely so the pose fix is the only variable changed from
-  # the earlier failing runs. Recipe otherwise: peak LR 5e-5, warmup 0.15,
-  # grad clip 0.5, temporal weight 0.25.
+  # Recipe v4 + auto-resume: if checkpoint_latest.pt exists in the output dir,
+  # resume from it; otherwise start fresh. This makes wallclock-limited runs
+  # restartable via plain sbatch without manual flag edits.
+  OUTPUT_DIR=output_finetune_omega_recipe_v4
+  LATEST_CKPT=/mnt/home/hanmydo/DynamicReconstructionSplat/\${OUTPUT_DIR}/checkpoint_latest.pt
+  if [ -f \"\${LATEST_CKPT}\" ]; then
+    echo \"Resuming from \${LATEST_CKPT}\"
+    RESUME_FLAG=\"--resume \${LATEST_CKPT}\"
+  else
+    echo \"No checkpoint_latest.pt found — starting fresh.\"
+    RESUME_FLAG=\"\"
+  fi
+
   python train_temporal_gaussian_head.py \
     --data_dir /tmp/bonn_data/rgbd_bonn_dataset \
     --dataset_names rgbd_bonn_crowd3,rgbd_bonn_crowd2,rgbd_bonn_balloon,rgbd_bonn_synchronous \
-    --output_dir output_finetune_omega_recipe_v4 \
+    --output_dir \${OUTPUT_DIR} \
     --num_epochs 20 \
     --batch_size 1 \
     --learning_rate 5e-5 \
@@ -113,7 +118,8 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp train_vggt4d_opp ba
     --intrinsics bonn \
     --vggt4d_weights_path /mnt/home/hanmydo/DynamicReconstructionSplat/ckpts/vggt4d_model_tracker_fixed_e20.pt \
     --wandb_project dynrecsplat \
-    --wandb_run_name omega_recipe_v4_${SLURM_JOB_ID}
+    --wandb_run_name omega_recipe_v4_\${SLURM_JOB_ID} \
+    \${RESUME_FLAG}
 "
 
 enroot remove -f train_vggt4d_opp

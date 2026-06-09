@@ -1035,11 +1035,20 @@ def load_checkpoint(model, optimizer, scheduler, checkpoint_path):
     current.update(head_keys)
     model.load_state_dict(current)
 
-    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-    scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+    # Older 'best' checkpoints saved only model weights. Be permissive so they
+    # can still serve as resume points — optimizer/scheduler simply start fresh
+    # (no Adam moments, warmup restarts), which is acceptable for short top-ups.
+    if 'optimizer_state_dict' in checkpoint:
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    else:
+        print(f"  warning: '{checkpoint_path}' has no optimizer state — Adam moments reset.")
+    if 'scheduler_state_dict' in checkpoint:
+        scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+    else:
+        print(f"  warning: '{checkpoint_path}' has no scheduler state — LR schedule restarts at step 0.")
 
-    epoch = checkpoint['epoch']
-    global_step = checkpoint['global_step']
+    epoch = checkpoint.get('epoch', 0)
+    global_step = checkpoint.get('global_step', 0)
 
     print(f"Loaded checkpoint from {checkpoint_path} (epoch {epoch}, step {global_step})")
     print(f"  Restored {len(head_keys)} gaussian head tensors; backbone left as freshly loaded.")
@@ -1305,6 +1314,9 @@ def main():
                     'epoch': epoch,
                     'global_step': global_step,
                     'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'scheduler_state_dict': scheduler.state_dict(),
+                    'config': config.__dict__,
                     'val_psnr': val_metrics['val_psnr'],
                     'val_psnr_static': val_metrics['val_psnr_static'],
                 }, best_path)
