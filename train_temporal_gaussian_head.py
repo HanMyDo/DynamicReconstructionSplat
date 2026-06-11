@@ -274,6 +274,7 @@ class TrainingConfig:
     output_dir: str = "output_finetune"
     save_every_n_steps: int = 200
     log_every_n_steps: int = 25  # wandb metric cadence: ~78 points per ~2K-batch epoch.
+    val_every_epochs: int = 5    # Validate at epoch 1, then every N epochs, then at the end. Lower = denser val curve (set to 1 for sweeps).
 
     # Telemetry (wandb)
     use_wandb: bool = True
@@ -1110,6 +1111,8 @@ def main():
                         help="wandb run name; if omitted, wandb auto-generates one.")
     parser.add_argument("--log_every_n_steps", type=int, default=25,
                         help="Cadence of per-batch wandb metric logging (lower = denser curves).")
+    parser.add_argument("--val_every_epochs", type=int, default=5,
+                        help="Validate at epoch 1, then every N epochs, then at the end. Set to 1 for a dense val curve (sweeps).")
     parser.add_argument("--gradient_clip", type=float, default=1.0,
                         help="Max gradient norm for clipping. Lower = safer against parameter blow-up.")
 
@@ -1145,6 +1148,7 @@ def main():
         wandb_project=args.wandb_project,
         wandb_run_name=args.wandb_run_name,
         log_every_n_steps=args.log_every_n_steps,
+        val_every_epochs=args.val_every_epochs,
         gradient_clip=args.gradient_clip,
     )
 
@@ -1317,8 +1321,8 @@ def main():
             save_checkpoint(model, optimizer, scheduler, epoch, global_step, config)
             break
 
-        # Validate at epoch 1 (early sanity check) and then every 5 epochs / at end.
-        if epoch == 0 or (epoch + 1) % 5 == 0 or epoch == config.num_epochs - 1:
+        # Validate at epoch 1 (early sanity check), then every val_every_epochs / at end.
+        if epoch == 0 or (epoch + 1) % config.val_every_epochs == 0 or epoch == config.num_epochs - 1:
             val_metrics = validate(model, val_loader, config, global_step)
 
             # Prefer static PSNR for selection (aligns with thesis goal of improving
