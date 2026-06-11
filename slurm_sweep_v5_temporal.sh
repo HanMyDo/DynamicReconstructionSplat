@@ -1,7 +1,7 @@
 #!/bin/sh
 #SBATCH --job-name=sweep_v5_tw
 #SBATCH --partition=24g
-#SBATCH --qos=students_normal
+#SBATCH --qos=students_opportunistic
 #SBATCH --output=slurm_logs/sweep_v5_tw_%A_%a.out
 #SBATCH --error=slurm_logs/sweep_v5_tw_%A_%a.err
 #SBATCH --gres=gpu:1
@@ -9,6 +9,7 @@
 #SBATCH --nodelist=heidelberg,muenchen,koblenz
 #SBATCH --time=23:59:00
 #SBATCH --array=0-2
+#SBATCH --requeue
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=Han-My.Do@tum.de
 
