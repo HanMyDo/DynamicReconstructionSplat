@@ -996,6 +996,17 @@ def validate(
 # Checkpointing
 # ============================================================================
 
+def _atomic_torch_save(obj, path):
+    """Write a torch checkpoint atomically: save to a temp file in the same
+    directory, then os.replace() it into place. os.replace is atomic on POSIX,
+    so a preemption/kill mid-write leaves either the previous good file or the
+    leftover temp file — never a half-written canonical checkpoint. This is what
+    makes opportunistic (preemptible) + --requeue resumes robust."""
+    tmp = f"{path}.tmp"
+    torch.save(obj, tmp)
+    os.replace(tmp, path)
+
+
 def save_checkpoint(model, optimizer, scheduler, epoch, global_step, config):
     """Save training checkpoint."""
     os.makedirs(config.output_dir, exist_ok=True)
@@ -1018,10 +1029,10 @@ def save_checkpoint(model, optimizer, scheduler, epoch, global_step, config):
         os.remove(old)
 
     path = os.path.join(config.output_dir, f'checkpoint_step{global_step}.pt')
-    torch.save(checkpoint, path)
+    _atomic_torch_save(checkpoint, path)
     print(f"Saved checkpoint to {path}")
 
-    torch.save(checkpoint, latest_path)
+    _atomic_torch_save(checkpoint, latest_path)
 
 
 def load_checkpoint(model, optimizer, scheduler, checkpoint_path):
@@ -1278,15 +1289,39 @@ def main():
 
     scaler = GradScaler(enabled=config.mixed_precision)
 
-    # Resume from checkpoint
+    # Resume from checkpoint. Be resilient to a corrupt checkpoint_latest.pt: a
+    # job preempted mid-write (before atomic saves existed, or on an fs hiccup)
+    # can leave a truncated zip that torch.load can't open. Try the requested
+    # checkpoint first, then fall back to the newest step checkpoint (identical
+    # state — written just before latest in the same save), then to best, then
+    # start fresh. Without this a single bad save aborts the whole run.
     start_epoch = 0
     global_step = 0
     if args.resume:
-        if os.path.exists(args.resume):
-            start_epoch, global_step = load_checkpoint(model, optimizer, scheduler, args.resume)
-            start_epoch += 1
-        else:
-            print(f"Resume checkpoint not found at {args.resume}, starting fresh.")
+        import glob as _glob
+        resume_dir = os.path.dirname(args.resume) or '.'
+        candidates = [args.resume]
+        candidates += sorted(_glob.glob(os.path.join(resume_dir, 'checkpoint_step*.pt')),
+                             key=os.path.getmtime, reverse=True)
+        candidates.append(os.path.join(resume_dir, 'checkpoint_best.pt'))
+
+        loaded = False
+        seen = set()
+        for cand in candidates:
+            if cand in seen or not os.path.exists(cand):
+                continue
+            seen.add(cand)
+            try:
+                start_epoch, global_step = load_checkpoint(model, optimizer, scheduler, cand)
+                start_epoch += 1
+                loaded = True
+                if cand != args.resume:
+                    print(f"[RESUME] '{args.resume}' was unusable; recovered from '{cand}'.")
+                break
+            except Exception as e:
+                print(f"[RESUME] Could not load '{cand}' ({e}); trying next fallback.")
+        if not loaded:
+            print("[RESUME] No usable checkpoint found — starting fresh.")
 
     # Training loop
     print("\n" + "=" * 60)
@@ -1332,7 +1367,7 @@ def main():
             if psnr_for_selection > best_val_psnr:
                 best_val_psnr = psnr_for_selection
                 best_path = os.path.join(config.output_dir, 'checkpoint_best.pt')
-                torch.save({
+                _atomic_torch_save({
                     'epoch': epoch,
                     'global_step': global_step,
                     'model_state_dict': model.state_dict(),

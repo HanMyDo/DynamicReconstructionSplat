@@ -35,6 +35,14 @@
 #   1 -> 0.5
 #   2 -> 1.0
 # Runs concurrently across the 3 named nodes (one task per node) if free.
+#
+# LAUNCH (dual-QOS, recommended): students_normal and students_opportunistic
+# have SEPARATE per-user job limits (1 and 2), so run the control on the stable
+# (non-preemptible) normal QOS and the treatments on opportunistic:
+#   sbatch --qos=students_normal        --array=0   slurm_sweep_v5_temporal.sh
+#   sbatch --qos=students_opportunistic --array=1-2 slurm_sweep_v5_temporal.sh
+# This protects the baseline curve from preemption while still running all 3.
+# (The #SBATCH --qos below is the default if you submit without overriding.)
 # =============================================================================
 
 TEMPORAL_WEIGHTS="0.25 0.5 1.0"
