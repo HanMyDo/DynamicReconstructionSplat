@@ -10,6 +10,7 @@
 #SBATCH --time=23:59:00
 #SBATCH --array=0-2
 #SBATCH --requeue
+#SBATCH --signal=B:USR1@120
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=Han-My.Do@tum.de
 
@@ -118,6 +119,26 @@ CONTAINER=sweep_v5_tw_${SLURM_ARRAY_TASK_ID}
 enroot remove -f ${CONTAINER} 2>/dev/null || true
 enroot create --name ${CONTAINER} ~/anysplat.sqsh
 
+# --- Self-continuation across the wall-clock limit ---------------------------
+# SLURM sends USR1 to this batch shell ~120s before --time (see the #SBATCH
+# --signal=B:USR1@120 directive). We requeue THIS job (same job id), so:
+#   * no new sbatch -> per-QOS submit limits are never touched,
+#   * no duplicate run is created,
+#   * the requeued job re-runs from the top and auto-resumes from
+#     checkpoint_latest.pt (intact thanks to atomic saves).
+# Requeue lives ONLY in this handler, so normal completion and real crashes
+# fall through to the end and do NOT loop. Preemption is handled independently
+# by #SBATCH --requeue. Training runs in the background with `wait` so the trap
+# fires promptly instead of being deferred until the foreground command returns.
+TRAINING_DONE=0
+on_walltime() {
+  [ "${TRAINING_DONE}" = "1" ] && exit 0
+  echo "[SELF-RESUBMIT] USR1 received ~120s before wall-clock limit — requeueing job ${SLURM_JOB_ID} to resume from checkpoint."
+  scontrol requeue "${SLURM_JOB_ID}"
+  exit 0
+}
+trap on_walltime USR1
+
 enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp ${CONTAINER} bash -c "
   cd /mnt/home/hanmydo/DynamicReconstructionSplat
   export CUDA_VISIBLE_DEVICES=0
@@ -163,9 +184,14 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp ${CONTAINER} bash -
     --wandb_project dynrecsplat \
     --wandb_run_name omega_recipe_v5_tw${TAG}_${SLURM_ARRAY_JOB_ID} \
     \${RESUME_FLAG}
-"
+" &
+TRAIN_PID=$!
+wait ${TRAIN_PID}
+TRAIN_RC=$?
+TRAINING_DONE=1   # reaching here means training exited on its own (done or crashed), not wall-clock-killed
 
 enroot remove -f ${CONTAINER}
 
 echo ""
-echo "Job finished at: $(date)"
+echo "Job finished at: $(date) (training exit code: ${TRAIN_RC})"
+exit ${TRAIN_RC}
