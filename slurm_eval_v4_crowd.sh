@@ -44,10 +44,11 @@ EVAL_SEQ="rgbd_bonn_crowd"
 REPO="/mnt/home/hanmydo/DynamicReconstructionSplat"
 VGGT4D_CKPT="${REPO}/ckpts/vggt4d_model_tracker_fixed_e20.pt"
 V4_DIR="${REPO}/output_finetune_omega_recipe_v4"
-# Exact epoch-1 high-water-mark checkpoint (manually renamed so later-epoch drift
-# couldn't overwrite checkpoint_best.pt). No fallback to checkpoint_latest.pt on
-# purpose: that's the drifted epoch-6 model and would be mislabeled as "v4 best".
-V4_CKPT="${V4_DIR}/checkpoint_best_epoch1_22.64dB.pt"
+# The epoch-1 high-water-mark backup (checkpoint_best_epoch1_22.64dB.pt) is CORRUPT
+# (truncated to 205 MB of ~3.2 GB), so we eval the only surviving usable v4 head:
+# checkpoint_best.pt = the epoch-5 static-PSNR-best (val_psnr 22.55, val_psnr_static
+# 23.02). Drifted model -> label results as "v4 (epoch 5)", not as 22.64.
+V4_CKPT="${V4_DIR}/checkpoint_best.pt"
 
 echo "=============================================="
 echo "v4 held-out eval on: ${EVAL_SEQ}"
@@ -84,12 +85,12 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp eval_v4_crowd bash 
   pip install open3d --quiet
   echo ''
 
-  # --- Use the exact epoch-1 best checkpoint; abort if missing (no silent fallback) ---
+  # --- Use checkpoint_best.pt (epoch-5 surviving head); abort if missing ---
   if [ -f \"${V4_CKPT}\" ]; then
     CHECKPOINT=\"${V4_CKPT}\"
-    echo \"Using v4 epoch-1 checkpoint: \${CHECKPOINT}\"
+    echo \"Using v4 checkpoint (epoch-5 best): \${CHECKPOINT}\"
   else
-    echo 'ERROR: ${V4_CKPT} not found — aborting (refusing to fall back to the drifted latest).'
+    echo 'ERROR: ${V4_CKPT} not found — aborting.'
     exit 1
   fi
   echo ''
