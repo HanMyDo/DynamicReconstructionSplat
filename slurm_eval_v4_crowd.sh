@@ -21,10 +21,12 @@
 #   AND different data -> the gap is uninterpretable.
 #
 #   This job renders the SAME held-out sequence (crowd, --split all, num_frames 12)
-#   with the SAME protocol, for two models that differ ONLY in the head weights:
-#     (A) VGGT4D backbone + pretrained (frozen) head   -> the matched baseline
-#     (B) VGGT4D backbone + v4 fine-tuned head         -> the run we care about
-#   The (B) - (A) delta IS the real fine-tuning effect on a held-out sequence.
+#   with the v4 fine-tuned head, using the exact protocol of the stored baseline:
+#     VGGT4D backbone + v4 fine-tuned head  -> the run we care about
+#   The matched VGGT4D-pretrained baseline on crowd is already on disk
+#   (260507_output_debugged/vggt4d_pretrained/metrics.json = 20.96 dB) and its
+#   eval path was unchanged by post-May-7 commits, so we don't recompute it.
+#   The (v4 PSNR - 20.96) delta IS the real fine-tuning effect on a held-out sequence.
 #
 #   slurm_eval_finetuned.sh does the same thing but points at an OLD run
 #   (output_finetune_lr6). This one points at v4.
@@ -93,22 +95,12 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp eval_v4_crowd bash 
   echo ''
 
   echo '=============================================='
-  echo '1/2  VGGT4D pretrained head (matched baseline)...'
+  echo 'VGGT4D + v4 fine-tuned head on held-out crowd...'
   echo '=============================================='
-  python eval_gaussian_head.py \
-    --data_dir /tmp/bonn_data/rgbd_bonn_dataset \
-    --dataset_name ${EVAL_SEQ} \
-    --intrinsics bonn \
-    --num_frames 12 \
-    --split all \
-    --vggt4d_weights_path ${VGGT4D_CKPT} \
-    --image_batch_start 400 \
-    --output_dir output_eval_v4_crowd_pretrained
-
-  echo ''
-  echo '=============================================='
-  echo '2/2  VGGT4D + v4 fine-tuned head...'
-  echo '=============================================='
+  # Single pass only. The matched VGGT4D-pretrained baseline on crowd is already
+  # stored (260507_output_debugged/vggt4d_pretrained/metrics.json = 20.96 dB,
+  # same protocol) and its eval path was unchanged by post-May-7 commits, so we
+  # compare against that rather than recomputing it.
   python eval_gaussian_head.py \
     --data_dir /tmp/bonn_data/rgbd_bonn_dataset \
     --dataset_name ${EVAL_SEQ} \
@@ -125,10 +117,10 @@ enroot remove -f eval_v4_crowd
 
 echo ""
 echo "=============================================="
-echo "Held-out (${EVAL_SEQ}) results — same protocol, models differ only in head:"
-echo "  VGGT4D pretrained (baseline): output_eval_v4_crowd_pretrained/metrics.json"
-echo "  VGGT4D + v4 fine-tuned:       output_eval_v4_crowd_finetuned/metrics.json"
+echo "Held-out (${EVAL_SEQ}) result — same protocol as the stored baseline:"
+echo "  VGGT4D pretrained (baseline, stored): 20.96 dB"
+echo "  VGGT4D + v4 fine-tuned:               output_eval_v4_crowd_finetuned/metrics.json"
 echo ""
-echo "  The (finetuned - pretrained) PSNR delta = real fine-tuning effect on a held-out sequence."
+echo "  (v4 PSNR - 20.96) = real fine-tuning effect on a held-out sequence."
 echo "=============================================="
 echo "Job finished at: $(date)"
