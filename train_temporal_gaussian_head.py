@@ -1533,6 +1533,13 @@ def main():
                         except OSError as e:
                             print(f"  Could not prune {os.path.basename(old)}: {e}")
 
+        # End-of-epoch checkpoint: durably capture every completed (expensive,
+        # ~16h) epoch so a wall-clock kill never loses a finished epoch. Refreshes
+        # checkpoint_latest.pt with epoch=N, so on --resume start_epoch=N+1 and the
+        # next epoch begins cleanly. Runs regardless of the validation cadence.
+        # (Mid-epoch periodic saves still bound in-epoch loss to save_every_n_steps.)
+        save_checkpoint(model, optimizer, scheduler, epoch, global_step, config)
+
     # Save final: canonical checkpoint_latest.pt/step (for resume) PLUS a permanent
     # dated copy so the end-of-run state is never lost to overwrite either.
     save_checkpoint(model, optimizer, scheduler, config.num_epochs - 1, global_step, config)
