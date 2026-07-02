@@ -209,3 +209,6 @@ examples/vrnerf/shortened_sequences/
 output_*/
 old_*/
 26*/ckpts/
+# Date-prefixed output dirs (e.g. 260502_output_2epochs/) start with the date, so
+# they don't match output_*/ above — match any dir containing "_output_".
+*_output_*/

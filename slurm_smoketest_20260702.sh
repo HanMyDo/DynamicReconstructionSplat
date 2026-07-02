@@ -7,7 +7,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 #SBATCH --nodelist=heidelberg,muenchen,koblenz
-#SBATCH --time=03:00:00
+#SBATCH --time=05:00:00
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=Han-My.Do@tum.de
 
@@ -24,10 +24,14 @@
 #     downweight=1.0 (dynamic pixels fully masked)
 #   * temporal loss, scale/sh reg
 #   * validate() with per-frame PSNR/SSIM (matches eval_gaussian_head.py)
-#   * periodic atomic checkpoint save (save_every_n_steps=50)
+#   * periodic atomic checkpoint save (save_every_n_steps=10)
 #   * best/final/dated checkpoint bookkeeping
 #
-# Scope kept tiny: ONE sequence (crowd3), num_frames 8, ONE epoch. ~1-1.5h.
+# Scope kept tiny with EXPLICIT BATCH CAPS (a full crowd3 epoch is ~hundreds of
+# windows at ~12s each -> >3h, which timed out job 12985). --max_train_batches 60
+# + --max_val_batches 20 bound it to ONE sequence (crowd3), num_frames 8, ONE
+# epoch, ~60 train + 20 val batches -> ~15-25 min. This is enough to reach
+# validation, a periodic save, and "Training complete".
 # Auto-resumes from checkpoint_latest.pt if re-submitted, so re-running this
 # sbatch also smoke-tests the RESUME path.
 #
@@ -131,6 +135,8 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp smoketest bash -c "
     --output_dir \${OUTPUT_DIR} \
     --num_epochs 1 \
     --val_every_epochs 1 \
+    --max_train_batches 60 \
+    --max_val_batches 20 \
     --batch_size 1 \
     --learning_rate 5e-5 \
     --warmup_ratio 0.15 \
@@ -145,8 +151,8 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp smoketest bash -c "
     --curriculum_static_downweight 1.0 \
     --no_gt_poses \
     --intrinsics bonn \
-    --save_every_n_steps 50 \
-    --log_every_n_steps 10 \
+    --save_every_n_steps 10 \
+    --log_every_n_steps 5 \
     --vggt4d_weights_path /mnt/home/hanmydo/DynamicReconstructionSplat/ckpts/vggt4d_model_tracker_fixed_e20.pt \
     --wandb_project dynrecsplat \
     --wandb_run_name smoketest_20260702_${SLURM_JOB_ID} \

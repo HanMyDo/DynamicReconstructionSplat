@@ -294,6 +294,11 @@ class TrainingConfig:
     log_every_n_steps: int = 25  # wandb metric cadence: ~78 points per ~2K-batch epoch.
     val_every_epochs: int = 5    # Validate at epoch 1, then every N epochs, then at the end. Lower = denser val curve (set to 1 for sweeps).
     keep_best_n: int = 3         # Keep only the newest N dated checkpoint_best_ep*.pt (newest == highest full PSNR). 0 = keep all. checkpoint_best.pt/final/latest never pruned.
+    # Debug / smoke-test caps: stop each epoch after this many train / val batches
+    # (0 = no cap, the normal setting). Bounds wall-clock so a smoke test can reach
+    # validation + checkpointing + "Training complete" in minutes instead of hours.
+    max_train_batches: int = 0
+    max_val_batches: int = 0
 
     # Telemetry (wandb)
     use_wandb: bool = True
@@ -783,6 +788,11 @@ def train_epoch(
     pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}")
 
     for batch_idx, batch in enumerate(pbar):
+        # Smoke-test cap: process at most max_train_batches, then end the epoch
+        # early (epoch-end logging + return below still run normally).
+        if config.max_train_batches and batch_idx >= config.max_train_batches:
+            break
+
         images = batch["images"].to(device)  # [B, V, 3, H, W]
 
         # Add batch dimension if needed
@@ -954,7 +964,11 @@ def validate(
     num_batches = 0
 
     with torch.no_grad():
-        for batch in tqdm(dataloader, desc="Validation"):
+        for val_idx, batch in enumerate(tqdm(dataloader, desc="Validation")):
+            # Smoke-test cap: validate on at most max_val_batches windows.
+            if config.max_val_batches and val_idx >= config.max_val_batches:
+                break
+
             images = batch["images"].to(device)
             if images.dim() == 4:
                 images = images.unsqueeze(0)
@@ -1209,6 +1223,10 @@ def main():
                         help="Cadence of per-batch wandb metric logging (lower = denser curves).")
     parser.add_argument("--save_every_n_steps", type=int, default=200,
                         help="Cadence of periodic checkpoint saves (optimizer steps). Lower to force an early save (smoke tests).")
+    parser.add_argument("--max_train_batches", type=int, default=0,
+                        help="Stop each epoch after this many train batches (0 = no cap). Smoke-test / debug knob to bound wall-clock.")
+    parser.add_argument("--max_val_batches", type=int, default=0,
+                        help="Validate on at most this many batches (0 = no cap). Smoke-test / debug knob to bound wall-clock.")
     parser.add_argument("--val_every_epochs", type=int, default=5,
                         help="Validate at epoch 1, then every N epochs, then at the end. Set to 1 for a dense val curve (sweeps).")
     parser.add_argument("--keep_best_n", type=int, default=3,
@@ -1253,6 +1271,8 @@ def main():
         wandb_run_name=args.wandb_run_name,
         log_every_n_steps=args.log_every_n_steps,
         save_every_n_steps=args.save_every_n_steps,
+        max_train_batches=args.max_train_batches,
+        max_val_batches=args.max_val_batches,
         val_every_epochs=args.val_every_epochs,
         keep_best_n=args.keep_best_n,
         gradient_clip=args.gradient_clip,
