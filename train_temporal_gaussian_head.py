@@ -23,6 +23,7 @@ import sys
 import json
 from pathlib import Path
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Optional
 
 import torch
@@ -275,6 +276,7 @@ class TrainingConfig:
     save_every_n_steps: int = 200
     log_every_n_steps: int = 25  # wandb metric cadence: ~78 points per ~2K-batch epoch.
     val_every_epochs: int = 5    # Validate at epoch 1, then every N epochs, then at the end. Lower = denser val curve (set to 1 for sweeps).
+    keep_best_n: int = 3         # Keep only the newest N dated checkpoint_best_ep*.pt (newest == highest full PSNR). 0 = keep all. checkpoint_best.pt/final/latest never pruned.
 
     # Telemetry (wandb)
     use_wandb: bool = True
@@ -888,7 +890,9 @@ def validate(
     total_psnr = 0.0
     total_ssim = 0.0
     total_psnr_static = 0.0
+    total_psnr_dynamic = 0.0
     n_static_frames = 0
+    n_dynamic_frames = 0
     n_frames = 0
     num_batches = 0
 
@@ -961,24 +965,35 @@ def validate(
                             mse_s = ((pred_c[bi, vi] * static_w - gt_c[bi, vi] * static_w) ** 2).sum() / (3 * n_static)
                             total_psnr_static += -10 * torch.log10(mse_s + 1e-8).item()
                             n_static_frames += 1
+                        # Dynamic-region PSNR (tracked for monitoring; NOT used for
+                        # checkpoint selection). Mirrors eval_gaussian_head.py.
+                        n_dyn = mask.sum().item()
+                        if n_dyn >= 10:
+                            dyn_w = mask.clamp(0, 1).unsqueeze(0).expand(3, -1, -1)
+                            mse_d = ((pred_c[bi, vi] * dyn_w - gt_c[bi, vi] * dyn_w) ** 2).sum() / (3 * n_dyn)
+                            total_psnr_dynamic += -10 * torch.log10(mse_d + 1e-8).item()
+                            n_dynamic_frames += 1
 
             num_batches += 1
 
     # Per-frame averaging (matches eval_gaussian_head.py).
     nf = max(n_frames, 1)
     metrics = {
-        'val_mse':         total_mse  / nf,
-        'val_psnr':        total_psnr / nf,
-        'val_ssim':        total_ssim / nf,
-        'val_psnr_static': total_psnr_static / n_static_frames if n_static_frames > 0 else None,
+        'val_mse':          total_mse  / nf,
+        'val_psnr':         total_psnr / nf,
+        'val_ssim':         total_ssim / nf,
+        'val_psnr_static':  total_psnr_static / n_static_frames if n_static_frames > 0 else None,
+        'val_psnr_dynamic': total_psnr_dynamic / n_dynamic_frames if n_dynamic_frames > 0 else None,
     }
 
     static_str = (f", PSNR-static: {metrics['val_psnr_static']:.2f} dB"
                   if metrics['val_psnr_static'] is not None else "")
+    dynamic_str = (f", PSNR-dynamic: {metrics['val_psnr_dynamic']:.2f} dB"
+                   if metrics['val_psnr_dynamic'] is not None else "")
     print(f"Validation - MSE: {metrics['val_mse']:.4f}, "
           f"PSNR: {metrics['val_psnr']:.2f} dB, "
           f"SSIM: {metrics['val_ssim']:.4f}"
-          f"{static_str}")
+          f"{static_str}{dynamic_str}")
 
     wandb_payload = {
         'val/mse': metrics['val_mse'],
@@ -987,6 +1002,8 @@ def validate(
     }
     if metrics['val_psnr_static'] is not None:
         wandb_payload['val/psnr_static_db'] = metrics['val_psnr_static']
+    if metrics['val_psnr_dynamic'] is not None:
+        wandb_payload['val/psnr_dynamic_db'] = metrics['val_psnr_dynamic']
     wandb_log(wandb_payload, step=global_step)
 
     return metrics
@@ -1124,6 +1141,8 @@ def main():
                         help="Cadence of per-batch wandb metric logging (lower = denser curves).")
     parser.add_argument("--val_every_epochs", type=int, default=5,
                         help="Validate at epoch 1, then every N epochs, then at the end. Set to 1 for a dense val curve (sweeps).")
+    parser.add_argument("--keep_best_n", type=int, default=3,
+                        help="Keep only the newest N dated checkpoint_best_ep*.pt files (newest == highest full PSNR). 0 = keep all. Never prunes checkpoint_best/final/latest.")
     parser.add_argument("--gradient_clip", type=float, default=1.0,
                         help="Max gradient norm for clipping. Lower = safer against parameter blow-up.")
 
@@ -1160,6 +1179,7 @@ def main():
         wandb_run_name=args.wandb_run_name,
         log_every_n_steps=args.log_every_n_steps,
         val_every_epochs=args.val_every_epochs,
+        keep_best_n=args.keep_best_n,
         gradient_clip=args.gradient_clip,
     )
 
@@ -1336,7 +1356,8 @@ def main():
     if os.path.exists(existing_best_path):
         try:
             existing = torch.load(existing_best_path, map_location='cpu', weights_only=False)
-            prior_best = existing.get('val_psnr_static') or existing.get('val_psnr') or 0.0
+            # Init from FULL PSNR to match the full-PSNR selection criterion below.
+            prior_best = existing.get('val_psnr') or 0.0
             best_val_psnr = float(prior_best)
             print(f"Found existing checkpoint_best.pt with PSNR {best_val_psnr:.2f} dB — "
                   f"will only overwrite if a later val beats this.")
@@ -1360,14 +1381,14 @@ def main():
         if epoch == 0 or (epoch + 1) % config.val_every_epochs == 0 or epoch == config.num_epochs - 1:
             val_metrics = validate(model, val_loader, config, global_step)
 
-            # Prefer static PSNR for selection (aligns with thesis goal of improving
-            # static reconstruction). Falls back to overall PSNR when no dynamic
-            # mask is available (e.g. --no_vggt4d runs).
-            psnr_for_selection = val_metrics['val_psnr_static'] or val_metrics['val_psnr']
+            # Select on FULL PSNR (the headline metric). Static-only selection
+            # rewarded the static-for-dynamic drift (the saved "best" ended up worse
+            # on dynamic regions, the thesis target). Dynamic PSNR is tracked/logged
+            # for monitoring but deliberately NOT used for selection.
+            psnr_for_selection = val_metrics['val_psnr']
             if psnr_for_selection > best_val_psnr:
                 best_val_psnr = psnr_for_selection
-                best_path = os.path.join(config.output_dir, 'checkpoint_best.pt')
-                _atomic_torch_save({
+                ckpt = {
                     'epoch': epoch,
                     'global_step': global_step,
                     'model_state_dict': model.state_dict(),
@@ -1376,12 +1397,53 @@ def main():
                     'config': config.__dict__,
                     'val_psnr': val_metrics['val_psnr'],
                     'val_psnr_static': val_metrics['val_psnr_static'],
-                }, best_path)
-                criterion = "PSNR-static" if val_metrics['val_psnr_static'] is not None else "PSNR"
-                print(f"New best model: {criterion} {best_val_psnr:.2f} dB")
+                    'val_psnr_dynamic': val_metrics['val_psnr_dynamic'],
+                }
+                # Permanent, uniquely-named record (date + epoch + PSNR) that later
+                # epochs can NEVER overwrite — this is exactly what was missing when
+                # the epoch-1 best got clobbered and the manual backup was truncated.
+                stamp = datetime.now().strftime("%Y%m%d-%H%M")
+                dated_name = f"checkpoint_best_ep{epoch + 1}_{stamp}_psnr{best_val_psnr:.2f}dB.pt"
+                _atomic_torch_save(ckpt, os.path.join(config.output_dir, dated_name))
+                # Canonical checkpoint_best.pt kept for resume-guard + eval scripts.
+                _atomic_torch_save(ckpt, os.path.join(config.output_dir, 'checkpoint_best.pt'))
+                extra = ""
+                if (val_metrics['val_psnr_static'] is not None
+                        and val_metrics['val_psnr_dynamic'] is not None):
+                    extra = (f" (static {val_metrics['val_psnr_static']:.2f}, "
+                             f"dynamic {val_metrics['val_psnr_dynamic']:.2f})")
+                print(f"New best model: PSNR {best_val_psnr:.2f} dB{extra} -> {dated_name}")
 
-    # Save final
+                # Prune old dated bests: keep only the newest `keep_best_n`. A new
+                # best is saved only when full PSNR increases, so newest == highest
+                # PSNR — this keeps the strongest checkpoints and never deletes the
+                # one just written. checkpoint_best.pt / _final_ / _latest / _step
+                # are NOT matched by this glob and are never touched.
+                if config.keep_best_n and config.keep_best_n > 0:
+                    import glob as _glob
+                    dated = sorted(
+                        _glob.glob(os.path.join(config.output_dir, 'checkpoint_best_ep*.pt')),
+                        key=os.path.getmtime,
+                    )
+                    for old in dated[:-config.keep_best_n]:
+                        try:
+                            os.remove(old)
+                            print(f"  Pruned old best: {os.path.basename(old)}")
+                        except OSError as e:
+                            print(f"  Could not prune {os.path.basename(old)}: {e}")
+
+    # Save final: canonical checkpoint_latest.pt/step (for resume) PLUS a permanent
+    # dated copy so the end-of-run state is never lost to overwrite either.
     save_checkpoint(model, optimizer, scheduler, config.num_epochs - 1, global_step, config)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M")
+    _atomic_torch_save({
+        'epoch': config.num_epochs - 1,
+        'global_step': global_step,
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'scheduler_state_dict': scheduler.state_dict(),
+        'config': config.__dict__,
+    }, os.path.join(config.output_dir, f"checkpoint_final_{stamp}.pt"))
 
     print("\n" + "=" * 60)
     print("Training complete!")
