@@ -264,6 +264,23 @@ class TrainingConfig:
     sh_reg_weight: float = 0.01     # L1 penalty on SH DC magnitude — keeps f_dc bounded when fine-tuning the GS head on OOD color distributions
     dynamic_loss_downweight: float = 0.9  # Fraction to reduce dynamic-pixel MSE weight (0=uniform, 1=fully masked)
 
+    # Static-first curriculum (schedule on the dynamic-pixel MSE downweight).
+    # Rationale: the pretrained head is near-optimal on static Bonn geometry but
+    # takes an OOD shock when moving people/objects are thrown at it from step 0,
+    # and that shock feeds the late-epoch drift (see project memory). So keep
+    # dynamic pixels heavily downweighted early (head consolidates static
+    # reconstruction on the OOD domain), then linearly phase dynamic content back
+    # in. This reuses the existing dyn_mask + downweight machinery — the only
+    # change is that the effective downweight now varies by epoch:
+    #   epochs [0, curriculum_static_epochs)                     -> curriculum_static_downweight (hi)
+    #   epochs [static, static+curriculum_ramp_epochs)           -> linear ramp hi -> dynamic_loss_downweight (lo)
+    #   epochs [static+ramp, end)                                -> dynamic_loss_downweight (lo, i.e. joint training)
+    # Disabled by default so existing recipes are unchanged; enable with --static_first.
+    static_first_curriculum: bool = False
+    curriculum_static_epochs: int = 2       # epochs of pure static (dynamic held at curriculum_static_downweight)
+    curriculum_ramp_epochs: int = 3         # epochs to linearly phase dynamic in down to dynamic_loss_downweight
+    curriculum_static_downweight: float = 1.0  # dynamic-pixel downweight during the static phase (1.0 = fully masked)
+
     # Pose handling
     use_gt_poses: bool = False  # Use predicted poses — GT poses are in Bonn world frame, incompatible with VGGT4D's predicted world frame
 
@@ -531,6 +548,35 @@ def freeze_backbone(model: AnySplat):
 # Loss computation
 # ============================================================================
 
+def curriculum_dynamic_downweight(epoch: int, config: TrainingConfig) -> tuple:
+    """Effective dynamic-pixel MSE downweight for `epoch` under the static-first curriculum.
+
+    Returns (downweight, phase) where phase is one of "static", "ramp", "joint"
+    (or "off" when the curriculum is disabled). The schedule is a pure function
+    of the epoch index, so it survives checkpoint resume with no extra state.
+
+    Phase 1 (static): dynamic held at `curriculum_static_downweight` (hi).
+    Phase 2 (ramp):   linear interpolation hi -> `dynamic_loss_downweight` (lo),
+                      landing exactly on lo at the final ramp epoch.
+    Phase 3 (joint):  fixed at `dynamic_loss_downweight` (lo).
+    """
+    if not config.static_first_curriculum:
+        return config.dynamic_loss_downweight, "off"
+
+    static_e = config.curriculum_static_epochs
+    ramp_e = config.curriculum_ramp_epochs
+    hi = config.curriculum_static_downweight
+    lo = config.dynamic_loss_downweight
+
+    if epoch < static_e:
+        return hi, "static"
+    if ramp_e > 0 and epoch < static_e + ramp_e:
+        # +1 so the first ramp epoch already moves off hi and the last lands on lo.
+        frac = min((epoch - static_e + 1) / ramp_e, 1.0)
+        return hi + (lo - hi) * frac, "ramp"
+    return lo, "joint"
+
+
 def compute_rendering_loss(
     model: AnySplat,
     images: torch.Tensor,
@@ -717,6 +763,16 @@ def train_epoch(
     model.train()
     device = torch.device(config.device)
 
+    # Static-first curriculum: the dynamic-pixel downweight is constant within an
+    # epoch (pure function of the epoch index), so resolve it once here.
+    dyn_downweight, curriculum_phase = curriculum_dynamic_downweight(epoch, config)
+    if config.static_first_curriculum:
+        print(f"  [curriculum] phase={curriculum_phase} "
+              f"dynamic_downweight={dyn_downweight:.3f} "
+              f"(static_epochs={config.curriculum_static_epochs}, "
+              f"ramp_epochs={config.curriculum_ramp_epochs}, "
+              f"hi={config.curriculum_static_downweight}, lo={config.dynamic_loss_downweight})")
+
     total_loss = 0.0
     total_mse_loss = 0.0
     total_temporal_loss = 0.0
@@ -769,7 +825,7 @@ def train_epoch(
             mse_loss, _ = compute_rendering_loss(
                 model, images, gaussians, render_extrinsics, render_intrinsics,
                 dyn_mask=infos.get('dyn_mask', None),
-                dynamic_loss_downweight=config.dynamic_loss_downweight,
+                dynamic_loss_downweight=dyn_downweight,
             )
 
             temporal_loss = compute_temporal_loss(infos)
@@ -854,6 +910,7 @@ def train_epoch(
                 'train/f_dc_absmax': f_dc_absmax,
                 'train/scale_max': scale_max,
                 'train/lr': last_lrs[0],
+                'train/dynamic_downweight': dyn_downweight,
                 'train/epoch_frac': epoch + batch_idx / max(len(dataloader), 1),
             }, step=global_step)
 
@@ -1130,7 +1187,18 @@ def main():
                         help="Path to pretrained VGGT4D weights (.pt). If omitted, initializes from VGGT-1B.")
     parser.add_argument("--dynamic_loss_downweight", type=float, default=0.9,
                         help="How much to reduce MSE weight for dynamic pixels (0=uniform, 0.9=10%% weight, 1=fully masked). "
-                             "Requires VGGT4D dynamic detection.")
+                             "Requires VGGT4D dynamic detection. With --static_first this is the curriculum's final (joint-phase) value.")
+    parser.add_argument("--static_first", action="store_true",
+                        help="Enable the static-first curriculum: hold dynamic pixels at --curriculum_static_downweight for "
+                             "--curriculum_static_epochs, then linearly phase them in over --curriculum_ramp_epochs down to "
+                             "--dynamic_loss_downweight. Reuses the dyn_mask machinery; requires VGGT4D dynamic detection.")
+    parser.add_argument("--curriculum_static_epochs", type=int, default=2,
+                        help="Epochs to keep dynamic pixels at --curriculum_static_downweight before phasing in (static_first only).")
+    parser.add_argument("--curriculum_ramp_epochs", type=int, default=3,
+                        help="Epochs over which to linearly ramp the dynamic downweight from the static value to "
+                             "--dynamic_loss_downweight (static_first only). 0 = hard switch at the end of the static phase.")
+    parser.add_argument("--curriculum_static_downweight", type=float, default=1.0,
+                        help="Dynamic-pixel downweight during the static phase (static_first only). 1.0 = dynamic fully masked.")
     parser.add_argument("--no_wandb", action="store_true",
                         help="Disable wandb logging (otherwise enabled by default).")
     parser.add_argument("--wandb_project", type=str, default="dynrecsplat",
@@ -1139,6 +1207,8 @@ def main():
                         help="wandb run name; if omitted, wandb auto-generates one.")
     parser.add_argument("--log_every_n_steps", type=int, default=25,
                         help="Cadence of per-batch wandb metric logging (lower = denser curves).")
+    parser.add_argument("--save_every_n_steps", type=int, default=200,
+                        help="Cadence of periodic checkpoint saves (optimizer steps). Lower to force an early save (smoke tests).")
     parser.add_argument("--val_every_epochs", type=int, default=5,
                         help="Validate at epoch 1, then every N epochs, then at the end. Set to 1 for a dense val curve (sweeps).")
     parser.add_argument("--keep_best_n", type=int, default=3,
@@ -1172,12 +1242,17 @@ def main():
         scale_reg_weight=args.scale_reg_weight,
         sh_reg_weight=args.sh_reg_weight,
         dynamic_loss_downweight=args.dynamic_loss_downweight,
+        static_first_curriculum=args.static_first,
+        curriculum_static_epochs=args.curriculum_static_epochs,
+        curriculum_ramp_epochs=args.curriculum_ramp_epochs,
+        curriculum_static_downweight=args.curriculum_static_downweight,
         use_gt_poses=not args.no_gt_poses,
         vggt4d_weights_path=args.vggt4d_weights_path,
         use_wandb=not args.no_wandb,
         wandb_project=args.wandb_project,
         wandb_run_name=args.wandb_run_name,
         log_every_n_steps=args.log_every_n_steps,
+        save_every_n_steps=args.save_every_n_steps,
         val_every_epochs=args.val_every_epochs,
         keep_best_n=args.keep_best_n,
         gradient_clip=args.gradient_clip,
@@ -1190,6 +1265,12 @@ def main():
     print(f"Intrinsics: {config.intrinsics_preset}")
     print(f"GT poses: {config.use_gt_poses}")
     print(f"Temporal loss weight: {config.temporal_consistency_weight}")
+    if config.static_first_curriculum:
+        print(f"Static-first curriculum: ON — static_epochs={config.curriculum_static_epochs}, "
+              f"ramp_epochs={config.curriculum_ramp_epochs}, "
+              f"dynamic downweight {config.curriculum_static_downweight} -> {config.dynamic_loss_downweight}")
+    else:
+        print(f"Static-first curriculum: OFF — dynamic downweight fixed at {config.dynamic_loss_downweight}")
 
     os.makedirs(config.output_dir, exist_ok=True)
     with open(os.path.join(config.output_dir, 'config.json'), 'w') as f:
