@@ -14,8 +14,18 @@
 #SBATCH --mail-user=Han-My.Do@tum.de
 
 # =============================================================================
-# Testbed health-check training run — 2026-07-02
+# Testbed health-check training run — 2026-07-02 (v2: sh_reg re-enabled)
 # -----------------------------------------------------------------------------
+# WHY v2: the first attempt (run train_testbed_curriculum_20260702_13070, output
+# dir output_train_testbed_curriculum_20260702) DIVERGED at ~epoch 3. With the
+# static-first curriculum the head trained stably on static-only (ep1-2, ~20 dB),
+# but once the ramp phased dynamic pixels into the loss, f_dc (SH DC color) ran
+# away UNBOUNDED (6 -> 27, watchdog CRITICAL at step 1278) because sh_reg was 0.
+# NOT the pose bug — the healthy 20 dB static phase proves poses are correct;
+# only the loss content changed at the ramp, not the (predicted) poses.
+# FIX: re-enable --sh_reg_weight 0.01 to bound f_dc. That is the ONLY change vs
+# v1; fresh output dir so it does NOT resume the diverged checkpoints.
+#
 # GOAL: a REAL training run (no batch caps) on the small 4-sequence testbed, to
 # confirm training is HEALTHY over multiple epochs with the static-first
 # curriculum on. This is NOT the final experiment — the "real real" training
@@ -24,7 +34,7 @@
 # and nothing drift/diverge before paying full compute.
 #
 # Recipe (= v4/v5 baseline + curriculum): LR 5e-5, warmup 0.15, grad_clip 0.5,
-# num_frames 12, temporal_weight 0.25, sh_reg 0.0, predicted poses. Curriculum
+# num_frames 12, temporal_weight 0.25, sh_reg 0.01, predicted poses. Curriculum
 # over these 5 epochs (curriculum_static_epochs=2, curriculum_ramp_epochs=3):
 #   epochs 1-2  static  (dynamic fully masked, downweight 1.0)
 #   epochs 3-5  ramp    (downweight 1.0 -> 0.9, landing on 0.9 at epoch 5)
@@ -157,7 +167,7 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp ${CONTAINER} bash -
 
   # Auto-resume: re-running this sbatch (or a self-requeue) continues from
   # checkpoint_latest.pt in the output dir; otherwise starts fresh.
-  OUTPUT_DIR=output_train_testbed_curriculum_20260702
+  OUTPUT_DIR=output_train_testbed_curriculum_shreg_20260702
   LATEST_CKPT=/mnt/home/hanmydo/DynamicReconstructionSplat/\${OUTPUT_DIR}/checkpoint_latest.pt
   if [ -f \"\${LATEST_CKPT}\" ]; then
     echo \"Resuming from \${LATEST_CKPT}\"
@@ -180,7 +190,7 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp ${CONTAINER} bash -
     --gradient_clip 0.5 \
     --num_frames 12 \
     --temporal_weight 0.25 \
-    --sh_reg_weight 0.0 \
+    --sh_reg_weight 0.01 \
     --dynamic_loss_downweight 0.9 \
     --static_first \
     --curriculum_static_epochs 2 \
@@ -190,7 +200,7 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp ${CONTAINER} bash -
     --intrinsics bonn \
     --vggt4d_weights_path /mnt/home/hanmydo/DynamicReconstructionSplat/ckpts/vggt4d_model_tracker_fixed_e20.pt \
     --wandb_project dynrecsplat \
-    --wandb_run_name train_testbed_curriculum_20260702_${SLURM_JOB_ID} \
+    --wandb_run_name train_testbed_curriculum_shreg_20260702_${SLURM_JOB_ID} \
     \${RESUME_FLAG}
 " &
 TRAIN_PID=$!
