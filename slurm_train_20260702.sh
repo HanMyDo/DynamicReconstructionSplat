@@ -14,17 +14,23 @@
 #SBATCH --mail-user=Han-My.Do@tum.de
 
 # =============================================================================
-# Testbed health-check training run — 2026-07-02 (v2: sh_reg re-enabled)
+# Testbed health-check training run — 2026-07-02 (v3: don't FULLY mask dynamic)
 # -----------------------------------------------------------------------------
-# WHY v2: the first attempt (run train_testbed_curriculum_20260702_13070, output
-# dir output_train_testbed_curriculum_20260702) DIVERGED at ~epoch 3. With the
-# static-first curriculum the head trained stably on static-only (ep1-2, ~20 dB),
-# but once the ramp phased dynamic pixels into the loss, f_dc (SH DC color) ran
-# away UNBOUNDED (6 -> 27, watchdog CRITICAL at step 1278) because sh_reg was 0.
-# NOT the pose bug — the healthy 20 dB static phase proves poses are correct;
-# only the loss content changed at the ramp, not the (predicted) poses.
-# FIX: re-enable --sh_reg_weight 0.01 to bound f_dc. That is the ONLY change vs
-# v1; fresh output dir so it does NOT resume the diverged checkpoints.
+# HISTORY — two prior attempts DIVERGED via f_dc (SH color) runaway, watchdog
+# CRITICAL at f_dc_absmax > 25:
+#   v1 (job 13070, sh_reg=0):    diverged ~step 1278 (in the ramp), f_dc 6 -> 27.
+#   v2 (job 13351, sh_reg=0.01): diverged EARLIER ~step 831 — the STATIC phase,
+#                                BEFORE the ramp — f_dc -> 28.9. sh_reg didn't help.
+# DIAGNOSIS: not the ramp phase-in, not the pose bug (static phase healthy ~20 dB).
+# It is the FULL MASKING itself: curriculum_static_downweight=1.0 gives the
+# Gaussians over moving people ZERO photometric gradient, so their f_dc is
+# unconstrained and a few drift -> f_dc_absmax (MAX) runs away while sh_reg (MEAN
+# of f_dc^2) stays moderate (~6). sh_reg is a MEAN penalty so it can't catch the
+# MAX outliers. v4 never had this: it kept dynamic at 10% weight always, so all
+# Gaussians stayed grounded and f_dc only crept to ~3.
+# FIX (v3): --curriculum_static_downweight 0.95 — keep dynamic at 5% weight even
+# in the "static" phase to GROUND those Gaussians, while staying static-first.
+# Keep sh_reg 0.01. Single change vs v2. Fresh output dir.
 #
 # GOAL: a REAL training run (no batch caps) on the small 4-sequence testbed, to
 # confirm training is HEALTHY over multiple epochs with the static-first
@@ -36,8 +42,8 @@
 # Recipe (= v4/v5 baseline + curriculum): LR 5e-5, warmup 0.15, grad_clip 0.5,
 # num_frames 12, temporal_weight 0.25, sh_reg 0.01, predicted poses. Curriculum
 # over these 5 epochs (curriculum_static_epochs=2, curriculum_ramp_epochs=3):
-#   epochs 1-2  static  (dynamic fully masked, downweight 1.0)
-#   epochs 3-5  ramp    (downweight 1.0 -> 0.9, landing on 0.9 at epoch 5)
+#   epochs 1-2  static  (dynamic heavily downweighted at 0.95, NOT fully masked)
+#   epochs 3-5  ramp    (downweight 0.95 -> 0.9, landing on 0.9 at epoch 5)
 #   (the joint phase at 0.9 would begin epoch 6 in the future longer run)
 # Validation every epoch -> dense curve.
 #
@@ -167,7 +173,7 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp ${CONTAINER} bash -
 
   # Auto-resume: re-running this sbatch (or a self-requeue) continues from
   # checkpoint_latest.pt in the output dir; otherwise starts fresh.
-  OUTPUT_DIR=output_train_testbed_curriculum_shreg_20260702
+  OUTPUT_DIR=output_train_testbed_curriculum_staticdw095_20260706
   LATEST_CKPT=/mnt/home/hanmydo/DynamicReconstructionSplat/\${OUTPUT_DIR}/checkpoint_latest.pt
   if [ -f \"\${LATEST_CKPT}\" ]; then
     echo \"Resuming from \${LATEST_CKPT}\"
@@ -195,12 +201,12 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp ${CONTAINER} bash -
     --static_first \
     --curriculum_static_epochs 2 \
     --curriculum_ramp_epochs 3 \
-    --curriculum_static_downweight 1.0 \
+    --curriculum_static_downweight 0.95 \
     --no_gt_poses \
     --intrinsics bonn \
     --vggt4d_weights_path /mnt/home/hanmydo/DynamicReconstructionSplat/ckpts/vggt4d_model_tracker_fixed_e20.pt \
     --wandb_project dynrecsplat \
-    --wandb_run_name train_testbed_curriculum_shreg_20260702_${SLURM_JOB_ID} \
+    --wandb_run_name train_testbed_curriculum_staticdw095_20260706_${SLURM_JOB_ID} \
     \${RESUME_FLAG}
 " &
 TRAIN_PID=$!
