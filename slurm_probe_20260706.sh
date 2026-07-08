@@ -4,6 +4,7 @@
 #SBATCH --qos=students_opportunistic
 #SBATCH --output=slurm_logs/probe_20260706_%j.out
 #SBATCH --error=slurm_logs/probe_20260706_%j.err
+#SBATCH --open-mode=append
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 #SBATCH --nodelist=heidelberg,muenchen,koblenz

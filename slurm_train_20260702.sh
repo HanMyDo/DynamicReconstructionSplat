@@ -4,6 +4,7 @@
 #SBATCH --qos=students_normal
 #SBATCH --output=slurm_logs/train_testbed_20260702_%j.out
 #SBATCH --error=slurm_logs/train_testbed_20260702_%j.err
+#SBATCH --open-mode=append
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 #SBATCH --nodelist=heidelberg,muenchen,koblenz

@@ -1095,12 +1095,20 @@ def _atomic_torch_save(obj, path):
     os.replace(tmp, path)
 
 
-def save_checkpoint(model, optimizer, scheduler, epoch, global_step, config):
-    """Save training checkpoint."""
+def save_checkpoint(model, optimizer, scheduler, epoch, global_step, config, epoch_completed=False):
+    """Save training checkpoint.
+
+    epoch_completed distinguishes a MID-epoch periodic save (False) from an
+    END-of-epoch / final save (True). Resume uses it to decide whether to advance
+    to the next epoch (completed) or RE-RUN the interrupted epoch (not completed),
+    so a wall-clock kill mid-epoch never silently skips training — and, for the
+    last epoch, never "finishes" the job without actually training it.
+    """
     os.makedirs(config.output_dir, exist_ok=True)
 
     checkpoint = {
         'epoch': epoch,
+        'epoch_completed': epoch_completed,
         'global_step': global_step,
         'model_state_dict': model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
@@ -1153,10 +1161,14 @@ def load_checkpoint(model, optimizer, scheduler, checkpoint_path):
 
     epoch = checkpoint.get('epoch', 0)
     global_step = checkpoint.get('global_step', 0)
+    # Legacy checkpoints (pre-flag) default to True so they keep the old
+    # advance-to-next-epoch behaviour rather than unexpectedly re-running.
+    epoch_completed = checkpoint.get('epoch_completed', True)
 
-    print(f"Loaded checkpoint from {checkpoint_path} (epoch {epoch}, step {global_step})")
+    print(f"Loaded checkpoint from {checkpoint_path} (epoch {epoch}, step {global_step}, "
+          f"epoch_completed={epoch_completed})")
     print(f"  Restored {len(head_keys)} gaussian head tensors; backbone left as freshly loaded.")
-    return epoch, global_step
+    return epoch, global_step, epoch_completed
 
 
 # ============================================================================
@@ -1433,8 +1445,12 @@ def main():
                 continue
             seen.add(cand)
             try:
-                start_epoch, global_step = load_checkpoint(model, optimizer, scheduler, cand)
-                start_epoch += 1
+                loaded_epoch, global_step, epoch_completed = load_checkpoint(
+                    model, optimizer, scheduler, cand)
+                # Advance past a COMPLETED epoch; RE-RUN an interrupted one so a
+                # mid-epoch kill never skips training (and the final epoch never
+                # "finishes" without running).
+                start_epoch = loaded_epoch + 1 if epoch_completed else loaded_epoch
                 loaded = True
                 if cand != args.resume:
                     print(f"[RESUME] '{args.resume}' was unusable; recovered from '{cand}'.")
@@ -1465,6 +1481,19 @@ def main():
             del existing
         except Exception as e:
             print(f"Could not read existing checkpoint_best.pt ({e}); starting best_val_psnr at 0.")
+
+    # Instant-finish guard: resuming a checkpoint whose epoch is already the last
+    # one makes range(start_epoch, num_epochs) empty, so training silently does
+    # nothing and wandb logs an empty run. This is CORRECT for a genuinely finished
+    # run, but it also happens when a preemption lands in the final epoch (resume
+    # is epoch-granular: start_epoch = last_saved_epoch + 1). Say so out loud so an
+    # empty run is never mistaken for a crash / data loss.
+    if start_epoch >= config.num_epochs:
+        print(f"\n[RESUME] Loaded checkpoint is already at/after the final epoch "
+              f"(start_epoch={start_epoch}, num_epochs={config.num_epochs}) — "
+              f"NOTHING TO TRAIN, so this run will finish immediately with no new "
+              f"steps. To train more, delete the output dir ('{config.output_dir}') "
+              f"to start fresh, or raise --num_epochs above {start_epoch}.")
 
     for epoch in range(start_epoch, config.num_epochs):
         print(f"\nEpoch {epoch + 1}/{config.num_epochs}")
@@ -1538,11 +1567,13 @@ def main():
         # checkpoint_latest.pt with epoch=N, so on --resume start_epoch=N+1 and the
         # next epoch begins cleanly. Runs regardless of the validation cadence.
         # (Mid-epoch periodic saves still bound in-epoch loss to save_every_n_steps.)
-        save_checkpoint(model, optimizer, scheduler, epoch, global_step, config)
+        save_checkpoint(model, optimizer, scheduler, epoch, global_step, config,
+                        epoch_completed=True)
 
     # Save final: canonical checkpoint_latest.pt/step (for resume) PLUS a permanent
     # dated copy so the end-of-run state is never lost to overwrite either.
-    save_checkpoint(model, optimizer, scheduler, config.num_epochs - 1, global_step, config)
+    save_checkpoint(model, optimizer, scheduler, config.num_epochs - 1, global_step, config,
+                    epoch_completed=True)
     stamp = datetime.now().strftime("%Y%m%d-%H%M")
     _atomic_torch_save({
         'epoch': config.num_epochs - 1,
