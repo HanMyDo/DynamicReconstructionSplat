@@ -15,7 +15,7 @@
 #SBATCH --mail-user=Han-My.Do@tum.de
 
 # =============================================================================
-# Testbed health-check training run — 2026-07-02 (v3: don't FULLY mask dynamic)
+# Testbed training run — 2026-07-02 (PARAMETERIZED: grounding × peak LR; VGGT-Ω recipe)
 # -----------------------------------------------------------------------------
 # HISTORY — two prior attempts DIVERGED via f_dc (SH color) runaway, watchdog
 # CRITICAL at f_dc_absmax > 25:
@@ -72,10 +72,24 @@
 #     not need to resubmit at all; (b) is the fallback if the auto-requeue is
 #     ever preempted/blocked.
 #
-# LAUNCH:  sbatch slurm_train_20260702.sh
-# RESUME:  sbatch slurm_train_20260702.sh   (same command — auto-detects the ckpt)
-# WATCH :  tail -f slurm_logs/train_testbed_20260702_<jobid>.out
+# PARAMETERIZED — keeps the VGGT-Ω / v4 recipe FIXED (LR peak, warmup_ratio 0.15,
+# cosine full cycle, grad_clip 0.5, temporal 0.25, nf 12, predicted poses) and
+# varies ONLY grounding + peak LR:
+#   $1 STATIC_DOWNWEIGHT  (default 0.90 = 10% grounding, the v4-stable level)
+#   $2 LEARNING_RATE      (default 5e-5 = v4/Ω; 3e-5 still "small peak LR" per Ω,
+#                          gentles the compressed 5-epoch warmup)
+# Each (dw, lr) gets its own output dir + wandb run. RUN BOTH IN PARALLEL:
+#   sbatch --qos=students_normal        slurm_train_20260702.sh 0.90 5e-5   # reliable, fully v4-faithful
+#   sbatch --qos=students_opportunistic slurm_train_20260702.sh 0.95 3e-5   # curriculum experiment (gentler LR)
+# RESUME: re-run the SAME command (auto-detects checkpoint_latest.pt in its dir).
+# WATCH : tail -f slurm_logs/train_testbed_20260702_<jobid>.out  (+ train/f_dc_absmax on W&B)
 # =============================================================================
+
+STATIC_DW=${1:-0.90}
+LR=${2:-5e-5}
+TAG="dw$(echo ${STATIC_DW} | tr '.' 'p')_lr${LR}"
+OUTPUT_DIR_NAME=output_train_testbed_${TAG}_20260706
+RUN_NAME=train_testbed_${TAG}_20260706_${SLURM_JOB_ID}
 
 export ENROOT_RUNTIME_PATH=/tmp/$USER/runtime
 export ENROOT_CACHE_PATH=/tmp/$USER/cache
@@ -174,7 +188,7 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp ${CONTAINER} bash -
 
   # Auto-resume: re-running this sbatch (or a self-requeue) continues from
   # checkpoint_latest.pt in the output dir; otherwise starts fresh.
-  OUTPUT_DIR=output_train_testbed_curriculum_staticdw095_20260706
+  OUTPUT_DIR=${OUTPUT_DIR_NAME}
   LATEST_CKPT=/mnt/home/hanmydo/DynamicReconstructionSplat/\${OUTPUT_DIR}/checkpoint_latest.pt
   if [ -f \"\${LATEST_CKPT}\" ]; then
     echo \"Resuming from \${LATEST_CKPT}\"
@@ -192,7 +206,7 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp ${CONTAINER} bash -
     --val_every_epochs 1 \
     --save_every_n_steps 100 \
     --batch_size 1 \
-    --learning_rate 5e-5 \
+    --learning_rate ${LR} \
     --warmup_ratio 0.15 \
     --gradient_clip 0.5 \
     --num_frames 12 \
@@ -202,12 +216,12 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp ${CONTAINER} bash -
     --static_first \
     --curriculum_static_epochs 2 \
     --curriculum_ramp_epochs 3 \
-    --curriculum_static_downweight 0.95 \
+    --curriculum_static_downweight ${STATIC_DW} \
     --no_gt_poses \
     --intrinsics bonn \
     --vggt4d_weights_path /mnt/home/hanmydo/DynamicReconstructionSplat/ckpts/vggt4d_model_tracker_fixed_e20.pt \
     --wandb_project dynrecsplat \
-    --wandb_run_name train_testbed_curriculum_staticdw095_20260706_${SLURM_JOB_ID} \
+    --wandb_run_name ${RUN_NAME} \
     \${RESUME_FLAG}
 " &
 TRAIN_PID=$!
