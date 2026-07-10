@@ -109,7 +109,10 @@ echo ""
 # 4 training sequences — held-out for eval: rgbd_bonn_crowd
 TRAIN_SEQUENCES="rgbd_bonn_crowd3 rgbd_bonn_crowd2 rgbd_bonn_balloon rgbd_bonn_synchronous"
 
-BONN_DATA=/tmp/bonn_data_train
+# Per-JOB extraction dir. Two parallel runs of this launcher can co-schedule on the
+# same node; a shared /tmp path makes them race on extraction. (SLURM_JOB_ID is
+# preserved across requeues, so this stays stable for a given run.)
+BONN_DATA=/tmp/bonn_data_train_${SLURM_JOB_ID}
 echo "Extracting training sequences to ${BONN_DATA}/ ..."
 mkdir -p ${BONN_DATA}
 python3 -c "
@@ -152,7 +155,10 @@ else
 fi
 echo ""
 
-CONTAINER=train_testbed
+# Per-JOB container name. CRITICAL: with a shared name, two parallel runs on the
+# same node destroy each other's container via `enroot remove -f` (this killed
+# jobs 13688+13689 simultaneously on heidelberg, exit 120).
+CONTAINER=train_testbed_${SLURM_JOB_ID}
 enroot remove -f ${CONTAINER} 2>/dev/null || true
 enroot create --name ${CONTAINER} ~/anysplat.sqsh
 
