@@ -1095,6 +1095,20 @@ def _atomic_torch_save(obj, path):
     os.replace(tmp, path)
 
 
+def head_state_dict(model):
+    """Trainable-only state dict: the gaussian_param_head + gaussian_adapter keys.
+
+    The frozen VGGT4D backbone is ~99% of a full state_dict (~3.2 GB) and is
+    DISCARDED on load anyway (load_checkpoint restores only these keys — the
+    backbone always comes from the freshly loaded pretrained weights). Saving just
+    these keys drops each checkpoint to ~tens of MB. This filter is the exact
+    counterpart of the one in load_checkpoint / eval_gaussian_head.py, so old
+    full checkpoints and new head-only ones both load identically.
+    """
+    return {k: v for k, v in model.state_dict().items()
+            if 'gaussian_param_head' in k or 'gaussian_adapter' in k}
+
+
 def save_checkpoint(model, optimizer, scheduler, epoch, global_step, config, epoch_completed=False):
     """Save training checkpoint.
 
@@ -1110,7 +1124,7 @@ def save_checkpoint(model, optimizer, scheduler, epoch, global_step, config, epo
         'epoch': epoch,
         'epoch_completed': epoch_completed,
         'global_step': global_step,
-        'model_state_dict': model.state_dict(),
+        'model_state_dict': head_state_dict(model),  # head/adapter only (~tens of MB)
         'optimizer_state_dict': optimizer.state_dict(),
         'scheduler_state_dict': scheduler.state_dict(),
         'config': config.__dict__,
@@ -1521,7 +1535,7 @@ def main():
                 ckpt = {
                     'epoch': epoch,
                     'global_step': global_step,
-                    'model_state_dict': model.state_dict(),
+                    'model_state_dict': head_state_dict(model),  # head/adapter only (~tens of MB)
                     'optimizer_state_dict': optimizer.state_dict(),
                     'scheduler_state_dict': scheduler.state_dict(),
                     'config': config.__dict__,
@@ -1578,7 +1592,7 @@ def main():
     _atomic_torch_save({
         'epoch': config.num_epochs - 1,
         'global_step': global_step,
-        'model_state_dict': model.state_dict(),
+        'model_state_dict': head_state_dict(model),  # head/adapter only (~tens of MB)
         'optimizer_state_dict': optimizer.state_dict(),
         'scheduler_state_dict': scheduler.state_dict(),
         'config': config.__dict__,
