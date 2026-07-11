@@ -1,17 +1,25 @@
 #!/bin/sh
 #SBATCH --job-name=eval_dw090
 #SBATCH --partition=24g
-#SBATCH --qos=students_opportunistic
+#SBATCH --qos=students_normal
 #SBATCH --output=slurm_logs/eval_dw090_crowd_20260710_%j.out
 #SBATCH --error=slurm_logs/eval_dw090_crowd_20260710_%j.err
 #SBATCH --open-mode=append
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
-#SBATCH --time=04:00:00
+#SBATCH --time=23:59:00
 #SBATCH --nodelist=bonn,heidelberg,muenchen,stuttgart,koblenz
-#SBATCH --requeue
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=Han-My.Do@tum.de
+
+# NOTE: eval_gaussian_head.py evaluates the FULL sequence (`--split all` = every
+# crowd window) and writes metrics.json only at the very end — it is NOT
+# resumable. So: (1) full wall time (23:59, not 4h — job 13831 timed out at 4h),
+# and (2) students_normal, NON-preemptible — a non-resumable job must never sit on
+# an opportunistic queue where a preemption throws away the whole pass. (Your
+# training jobs crashed, so the normal slot is free; relaunch them after eval.)
+# max_image_batches only limits IMAGE/VIDEO dumping, NOT the metrics, so the
+# comparison to the stored 20.96 dB baseline is unaffected.
 
 # ============================================================================
 # Held-out eval of the 0.90 (10% grounding) run's EPOCH-1 checkpoint — 2026-07-10
