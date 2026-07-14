@@ -281,6 +281,19 @@ class TrainingConfig:
     curriculum_ramp_epochs: int = 3         # epochs to linearly phase dynamic in down to dynamic_loss_downweight
     curriculum_static_downweight: float = 1.0  # dynamic-pixel downweight during the static phase (1.0 = fully masked)
 
+    # Per-frame dynamic compositing.
+    # The Gaussians form ONE merged cloud with no time axis, so a moving object's
+    # Gaussians from all V frames are rendered into EVERY frame -> it appears at all
+    # V of its past positions ("ghosting"), and the model's only recourse is to fade
+    # it out. That is why fine-tuning DEGRADES dynamic PSNR below the frozen baseline
+    # (20.58 -> 18.72 held-out) no matter how the loss is weighted.
+    # With this on, a Gaussian on a moving object renders ONLY into the frame it was
+    # unprojected from; static Gaussians still render into all frames (keeping their
+    # multi-view fusion). Uses the dyn_mask the backbone already predicts, as a
+    # STRUCTURAL signal rather than merely a loss weight. Off by default so all
+    # existing baselines reproduce bit-for-bit.
+    per_frame_dynamic: bool = False
+
     # Pose handling
     use_gt_poses: bool = False  # Use predicted poses — GT poses are in Bonn world frame, incompatible with VGGT4D's predicted world frame
 
@@ -590,9 +603,18 @@ def compute_rendering_loss(
     intrinsics: torch.Tensor,
     dyn_mask: Optional[torch.Tensor] = None,
     dynamic_loss_downweight: float = 0.0,
+    gaussian_frame_idx: Optional[torch.Tensor] = None,
+    gaussian_dyn_flag: Optional[torch.Tensor] = None,
+    leave_one_out: bool = False,
 ) -> tuple:
     """
     Compute MSE rendering loss by rendering predicted Gaussians with given poses.
+
+    gaussian_frame_idx / gaussian_dyn_flag enable PER-FRAME DYNAMIC COMPOSITING:
+    dynamic Gaussians are rendered only into the view they came from (removing the
+    multi-frame ghosting of moving objects), while static Gaussians still render into
+    every view. Pass None (the default) for the original all-Gaussians-everywhere
+    behaviour, so existing baselines reproduce exactly.
 
     Args:
         model: AnySplat model (for the decoder)
@@ -626,6 +648,9 @@ def compute_rendering_loss(
         torch.ones(b, v, device=device) * 100.0,  # far
         (h, w),
         "depth",
+        gaussian_frame_idx=gaussian_frame_idx,
+        gaussian_dyn_flag=gaussian_dyn_flag,
+        leave_one_out=leave_one_out,
     )
 
     pred_rgb = output.color  # [B, V, 3, H, W]
@@ -836,6 +861,10 @@ def train_epoch(
                 model, images, gaussians, render_extrinsics, render_intrinsics,
                 dyn_mask=infos.get('dyn_mask', None),
                 dynamic_loss_downweight=dyn_downweight,
+                gaussian_frame_idx=(infos.get('gaussian_frame_idx')
+                                    if config.per_frame_dynamic else None),
+                gaussian_dyn_flag=(infos.get('gaussian_dyn_flag')
+                                   if config.per_frame_dynamic else None),
             )
 
             temporal_loss = compute_temporal_loss(infos)
@@ -999,8 +1028,14 @@ def validate(
                     render_intrinsics[:, :, 2],
                 ], dim=2)
 
+            # Validation must use the SAME compositing as training, or val PSNR
+            # measures a different renderer than the one being optimised.
             _, render_output = compute_rendering_loss(
-                model, images, gaussians, render_extrinsics, render_intrinsics
+                model, images, gaussians, render_extrinsics, render_intrinsics,
+                gaussian_frame_idx=(infos.get('gaussian_frame_idx')
+                                    if config.per_frame_dynamic else None),
+                gaussian_dyn_flag=(infos.get('gaussian_dyn_flag')
+                                   if config.per_frame_dynamic else None),
             )
 
             # Match eval_gaussian_head.py: clamp to [0,1] then accumulate PSNR/SSIM/MSE
@@ -1239,6 +1274,11 @@ def main():
                              "--dynamic_loss_downweight (static_first only). 0 = hard switch at the end of the static phase.")
     parser.add_argument("--curriculum_static_downweight", type=float, default=1.0,
                         help="Dynamic-pixel downweight during the static phase (static_first only). 1.0 = dynamic fully masked.")
+    parser.add_argument("--per_frame_dynamic", action="store_true",
+                        help="Per-frame dynamic compositing: render dynamic Gaussians ONLY into the frame they "
+                             "were unprojected from (static ones still render into every frame). Removes the "
+                             "multi-frame ghosting of moving objects, which is why fine-tuning currently DEGRADES "
+                             "dynamic PSNR. Requires VGGT4D dynamic detection; off by default (baselines reproduce).")
     parser.add_argument("--no_wandb", action="store_true",
                         help="Disable wandb logging (otherwise enabled by default).")
     parser.add_argument("--wandb_project", type=str, default="dynrecsplat",
@@ -1286,6 +1326,7 @@ def main():
         scale_reg_weight=args.scale_reg_weight,
         sh_reg_weight=args.sh_reg_weight,
         dynamic_loss_downweight=args.dynamic_loss_downweight,
+        per_frame_dynamic=args.per_frame_dynamic,
         static_first_curriculum=args.static_first,
         curriculum_static_epochs=args.curriculum_static_epochs,
         curriculum_ramp_epochs=args.curriculum_ramp_epochs,

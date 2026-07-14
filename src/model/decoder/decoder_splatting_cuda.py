@@ -50,6 +50,9 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
         depth_mode: DepthRenderingMode | None = None,
         cam_rot_delta: Float[Tensor, "batch view 3"] | None = None,
         cam_trans_delta: Float[Tensor, "batch view 3"] | None = None,
+        gaussian_frame_idx: Tensor | None = None,
+        gaussian_dyn_flag: Tensor | None = None,
+        leave_one_out: bool = False,
     ) -> DecoderOutput:
         B, V, _, _  = intrinsics.shape
         H, W = image_shape
@@ -75,7 +78,46 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
             rendering_depth_list = []
             rendering_alpha_list = []
             for j in range(V):
-                rendering, alpha, _ = rasterization(xyz_i, rotation_i, scale_i, opacity_i, feature_i,
+                # --- Per-frame dynamic compositing ------------------------------
+                # Default (labels None) = original behaviour: every Gaussian renders
+                # into every view, so a moving object appears at all V of its past
+                # positions ("ghosting").
+                # When enabled: a Gaussian on a moving object is rendered ONLY into the
+                # view it was unprojected from. Static Gaussians still render into all
+                # views (so the background keeps its multi-view fusion).
+                #   gate = 1                       for static Gaussians
+                #   gate = 1 if frame_idx == j     for dynamic Gaussians
+                #   gate = 0                       for dynamic Gaussians of other frames
+                # leave_one_out = drop view j's OWN Gaussians when rendering view j
+                # (see (2) below) — the honest control against self-reprojection.
+                opacity_ij = opacity_i
+                if gaussian_frame_idx is not None:
+                    fidx_i = gaussian_frame_idx[i].to(opacity_i.device)
+                    own_frame = (fidx_i == j).float()          # 1 if Gaussian came from view j
+                    gate = torch.ones_like(opacity_i)
+
+                    # (1) Per-frame dynamic compositing (needs the dynamic flags):
+                    #     dynamic Gaussians survive ONLY in their own frame.
+                    if gaussian_dyn_flag is not None:
+                        dyn_i = gaussian_dyn_flag[i].to(opacity_i.device).float()
+                        gate = gate * (1.0 - dyn_i * (1.0 - own_frame))
+
+                    # (2) Leave-one-out: drop view j's OWN Gaussians entirely (static
+                    #     AND dynamic), so view j must be reconstructed from the OTHER
+                    #     frames. This is the honest control: without it, view j's
+                    #     dynamic content is rendered from Gaussians unprojected FROM
+                    #     view j (project->unproject->project), which is close to
+                    #     self-reprojection and inflates dynamic PSNR for a trivial
+                    #     reason. Under LOO, reconstructing a moving object requires
+                    #     actually MODELLING its motion — which this architecture
+                    #     cannot do — so a large LOO gap is the expected, reportable
+                    #     result, not a bug.
+                    if leave_one_out:
+                        gate = gate * (1.0 - own_frame)
+
+                    opacity_ij = opacity_i * gate
+                # ----------------------------------------------------------------
+                rendering, alpha, _ = rasterization(xyz_i, rotation_i, scale_i, opacity_ij, feature_i,
                                                 test_w2c_i[j:j+1], test_intr_i[j:j+1], W, H, sh_degree=sh_degree, 
                                                 # near_plane=near[i].mean(), far_plane=far[i].mean(),
                                                 render_mode="RGB+D", packed=False,
@@ -105,7 +147,11 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
         depth_mode: DepthRenderingMode | None = None,
         cam_rot_delta: Float[Tensor, "batch view 3"] | None = None,
         cam_trans_delta: Float[Tensor, "batch view 3"] | None = None,
+        gaussian_frame_idx: Tensor | None = None,
+        gaussian_dyn_flag: Tensor | None = None,
+        leave_one_out: bool = False,
     ) -> DecoderOutput:
-        
-        return self.rendering_fn(gaussians, extrinsics, intrinsics, near, far, image_shape, depth_mode, cam_rot_delta, cam_trans_delta)
+
+        return self.rendering_fn(gaussians, extrinsics, intrinsics, near, far, image_shape, depth_mode, cam_rot_delta, cam_trans_delta,
+                                 gaussian_frame_idx=gaussian_frame_idx, gaussian_dyn_flag=gaussian_dyn_flag, leave_one_out=leave_one_out)
 

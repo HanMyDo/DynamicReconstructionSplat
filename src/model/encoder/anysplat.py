@@ -717,6 +717,15 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
         anchor_feats, conf = out[:, :, : self.raw_gs_dim], out[:, :, self.raw_gs_dim]
 
         neural_feats_list, neural_pts_list = [], []
+        # Per-Gaussian (source frame, dynamic) labels, used for PER-FRAME DYNAMIC
+        # COMPOSITING in the decoder (static Gaussians render into every view;
+        # dynamic ones only into the view they were unprojected from, which removes
+        # the multi-frame "ghosting" of moving objects).
+        # Only well-defined WITHOUT voxelization: voxelizaton_with_fusion() merges
+        # points from different frames into one anchor, destroying the 1:1
+        # Gaussian -> (frame, pixel) correspondence this relies on.
+        frame_idx_list, dyn_flag_list = [], []
+        track_frame_idx = not self.cfg.voxelize
         if self.cfg.voxelize:
             for b_i in range(b):
                 neural_pts, neural_feats = self.voxelizaton_with_fusion(
@@ -728,11 +737,21 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
                 neural_feats_list.append(neural_feats)
                 neural_pts_list.append(neural_pts)
         else:
+            # (v, h, w) row-major frame index. Selected with the SAME conf mask, in the
+            # SAME order as the Gaussians below, so entry i here IS Gaussian i.
+            fidx_vhw = (
+                torch.arange(v, device=pts_all.device).view(v, 1, 1).expand(v, h, w)
+            )
             for b_i in range(b):
                 neural_feats_list.append(
                     anchor_feats[b_i].permute(0, 2, 3, 1)[conf_valid_mask[b_i]]
                 )
                 neural_pts_list.append(pts_all[b_i][conf_valid_mask[b_i]])
+                frame_idx_list.append(fidx_vhw[conf_valid_mask[b_i]])
+                if dyn_mask is not None:
+                    dyn_flag_list.append(
+                        dyn_mask[b_i].to(pts_all.device).float()[conf_valid_mask[b_i]]
+                    )
 
         max_voxels = max(f.shape[0] for f in neural_feats_list)
         neural_feats = self.pad_tensor_list(
@@ -742,6 +761,20 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
         neural_pts = self.pad_tensor_list(
             neural_pts_list, (max_voxels,), -1e4
         )  # -1 == invalid voxel
+
+        # Pad the labels identically. Padded slots are inert: neural_feats is padded
+        # with -1e10 -> sigmoid -> opacity 0, so they render nothing regardless. The
+        # -1 frame index simply never matches a view.
+        gaussian_frame_idx = (
+            self.pad_tensor_list(frame_idx_list, (max_voxels,), -1)
+            if track_frame_idx
+            else None
+        )
+        gaussian_dyn_flag = (
+            self.pad_tensor_list(dyn_flag_list, (max_voxels,), 0.0)
+            if (track_frame_idx and dyn_flag_list)
+            else None
+        )
 
         depths = neural_pts[..., -1].unsqueeze(-1)
         densities = neural_feats[..., 0].sigmoid()
@@ -791,6 +824,15 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
                 neural_feats[gaussian_usage].view(b, -1, self.raw_gs_dim).contiguous()
             )
             opacity = opacity[gaussian_usage].view(b, -1).contiguous()
+            # Keep the per-frame compositing labels aligned with the pruned Gaussians.
+            if gaussian_frame_idx is not None:
+                gaussian_frame_idx = (
+                    gaussian_frame_idx[gaussian_usage].view(b, -1).contiguous()
+                )
+            if gaussian_dyn_flag is not None:
+                gaussian_dyn_flag = (
+                    gaussian_dyn_flag[gaussian_usage].view(b, -1).contiguous()
+                )
 
             print(
                 f"finally pruned {gaussian_usage.shape[1] - neural_pts.shape[1]} gaussians out of {gaussian_usage.shape[1]}"
@@ -821,6 +863,14 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
             infos["dyn_map"] = dyn_map
             dyn_ratio = dyn_mask.float().mean().item()
             print(f"Dynamic detection: {dyn_ratio*100:.1f}% of pixels detected as dynamic")
+
+        # Per-Gaussian labels for per-frame dynamic compositing (see construction above).
+        # gaussian_frame_idx[b, n] = the view n was unprojected from; gaussian_dyn_flag[b, n]
+        # = 1 if n sits on a moving object. The decoder uses these to render dynamic
+        # Gaussians ONLY into their own frame. Both are None when voxelize=True (the
+        # Gaussian->frame mapping does not survive voxel fusion).
+        infos["gaussian_frame_idx"] = gaussian_frame_idx
+        infos["gaussian_dyn_flag"] = gaussian_dyn_flag
 
         # Store per-frame Gaussian parameters for temporal consistency loss (Fix 3)
         # out shape: [B, V, raw_gs_dim+1, H, W] where raw_gs_dim = 1 + 7 + 3*d_sh

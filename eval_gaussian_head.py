@@ -102,7 +102,8 @@ def save_dynamic_mask_overlay(image, dyn_mask, path):
 
 
 @torch.no_grad()
-def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50, image_batch_start=0):
+def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50, image_batch_start=0,
+             per_frame_dynamic=False, leave_one_out=False):
     os.makedirs(output_dir, exist_ok=True)
     images_dir = os.path.join(output_dir, "images")
     dyn_mask_dir = os.path.join(output_dir, "dyn_mask")
@@ -138,7 +139,16 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
         intr = pred_pose["intrinsic"].clone()
         intr = torch.stack([intr[:, :, 0] * w, intr[:, :, 1] * h, intr[:, :, 2]], dim=2)
 
-        _, decoder_out = compute_rendering_loss(model, images, gaussians, ext, intr)
+        # Per-frame dynamic compositing / leave-one-out. Both default OFF, so the
+        # stored baselines reproduce exactly.
+        _, decoder_out = compute_rendering_loss(
+            model, images, gaussians, ext, intr,
+            gaussian_frame_idx=(infos.get("gaussian_frame_idx")
+                                if (per_frame_dynamic or leave_one_out) else None),
+            gaussian_dyn_flag=(infos.get("gaussian_dyn_flag")
+                               if per_frame_dynamic else None),
+            leave_one_out=leave_one_out,
+        )
         pred_rgb = decoder_out.color  # [B, V, 3, H, W] in [0, 1]
 
         dyn_mask = infos.get("dyn_mask", None)  # [B, V, H, W] on CPU, or None
@@ -278,6 +288,15 @@ def main():
                         help="Path to VGGT4D fine-tuned weights (.pt). If omitted, initializes from VGGT-1B.")
     parser.add_argument("--max_image_batches", type=int, default=50,
                         help="Save comparison images for N batches (avoids disk quota).")
+    parser.add_argument("--per_frame_dynamic", action="store_true",
+                        help="Render dynamic Gaussians ONLY into the frame they were unprojected from "
+                             "(static ones still render into every frame). Removes the multi-frame ghosting "
+                             "of moving objects. Requires VGGT4D dynamic detection. Off = original behaviour.")
+    parser.add_argument("--eval_loo", action="store_true",
+                        help="Leave-one-out: when rendering view j, drop ALL Gaussians that came from view j, "
+                             "so j must be reconstructed from the OTHER frames. The honest control against "
+                             "self-reprojection — a large LOO gap on dynamic regions is the expected result "
+                             "(this architecture cannot model motion) and is itself reportable.")
     parser.add_argument("--image_batch_start", type=int, default=0,
                         help="First batch index to start saving images from. Use ~half total batches for mid-sequence.")
     args = parser.parse_args()
@@ -327,12 +346,17 @@ def main():
             "num_frames": args.num_frames,
             "backbone": "vggt" if args.no_vggt4d else "vggt4d",
             "mode": "finetuned" if args.checkpoint else "baseline",
+            "per_frame_dynamic": args.per_frame_dynamic,
+            "leave_one_out": args.eval_loo,
         }, f, indent=2)
 
     print(f"\nRunning evaluation on {args.split} split ({len(dataset)} batches)...")
+    print(f"  per_frame_dynamic={args.per_frame_dynamic}  leave_one_out={args.eval_loo}")
     evaluate(model, dataloader, config, args.output_dir, device,
              max_image_batches=args.max_image_batches,
-             image_batch_start=args.image_batch_start)
+             image_batch_start=args.image_batch_start,
+             per_frame_dynamic=args.per_frame_dynamic,
+             leave_one_out=args.eval_loo)
 
 
 if __name__ == "__main__":
