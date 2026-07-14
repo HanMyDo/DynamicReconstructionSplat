@@ -423,29 +423,36 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
             n_clusters=self.cfg.dynamic_n_clusters
         )
 
-        # Determine threshold
-        if self.cfg.dynamic_mask_threshold is not None:
-            threshold = self.cfg.dynamic_mask_threshold
-        else:
-            # Use adaptive multi-Otsu thresholding, then raise the threshold if needed
-            # so that at most 30% of patches are flagged as dynamic.
-            # This prevents high-motion sequences (where Otsu finds a low split)
-            # from flagging the entire scene, while still being sensitive in low-motion scenes.
-            threshold = adaptive_multiotsu_variance(clustered_map.numpy())
-            max_dynamic_fraction = 0.30
-            fraction_flagged = (clustered_map > threshold).float().mean().item()
-            if fraction_flagged > max_dynamic_fraction:
-                threshold = float(clustered_map.flatten().quantile(1.0 - max_dynamic_fraction))
-                print(f"[DynMask] Otsu flagged {fraction_flagged*100:.1f}% → capped at {max_dynamic_fraction*100:.0f}%, threshold raised to {threshold:.3f}")
-
-        # Upsample continuous score to full resolution (bilinear for smooth boundaries),
-        # then threshold — avoids blocky 14×14 artifacts from nearest-neighbour upsample
+        # Upsample the continuous score to full resolution FIRST, then threshold.
+        # ORDER IS CRITICAL and must match the reference implementation
+        # (VGGT4D/demo_vggt4d.py: interpolate -> adaptive_multiotsu_variance -> compare).
+        #
+        # BUG FIXED (July 2026): we used to compute the Otsu threshold on the 37x37
+        # PATCH map and then apply it to the upsampled 518x518 map. Bilinear upsampling
+        # SMOOTHS — it pulls values toward local means, so peaks in the full-res map are
+        # lower than in the patch map. A threshold calibrated on the sharp patch map is
+        # therefore systematically TOO HIGH for the smoothed map, so only the most
+        # extreme patches survive. Result: the moving people (moderate attention) were
+        # dropped while spurious static hot-spots were kept — the mask found ~5% of
+        # pixels and did not cover the people at all. Since the mask drives the loss
+        # downweighting, the psnr_dynamic/psnr_static split, the temporal loss's static
+        # masking AND the compositing gate, this silently corrupted every experiment.
         dyn_score_full = F.interpolate(
-            clustered_map.unsqueeze(1),  # [V, 1, h, w]
+            clustered_map.unsqueeze(1),  # [V, 1, patch_h, patch_w]
             size=(h, w),
             mode='bilinear',
             align_corners=False,
         ).squeeze(1)  # [V, H, W]
+
+        # Determine threshold ON THE UPSAMPLED MAP (as the reference does).
+        # NOTE: the old code also imposed a max_dynamic_fraction=0.30 cap that the
+        # reference does NOT have. It is removed: with the threshold fixed, people
+        # legitimately occupy ~30-40% of these frames, so that cap would now start
+        # clipping *correct* detections.
+        if self.cfg.dynamic_mask_threshold is not None:
+            threshold = self.cfg.dynamic_mask_threshold
+        else:
+            threshold = adaptive_multiotsu_variance(dyn_score_full.cpu().numpy())
 
         dyn_mask_full = (dyn_score_full > threshold).float()
         print(f"[DynMask] threshold={threshold:.3f}, dynamic pixels={dyn_mask_full.mean()*100:.1f}%")
