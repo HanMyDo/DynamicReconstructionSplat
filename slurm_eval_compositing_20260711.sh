@@ -65,6 +65,11 @@ fi
 FLAG_TAG=""
 case "${EXTRA_FLAGS}" in *per_frame_dynamic*) FLAG_TAG="${FLAG_TAG}_pfd" ;; esac
 case "${EXTRA_FLAGS}" in *eval_loo*)          FLAG_TAG="${FLAG_TAG}_loo" ;; esac
+# stride goes in the tag so parallel runs at different strides don't share an output dir
+case "${EXTRA_FLAGS}" in *frame_stride*)
+  STRIDE_VAL=$(echo "${EXTRA_FLAGS}" | sed -n 's/.*--frame_stride[= ]*\([0-9][0-9]*\).*/\1/p')
+  FLAG_TAG="${FLAG_TAG}_s${STRIDE_VAL}" ;;
+esac
 [ -z "${FLAG_TAG}" ] && FLAG_TAG="_plain"
 
 # $3 = eval sequence (default held-out crowd). Use an easier single-moving-object
