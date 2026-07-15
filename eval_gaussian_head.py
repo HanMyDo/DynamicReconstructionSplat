@@ -280,6 +280,10 @@ def main():
                         help="Path to fine-tuned checkpoint. Omit for baseline.")
     parser.add_argument("--output_dir", type=str, required=True)
     parser.add_argument("--num_frames", type=int, default=4)
+    parser.add_argument("--frame_stride", type=int, default=1,
+                        help="Gap between the frames in a window. stride>1 spreads the SAME num_frames over a "
+                             "longer time span (more object motion for the dynamic detector) at NO extra memory. "
+                             "Use to test whether the weak dynamic mask is a temporal-context problem (0.4s window).")
     parser.add_argument("--split", type=str, default="all", choices=["train", "val", "all"])
     parser.add_argument("--num_workers", type=int, default=2)
     parser.add_argument("--no_vggt4d", action="store_true",
@@ -325,6 +329,7 @@ def main():
         args.dataset_name,
         intrinsics=intrinsics,
         num_frames=args.num_frames,
+        frame_stride=args.frame_stride,
         image_size=config.image_size,
         split=args.split,
     )
