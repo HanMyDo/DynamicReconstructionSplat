@@ -67,10 +67,14 @@ case "${EXTRA_FLAGS}" in *per_frame_dynamic*) FLAG_TAG="${FLAG_TAG}_pfd" ;; esac
 case "${EXTRA_FLAGS}" in *eval_loo*)          FLAG_TAG="${FLAG_TAG}_loo" ;; esac
 [ -z "${FLAG_TAG}" ] && FLAG_TAG="_plain"
 
-EVAL_SEQ="rgbd_bonn_crowd"
+# $3 = eval sequence (default held-out crowd). Use an easier single-moving-object
+# sequence (e.g. rgbd_bonn_person_tracking, rgbd_bonn_balloon) to test whether the
+# dynamic MASK works at all in our integration, independent of crowd's difficulty.
+EVAL_SEQ=${3:-rgbd_bonn_crowd}
+SEQ_TAG=$(echo ${EVAL_SEQ} | sed 's/rgbd_bonn_//')
 REPO="/mnt/home/hanmydo/DynamicReconstructionSplat"
 VGGT4D_CKPT="${REPO}/ckpts/vggt4d_model_tracker_fixed_e20.pt"
-OUT_DIR="output_eval_${MODE_TAG}${FLAG_TAG}_crowd_20260711"
+OUT_DIR="output_eval_${MODE_TAG}${FLAG_TAG}_${SEQ_TAG}_20260711"
 
 export ENROOT_RUNTIME_PATH=/tmp/$USER/runtime
 export ENROOT_CACHE_PATH=/tmp/$USER/cache
