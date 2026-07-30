@@ -43,7 +43,7 @@ mkdir -p slurm_logs
 
 REPO="/mnt/home/hanmydo/DynamicReconstructionSplat"
 VGGT4D_CKPT="${REPO}/ckpts/vggt4d_model_tracker_fixed_e20.pt"
-OUT_DIR="output_dyn_masks_precomputed"   # matches gitignore output_*/
+OUT_DIR="output_dyn_masks_precomputed_cs${CHUNK_SIZE}"   # chunk size in the name so runs don't overwrite; matches gitignore output_*/
 
 echo "=============================================="
 echo "Precompute dynamic masks — ${SEQUENCE} (chunk_size ${CHUNK_SIZE})"
