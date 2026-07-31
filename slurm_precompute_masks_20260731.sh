@@ -9,6 +9,11 @@
 #SBATCH --nodes=1
 #SBATCH --nodelist=bonn,heidelberg,muenchen,stuttgart,koblenz
 #SBATCH --time=03:00:00
+#SBATCH --mem=96G
+# ^ HOST RAM. The Stage-1 mask stage moves attention maps + features to CPU for
+# KMeans/Otsu, scaling with chunk_size — cs96 OOM-killed (host, not GPU) at the
+# default. Bump host RAM; if the GPU itself OOMs (a CUDA error, not a SLURM
+# oom_kill), lower chunk_size or add a lower detection resolution.
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=Han-My.Do@tum.de
 
