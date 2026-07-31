@@ -119,6 +119,10 @@ def main():
     ap.add_argument("--vggt4d_weights_path", default=None, help="VGGT4D weights (.pt); omit to init from VGGT-1B")
     ap.add_argument("--chunk_size", type=int, default=32,
                     help="Frames per detection window (bigger = more motion, more memory; attention ~O(N^2)).")
+    ap.add_argument("--det_resolution", type=int, default=518,
+                    help="Long-edge resolution for DETECTION only. <518 downsamples (aspect-preserved, /14) "
+                         "-> fewer tokens -> less host+GPU memory -> fits more frames. Mask is upsampled on "
+                         "load anyway, so the quality cost is small. Use to raise chunk_size within fixed RAM.")
     ap.add_argument("--preprocess_mode", default="crop", choices=["crop", "pad"],
                     help="Original VGGT4D preprocessing. 'crop' = 518 wide, aspect-preserved (matches demo).")
     ap.add_argument("--save_overlays", action="store_true", help="Also write red mask-on-RGB overlays.")
@@ -154,6 +158,17 @@ def main():
         # Original preprocessing: 518 long edge, aspect-preserved -> [N, 3, H, W] float32 in [0,1]
         images = load_and_preprocess_images([str(p) for p in chunk_paths], mode=args.preprocess_mode)
         images = images.unsqueeze(0).to(device)  # [1, N, 3, H, W]
+        # Optional detection-only downsample (aspect-preserved, divisible by 14) to fit
+        # more frames within fixed RAM. Masks come out at this resolution; integration
+        # upsamples them to the reconstruction grid anyway.
+        H, W = images.shape[-2:]
+        if args.det_resolution and args.det_resolution < max(H, W):
+            scale = args.det_resolution / max(H, W)
+            newH = max(14, int(round(H * scale / 14)) * 14)
+            newW = max(14, int(round(W * scale / 14)) * 14)
+            images = torch.nn.functional.interpolate(
+                images[0], size=(newH, newW), mode="bilinear", align_corners=False
+            ).unsqueeze(0)
         n = images.shape[1]
         print(f"[chunk {ci+1}/{len(ranges)}] frames {s}..{e-1} ({n})  res={tuple(images.shape[-2:])}")
 

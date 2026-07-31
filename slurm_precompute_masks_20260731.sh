@@ -9,11 +9,10 @@
 #SBATCH --nodes=1
 #SBATCH --nodelist=bonn,heidelberg,muenchen,stuttgart,koblenz
 #SBATCH --time=03:00:00
-#SBATCH --mem=96G
-# ^ HOST RAM. The Stage-1 mask stage moves attention maps + features to CPU for
-# KMeans/Otsu, scaling with chunk_size — cs96 OOM-killed (host, not GPU) at the
-# default. Bump host RAM; if the GPU itself OOMs (a CUDA error, not a SLURM
-# oom_kill), lower chunk_size or add a lower detection resolution.
+# NOTE: this cluster forbids --mem (host RAM is fixed per GPU). cs96 host-OOM'd at
+# 518. To fit more temporal context within fixed RAM, lower --det_resolution ($3)
+# instead of raising memory: fewer tokens -> less host+GPU memory, mask upsamples
+# on load anyway.
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=Han-My.Do@tum.de
 
@@ -38,6 +37,7 @@
 
 SEQUENCE=${1:?"give a sequence, e.g. rgbd_bonn_moving_nonobstructing_box"}
 CHUNK_SIZE=${2:-32}
+DET_RES=${3:-518}   # detection long-edge; lower (e.g. 378) to fit more frames within fixed RAM
 
 export ENROOT_RUNTIME_PATH=/tmp/$USER/runtime
 export ENROOT_CACHE_PATH=/tmp/$USER/cache
@@ -48,7 +48,7 @@ mkdir -p slurm_logs
 
 REPO="/mnt/home/hanmydo/DynamicReconstructionSplat"
 VGGT4D_CKPT="${REPO}/ckpts/vggt4d_model_tracker_fixed_e20.pt"
-OUT_DIR="output_dyn_masks_precomputed_cs${CHUNK_SIZE}"   # chunk size in the name so runs don't overwrite; matches gitignore output_*/
+OUT_DIR="output_dyn_masks_precomputed_cs${CHUNK_SIZE}_r${DET_RES}"   # chunk+res in name so runs don't overwrite; matches gitignore output_*/
 
 echo "=============================================="
 echo "Precompute dynamic masks — ${SEQUENCE} (chunk_size ${CHUNK_SIZE})"
@@ -94,6 +94,7 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp ${CONTAINER} bash -
     --output_dir ${OUT_DIR} \
     --vggt4d_weights_path ${VGGT4D_CKPT} \
     --chunk_size ${CHUNK_SIZE} \
+    --det_resolution ${DET_RES} \
     --save_overlays
 "
 
