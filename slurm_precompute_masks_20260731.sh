@@ -19,25 +19,30 @@
 # =============================================================================
 # Precompute VGGT4D dynamic masks over LONG temporal windows — 2026-07-31
 # -----------------------------------------------------------------------------
-# Detection-only (Pass 1: backbone attention -> mask; NO Gaussians, NO rendering),
-# 518 aspect-preserved preprocessing (matches original VGGT4D), CHUNKED so it fits
-# 24g regardless of sequence length. STAGE-1 ONLY (no Stage 2/3 — see the plan and
-# precompute_dyn_masks.py docstring). Fast + non-resumable -> short wall, normal QOS.
+# Detection-only (NO Gaussians, NO rendering), 518 aspect-preserved preprocessing
+# (matches original VGGT4D), CHUNKED so it fits 24g regardless of sequence length.
+# FULL original VGGT4D pipeline by default ($4=3): Stage 1 (attention coarse mask)
+# -> Stage 2 (re-run backbone with mask -> refined poses) -> Stage 3 (geometric
+# refine, open3d), feeding Stage 3 the ORIGINAL combo of Stage-1 depth/intrinsic +
+# Stage-2 poses. $4=1 stops at the coarse mask. Fast + non-resumable -> short wall.
 #
-# USAGE:  sbatch slurm_precompute_masks_20260731.sh <SEQUENCE> [CHUNK_SIZE]
+# USAGE:  sbatch slurm_precompute_masks_20260731.sh <SEQUENCE> [CHUNK_SIZE] [DET_RES] [STAGES]
 #   $1 SEQUENCE   e.g. rgbd_bonn_moving_nonobstructing_box (a clean independent-
 #                 motion, NON-training seq — avoid person_tracking / crowd)
 #   $2 CHUNK_SIZE frames per detection window (default 32 ~= 1s; bigger = more
-#                 motion but more memory. If it OOMs, lower it.)
+#                 motion context but more memory. If it OOMs, lower it.)
+#   $3 DET_RES    detection long-edge (default 518; lower to fit more frames)
+#   $4 STAGES     3 = full original pipeline (default); 1 = coarse mask only
 #
-# AFTER: pull output_dyn_masks_precomputed/<SEQ>/overlays/ locally and LOOK —
-#        does the moving object light up? That decides Stage-1-only vs adding
-#        Stage 2/3.
+# AFTER: pull output_dyn_masks_precomputed_*/<SEQ>/overlays/ locally and LOOK —
+#        is the moving object covered AND are static false-positives (e.g. the
+#        chair) removed by Stage 3?
 # =============================================================================
 
 SEQUENCE=${1:?"give a sequence, e.g. rgbd_bonn_moving_nonobstructing_box"}
 CHUNK_SIZE=${2:-32}
 DET_RES=${3:-518}   # detection long-edge; lower (e.g. 378) to fit more frames within fixed RAM
+STAGES=${4:-3}      # 3 = full original VGGT4D (Stage 1->2->3); 1 = coarse only. 3 needs smaller chunks (more memory).
 
 export ENROOT_RUNTIME_PATH=/tmp/$USER/runtime
 export ENROOT_CACHE_PATH=/tmp/$USER/cache
@@ -48,7 +53,7 @@ mkdir -p slurm_logs
 
 REPO="/mnt/home/hanmydo/DynamicReconstructionSplat"
 VGGT4D_CKPT="${REPO}/ckpts/vggt4d_model_tracker_fixed_e20.pt"
-OUT_DIR="output_dyn_masks_precomputed_cs${CHUNK_SIZE}_r${DET_RES}"   # chunk+res in name so runs don't overwrite; matches gitignore output_*/
+OUT_DIR="output_dyn_masks_precomputed_cs${CHUNK_SIZE}_r${DET_RES}_st${STAGES}"   # chunk+res+stages in name so runs don't overwrite; matches gitignore output_*/
 
 echo "=============================================="
 echo "Precompute dynamic masks — ${SEQUENCE} (chunk_size ${CHUNK_SIZE})"
@@ -95,6 +100,7 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp ${CONTAINER} bash -
     --vggt4d_weights_path ${VGGT4D_CKPT} \
     --chunk_size ${CHUNK_SIZE} \
     --det_resolution ${DET_RES} \
+    --stages ${STAGES} \
     --save_overlays
 "
 

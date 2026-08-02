@@ -13,18 +13,14 @@ WHY (see memory: next-dynamic-mask-precompute-plan):
     This does NOT break "feed-forward" (mask = a forward pass, not optimization;
     the cache is only a training-time speedup).
 
-STAGE-1 ONLY (deliberate — see plan). The original does Stage 1 (attention mask)
-    -> Stage 2 (refine poses) -> Stage 3 (geometric mask refine) and SAVES the
-    Stage-3 mask. This script does STAGE 1 ONLY, because:
-      (a) our hypothesis is that TEMPORAL CONTEXT (not Stage 3) was the dominant
-          problem — the box experiment showed widening the window alone, with
-          Stage 3 unchanged, moved the mask onto the object; and
-      (b) our current Stage-3 integration ERODES the mask (~8-10% -> ~5-7%),
-          the opposite of the original (likely because we don't feed it Stage-2
-          refined poses). Copying it would re-break the mask.
-    DECISION: validate the Stage-1 long-window mask first. If it covers the
-    objects -> done (simpler than the original). If it's noisy/patchy -> then
-    build the faithful Stage 2->3 (needs depth+poses, still no Gaussians).
+STAGES (`--stages`, default 3 = full original VGGT4D pipeline):
+    Stage 1 = attention -> coarse mask. Stage 2 = re-run the backbone WITH the mask
+    (token suppression) -> refined poses + depth. Stage 3 = geometric refinement of
+    the coarse mask using those refined poses+depth (open3d), and this is the mask
+    the original SAVES. `--stages 1` stops at the coarse mask (debug/ablation).
+    NOTE: Stage 2 needs a second aggregator pass + the depth head, so `--stages 3`
+    uses more memory than Stage-1-only -> the fittable chunk_size is smaller.
+    This mirrors EncoderAnySplat.forward's detection path minus the Gaussian head.
 
 MATCHES the original here: preprocessing = 518 long-edge ASPECT-PRESERVED crop
     (load_and_preprocess_images mode="crop"), and the Stage-1 detection functions
@@ -57,6 +53,7 @@ from PIL import Image
 from train_temporal_gaussian_head import create_model, TrainingConfig
 from src.model.encoder.anysplat import _AMP_DTYPE
 from src.model.encoder.vggt.utils.load_fn import load_and_preprocess_images
+from src.model.encoder.vggt.utils.pose_enc import pose_encoding_to_extri_intri
 
 
 def gather_frame_paths(seq_dir: Path):
@@ -123,6 +120,11 @@ def main():
                     help="Long-edge resolution for DETECTION only. <518 downsamples (aspect-preserved, /14) "
                          "-> fewer tokens -> less host+GPU memory -> fits more frames. Mask is upsampled on "
                          "load anyway, so the quality cost is small. Use to raise chunk_size within fixed RAM.")
+    ap.add_argument("--stages", type=int, default=3, choices=[1, 3],
+                    help="1 = Stage-1 coarse attention mask only. 3 = full original VGGT4D pipeline: Stage 1 "
+                         "(coarse) -> Stage 2 (re-run backbone with mask -> refined poses/depth) -> Stage 3 "
+                         "(geometric refinement). 3 uses more memory (extra aggregator pass + depth head) so "
+                         "the fittable chunk_size is smaller. Needs open3d for Stage 3.")
     ap.add_argument("--preprocess_mode", default="crop", choices=["crop", "pad"],
                     help="Original VGGT4D preprocessing. 'crop' = 518 wide, aspect-preserved (matches demo).")
     ap.add_argument("--save_overlays", action="store_true", help="Also write red mask-on-RGB overlays.")
@@ -172,16 +174,53 @@ def main():
         n = images.shape[1]
         print(f"[chunk {ci+1}/{len(ranges)}] frames {s}..{e-1} ({n})  res={tuple(images.shape[-2:])}")
 
-        # Pass 1 ONLY: backbone attention -> Q/K, then attention-based dynamic mask.
-        # Mirrors EncoderAnySplat.forward's detection path; NO Gaussians, NO rendering,
-        # NO Stage 2/3.
+        # STAGE 1: backbone (NO mask) -> Q/K + tokens. Coarse mask from attention; and
+        # Stage-1 depth+intrinsic from the tokens (the original feeds THESE to Stage 3).
         with torch.amp.autocast("cuda", enabled=(device.type == "cuda"), dtype=_AMP_DTYPE):
-            _, _, qk_dict, enc_feat = encoder.aggregator(images.to(_AMP_DTYPE), dyn_masks=None)
+            tokens1, patch_start1, qk_dict, enc_feat = encoder.aggregator(
+                images.to(_AMP_DTYPE), dyn_masks=None)
         dyn_mask, _ = encoder.compute_attention_dynamic_mask(images, qk_dict, enc_feat)  # [1, N, H, W]
-        dyn_mask = dyn_mask.float().cpu()
         del qk_dict, enc_feat
         if device.type == "cuda":
             torch.cuda.empty_cache()
+
+        if args.stages >= 3:
+            # FAITHFUL to the ORIGINAL VGGT4D (demo_vggt4d.py): Stage 3 uses
+            #   depth + intrinsic from STAGE 1 (predictions1), poses from STAGE 2 (predictions2).
+            # Stage 2 suppresses dynamic tokens, so its depth on the MOVING object is degraded
+            # — exactly the region Stage 3 must reason about — hence Stage-1 depth is used.
+            with torch.amp.autocast("cuda", enabled=False):
+                pose1 = encoder.camera_head(tokens1)
+                _, intrinsic_s1 = pose_encoding_to_extri_intri(pose1[-1], images.shape[-2:])
+                depth_s1, _ = encoder.depth_head(
+                    tokens1, images=images, patch_start_idx=patch_start1)
+            del tokens1
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
+
+            # STAGE 2: re-run WITH the coarse mask (token suppression) -> refined poses.
+            with torch.amp.autocast("cuda", enabled=(device.type == "cuda"), dtype=_AMP_DTYPE):
+                tokens2, _, _, _ = encoder.aggregator(
+                    images.to(_AMP_DTYPE), dyn_masks=dyn_mask.to(images.device))
+            with torch.amp.autocast("cuda", enabled=False):
+                pose2 = encoder.camera_head(tokens2)
+                extrinsic_s2, _ = pose_encoding_to_extri_intri(pose2[-1], images.shape[-2:])
+            del tokens2
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
+
+            # STAGE 3: geometric refinement using Stage-1 depth + Stage-1 intrinsic + Stage-2 poses.
+            # refine_dynamic_mask takes EXTRINSIC (world2cam) and inverts it to cam2world
+            # internally, matching the original's predictions2["cam2world"].
+            with torch.amp.autocast("cuda", enabled=False):
+                dyn_mask = encoder.refine_dynamic_mask(
+                    images, depth_s1, extrinsic_s2, intrinsic_s1, dyn_mask)
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
+        else:
+            del tokens1
+
+        dyn_mask = dyn_mask.float().cpu()
 
         for i, p in enumerate(chunk_paths):
             m = dyn_mask[0, i].numpy()  # [H, W] in {0,1}
@@ -196,7 +235,8 @@ def main():
         "n_frames": len(frame_paths),
         "chunk_size": args.chunk_size,
         "preprocess_mode": args.preprocess_mode,
-        "stage": "stage1_only (no Stage 2/3)",
+        "det_resolution": args.det_resolution,
+        "stages": args.stages,
         "dyn_fraction_mean": float(fracs.mean()) if len(fracs) else 0.0,
         "dyn_fraction_min": float(fracs.min()) if len(fracs) else 0.0,
         "dyn_fraction_max": float(fracs.max()) if len(fracs) else 0.0,
