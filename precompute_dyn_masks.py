@@ -111,8 +111,24 @@ def build_passes(n_frames: int, chunk_size: int, stride: int = 1, min_frames: in
     passes = []
     for k in range(stride):
         idxs = list(range(k, n_frames, stride))
-        for s in range(0, len(idxs), chunk_size):
-            passes.append(idxs[s:s + chunk_size])
+        blocks = [idxs[s:s + chunk_size] for s in range(0, len(idxs), chunk_size)]
+        # Absorb a tiny tail block into the previous one (per offset) — mirrors
+        # chunk_ranges. A 1-frame pass makes cross-frame dynamic detection degenerate
+        # (all-NaN score -> Otsu crashes on [nan, nan]), so never emit one.
+        if len(blocks) >= 2 and len(blocks[-1]) < min_frames:
+            blocks[-2] = blocks[-2] + blocks[-1]
+            blocks.pop()
+        passes.extend(blocks)
+    # Safety net (stride close to n_frames can leave a lone undersized pass): merge any
+    # remaining sub-min pass into the previous, so no pass has < min_frames.
+    if len(passes) >= 2:
+        merged = [passes[0]]
+        for p in passes[1:]:
+            if len(p) < min_frames:
+                merged[-1] = merged[-1] + p
+            else:
+                merged.append(p)
+        passes = merged
     return passes
 
 
