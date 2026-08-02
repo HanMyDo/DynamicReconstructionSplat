@@ -26,13 +26,15 @@
 # refine, open3d), feeding Stage 3 the ORIGINAL combo of Stage-1 depth/intrinsic +
 # Stage-2 poses. $4=1 stops at the coarse mask. Fast + non-resumable -> short wall.
 #
-# USAGE:  sbatch slurm_precompute_masks_20260731.sh <SEQUENCE> [CHUNK_SIZE] [DET_RES] [STAGES]
+# USAGE:  sbatch slurm_precompute_masks_20260731.sh <SEQUENCE> [CHUNK_SIZE] [DET_RES] [STAGES] [STRIDE]
 #   $1 SEQUENCE   e.g. rgbd_bonn_moving_nonobstructing_box (a clean independent-
 #                 motion, NON-training seq — avoid person_tracking / crowd)
-#   $2 CHUNK_SIZE frames per detection window (default 32 ~= 1s; bigger = more
-#                 motion context but more memory. If it OOMs, lower it.)
+#   $2 CHUNK_SIZE frames per detection pass (default 32; bigger = more memory. OOM -> lower)
 #   $3 DET_RES    detection long-edge (default 518; lower to fit more frames)
 #   $4 STAGES     3 = full original pipeline (default); 1 = coarse mask only
+#   $5 STRIDE     1 = consecutive (default). >1 = each pass takes every STRIDE-th frame,
+#                 spanning chunk_size*STRIDE frames -> gives the detector real object
+#                 motion at fixed memory (the fix for weak masks on 24g). Try 8, then 4/16.
 #
 # AFTER: pull output_dyn_masks_precomputed_*/<SEQ>/overlays/ locally and LOOK —
 #        is the moving object covered AND are static false-positives (e.g. the
@@ -43,6 +45,7 @@ SEQUENCE=${1:?"give a sequence, e.g. rgbd_bonn_moving_nonobstructing_box"}
 CHUNK_SIZE=${2:-32}
 DET_RES=${3:-518}   # detection long-edge; lower (e.g. 378) to fit more frames within fixed RAM
 STAGES=${4:-3}      # 3 = full original VGGT4D (Stage 1->2->3); 1 = coarse only. 3 needs smaller chunks (more memory).
+STRIDE=${5:-1}      # 1 = consecutive. >1 = each pass takes every STRIDE-th frame -> spans chunk_size*STRIDE frames -> real object motion at fixed memory. Try 4/8/16.
 
 export ENROOT_RUNTIME_PATH=/tmp/$USER/runtime
 export ENROOT_CACHE_PATH=/tmp/$USER/cache
@@ -53,7 +56,7 @@ mkdir -p slurm_logs
 
 REPO="/mnt/home/hanmydo/DynamicReconstructionSplat"
 VGGT4D_CKPT="${REPO}/ckpts/vggt4d_model_tracker_fixed_e20.pt"
-OUT_DIR="output_dyn_masks_precomputed_cs${CHUNK_SIZE}_r${DET_RES}_st${STAGES}"   # chunk+res+stages in name so runs don't overwrite; matches gitignore output_*/
+OUT_DIR="output_dyn_masks_precomputed_cs${CHUNK_SIZE}_r${DET_RES}_st${STAGES}_fs${STRIDE}"   # chunk+res+stages+stride in name so runs don't overwrite; matches gitignore output_*/
 
 echo "=============================================="
 echo "Precompute dynamic masks — ${SEQUENCE} (chunk_size ${CHUNK_SIZE})"
@@ -101,6 +104,7 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp ${CONTAINER} bash -
     --chunk_size ${CHUNK_SIZE} \
     --det_resolution ${DET_RES} \
     --stages ${STAGES} \
+    --frame_stride ${STRIDE} \
     --save_overlays
 "
 

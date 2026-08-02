@@ -92,6 +92,30 @@ def chunk_ranges(n_frames: int, chunk_size: int, min_frames: int = 6):
     return ranges
 
 
+def build_passes(n_frames: int, chunk_size: int, stride: int = 1, min_frames: int = 6):
+    """Group frame INDICES into detection passes (each pass = one backbone forward).
+
+    stride == 1: contiguous windows via chunk_ranges (original behavior). Each pass is
+      chunk_size CONSECUTIVE frames -> spans only ~chunk_size frames of time, so in a
+      slow sequence the moving object barely displaces (weak dynamic signal).
+
+    stride  > 1: for each offset k in [0, stride), take frames k, k+stride, k+2*stride, ...
+      and split that strided list into blocks of <= chunk_size. Each pass then holds
+      <= chunk_size frames spaced `stride` apart, spanning up to chunk_size*stride frames
+      of the sequence -> the object travels FAR across a pass while GPU memory stays at
+      chunk_size frames. Every frame lands in exactly one pass (frame j -> offset j%stride),
+      so the saved masks still tile the whole sequence with no gaps or overlaps.
+    """
+    if stride <= 1:
+        return [list(range(s, e)) for s, e in chunk_ranges(n_frames, chunk_size, min_frames)]
+    passes = []
+    for k in range(stride):
+        idxs = list(range(k, n_frames, stride))
+        for s in range(0, len(idxs), chunk_size):
+            passes.append(idxs[s:s + chunk_size])
+    return passes
+
+
 def save_mask_png(mask_hw: np.ndarray, path: Path):
     """mask_hw: float/bool [H, W] in {0,1} -> binary PNG (0/255)."""
     arr = (np.asarray(mask_hw) > 0.5).astype(np.uint8) * 255
@@ -116,10 +140,17 @@ def main():
     ap.add_argument("--vggt4d_weights_path", default=None, help="VGGT4D weights (.pt); omit to init from VGGT-1B")
     ap.add_argument("--chunk_size", type=int, default=32,
                     help="Frames per detection window (bigger = more motion, more memory; attention ~O(N^2)).")
+    ap.add_argument("--frame_stride", type=int, default=1,
+                    help="1 = consecutive windows (original). >1 = each pass takes every STRIDE-th "
+                         "frame (offset passes tile all frames), so one pass spans up to "
+                         "chunk_size*STRIDE frames -> gives the detector real object motion when the "
+                         "whole sequence can't fit in memory. Too large hurts view overlap (pose "
+                         "estimation), so sweep a few values (e.g. 4, 8, 16).")
     ap.add_argument("--det_resolution", type=int, default=518,
-                    help="Long-edge resolution for DETECTION only. <518 downsamples (aspect-preserved, /14) "
-                         "-> fewer tokens -> less host+GPU memory -> fits more frames. Mask is upsampled on "
-                         "load anyway, so the quality cost is small. Use to raise chunk_size within fixed RAM.")
+                    help="NATIVE detection long-edge (target_size passed to load_and_preprocess_images). "
+                         "518 = original VGGT4D (faithful). Lower (e.g. 448/378) -> fewer tokens -> less "
+                         "host+GPU memory -> fits more frames per chunk. Masks come out at this resolution "
+                         "and are upsampled to the reconstruction grid on load.")
     ap.add_argument("--stages", type=int, default=3, choices=[1, 3],
                     help="1 = Stage-1 coarse attention mask only. 3 = full original VGGT4D pipeline: Stage 1 "
                          "(coarse) -> Stage 2 (re-run backbone with mask -> refined poses/depth) -> Stage 3 "
@@ -141,9 +172,10 @@ def main():
         overlays_dir.mkdir(parents=True, exist_ok=True)
 
     frame_paths = gather_frame_paths(seq_dir)
-    ranges = chunk_ranges(len(frame_paths), args.chunk_size)
+    passes = build_passes(len(frame_paths), args.chunk_size, args.frame_stride)
+    span_hint = f", span up to ~{args.chunk_size * args.frame_stride} frames/pass" if args.frame_stride > 1 else ""
     print(f"Sequence: {args.dataset_name}  |  {len(frame_paths)} frames  |  "
-          f"{len(ranges)} chunk(s) of ~{args.chunk_size}")
+          f"{len(passes)} pass(es) of <= {args.chunk_size}  |  stride {args.frame_stride}{span_hint}")
 
     print("Creating model (VGGT4D backbone + dynamic detection)...")
     config = TrainingConfig(
@@ -155,24 +187,20 @@ def main():
     encoder = model.encoder
 
     per_frame_fraction = {}
-    for ci, (s, e) in enumerate(ranges):
-        chunk_paths = frame_paths[s:e]
-        # Original preprocessing: 518 long edge, aspect-preserved -> [N, 3, H, W] float32 in [0,1]
-        images = load_and_preprocess_images([str(p) for p in chunk_paths], mode=args.preprocess_mode)
+    for ci, idxs in enumerate(passes):
+        chunk_paths = [frame_paths[i] for i in idxs]
+        # Load NATIVELY at the detection long-edge (aspect-preserved crop, /14). Default
+        # 518 == the ORIGINAL VGGT4D (our fork's shared default is 448 for reconstruction;
+        # we pass target_size here so the precompute matches the original, no post-hoc
+        # interpolation). Lower --det_resolution to fit more frames within fixed RAM.
+        images = load_and_preprocess_images(
+            [str(p) for p in chunk_paths], mode=args.preprocess_mode,
+            target_size=args.det_resolution)
         images = images.unsqueeze(0).to(device)  # [1, N, 3, H, W]
-        # Optional detection-only downsample (aspect-preserved, divisible by 14) to fit
-        # more frames within fixed RAM. Masks come out at this resolution; integration
-        # upsamples them to the reconstruction grid anyway.
-        H, W = images.shape[-2:]
-        if args.det_resolution and args.det_resolution < max(H, W):
-            scale = args.det_resolution / max(H, W)
-            newH = max(14, int(round(H * scale / 14)) * 14)
-            newW = max(14, int(round(W * scale / 14)) * 14)
-            images = torch.nn.functional.interpolate(
-                images[0], size=(newH, newW), mode="bilinear", align_corners=False
-            ).unsqueeze(0)
         n = images.shape[1]
-        print(f"[chunk {ci+1}/{len(ranges)}] frames {s}..{e-1} ({n})  res={tuple(images.shape[-2:])}")
+        span = (idxs[-1] - idxs[0]) if len(idxs) > 1 else 0
+        print(f"[pass {ci+1}/{len(passes)}] {n} frames  idx {idxs[0]}..{idxs[-1]}  "
+              f"span {span} (stride {args.frame_stride})  res={tuple(images.shape[-2:])}")
 
         # STAGE 1: backbone (NO mask) -> Q/K + tokens. Coarse mask from attention; and
         # Stage-1 depth+intrinsic from the tokens (the original feeds THESE to Stage 3).
@@ -234,6 +262,8 @@ def main():
         "dataset_name": args.dataset_name,
         "n_frames": len(frame_paths),
         "chunk_size": args.chunk_size,
+        "frame_stride": args.frame_stride,
+        "n_passes": len(passes),
         "preprocess_mode": args.preprocess_mode,
         "det_resolution": args.det_resolution,
         "stages": args.stages,
