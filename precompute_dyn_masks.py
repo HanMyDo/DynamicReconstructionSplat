@@ -157,11 +157,11 @@ def main():
     ap.add_argument("--chunk_size", type=int, default=32,
                     help="Frames per detection window (bigger = more motion, more memory; attention ~O(N^2)).")
     ap.add_argument("--frame_stride", type=int, default=1,
-                    help="1 = consecutive windows (original). >1 = each pass takes every STRIDE-th "
-                         "frame (offset passes tile all frames), so one pass spans up to "
-                         "chunk_size*STRIDE frames -> gives the detector real object motion when the "
-                         "whole sequence can't fit in memory. Too large hurts view overlap (pose "
-                         "estimation), so sweep a few values (e.g. 4, 8, 16).")
+                    help="0 = AUTO full-sequence span (VALIDATED RECIPE): stride=ceil(n_frames/chunk_size) "
+                         "so every pass spans the WHOLE sequence (matches the original VGGT4D's whole-clip "
+                         "context) while every frame still gets a mask. 1 = consecutive windows. >1 = each "
+                         "pass takes every STRIDE-th frame, spanning up to chunk_size*STRIDE frames. Use 0 "
+                         "with --det_resolution 518; that combo reproduced the original's mask quality.")
     ap.add_argument("--det_resolution", type=int, default=518,
                     help="NATIVE detection long-edge (target_size passed to load_and_preprocess_images). "
                          "518 = original VGGT4D (faithful). Lower (e.g. 448/378) -> fewer tokens -> less "
@@ -188,10 +188,16 @@ def main():
         overlays_dir.mkdir(parents=True, exist_ok=True)
 
     frame_paths = gather_frame_paths(seq_dir)
-    passes = build_passes(len(frame_paths), args.chunk_size, args.frame_stride)
-    span_hint = f", span up to ~{args.chunk_size * args.frame_stride} frames/pass" if args.frame_stride > 1 else ""
+    # stride 0 = AUTO full-sequence span: ceil(n_frames / chunk_size) so each pass
+    # covers the whole sequence (the validated 518+full-span recipe).
+    stride = args.frame_stride
+    if stride == 0:
+        stride = max(1, (len(frame_paths) + args.chunk_size - 1) // args.chunk_size)
+    passes = build_passes(len(frame_paths), args.chunk_size, stride)
+    span_hint = f", span up to ~{args.chunk_size * stride} frames/pass" if stride > 1 else ""
+    auto_hint = " (auto full-span)" if args.frame_stride == 0 else ""
     print(f"Sequence: {args.dataset_name}  |  {len(frame_paths)} frames  |  "
-          f"{len(passes)} pass(es) of <= {args.chunk_size}  |  stride {args.frame_stride}{span_hint}")
+          f"{len(passes)} pass(es) of <= {args.chunk_size}  |  stride {stride}{auto_hint}{span_hint}")
 
     print("Creating model (VGGT4D backbone + dynamic detection)...")
     config = TrainingConfig(
@@ -216,7 +222,7 @@ def main():
         n = images.shape[1]
         span = (idxs[-1] - idxs[0]) if len(idxs) > 1 else 0
         print(f"[pass {ci+1}/{len(passes)}] {n} frames  idx {idxs[0]}..{idxs[-1]}  "
-              f"span {span} (stride {args.frame_stride})  res={tuple(images.shape[-2:])}")
+              f"span {span} (stride {stride})  res={tuple(images.shape[-2:])}")
 
         # STAGE 1: backbone (NO mask) -> Q/K + tokens. Coarse mask from attention; and
         # Stage-1 depth+intrinsic from the tokens (the original feeds THESE to Stage 3).
@@ -278,7 +284,8 @@ def main():
         "dataset_name": args.dataset_name,
         "n_frames": len(frame_paths),
         "chunk_size": args.chunk_size,
-        "frame_stride": args.frame_stride,
+        "frame_stride": stride,
+        "frame_stride_arg": args.frame_stride,
         "n_passes": len(passes),
         "preprocess_mode": args.preprocess_mode,
         "det_resolution": args.det_resolution,

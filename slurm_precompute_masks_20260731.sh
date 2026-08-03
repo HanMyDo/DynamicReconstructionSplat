@@ -45,7 +45,7 @@ SEQUENCE=${1:?"give a sequence, e.g. rgbd_bonn_moving_nonobstructing_box"}
 CHUNK_SIZE=${2:-32}
 DET_RES=${3:-518}   # detection long-edge; lower (e.g. 378) to fit more frames within fixed RAM
 STAGES=${4:-3}      # 3 = full original VGGT4D (Stage 1->2->3); 1 = coarse only. 3 needs smaller chunks (more memory).
-STRIDE=${5:-1}      # 1 = consecutive. >1 = each pass takes every STRIDE-th frame -> spans chunk_size*STRIDE frames -> real object motion at fixed memory. Try 4/8/16.
+STRIDE=${5:-1}      # 0 = AUTO full-sequence span (VALIDATED: use with res 518, reproduced original mask quality). 1 = consecutive. >1 = every STRIDE-th frame (spans chunk_size*STRIDE).
 
 export ENROOT_RUNTIME_PATH=/tmp/$USER/runtime
 export ENROOT_CACHE_PATH=/tmp/$USER/cache
