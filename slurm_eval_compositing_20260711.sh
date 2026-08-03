@@ -63,6 +63,9 @@ else
 fi
 
 FLAG_TAG=""
+# backbone tag: vanilla VGGT (--no_vggt4d) vs VGGT4D (default), so the anysplat+vggt
+# baseline doesn't overwrite the VGGT4D-frozen output dir
+case "${EXTRA_FLAGS}" in *no_vggt4d*) FLAG_TAG="${FLAG_TAG}_vggt" ;; esac
 case "${EXTRA_FLAGS}" in *per_frame_dynamic*) FLAG_TAG="${FLAG_TAG}_pfd" ;; esac
 case "${EXTRA_FLAGS}" in *eval_loo*)          FLAG_TAG="${FLAG_TAG}_loo" ;; esac
 # stride goes in the tag so parallel runs at different strides don't share an output dir
