@@ -78,16 +78,32 @@
 #   $1 STATIC_DOWNWEIGHT  (default 0.90 = 10% grounding, the v4-stable level)
 #   $2 LEARNING_RATE      (default 5e-5 = v4/Ω; 3e-5 still "small peak LR" per Ω,
 #                          gentles the compressed 5-epoch warmup)
-# Each (dw, lr) gets its own output dir + wandb run. RUN BOTH IN PARALLEL:
-#   sbatch --qos=students_normal        slurm_train_20260702.sh 0.90 5e-5   # reliable, fully v4-faithful
-#   sbatch --qos=students_opportunistic slurm_train_20260702.sh 0.95 3e-5   # curriculum experiment (gentler LR)
+#   $3 DYN_MASK_DIR       (optional) parent dir of PRECOMPUTED masks, e.g.
+#                          output_dyn_masks_precomputed_cs16_r518_st3_fs0 — the loader
+#                          resolves <dir>/<seq>/masks/<stem>.png per training sequence.
+#                          When set, the dynamic downweight AND temporal loss use the
+#                          VALIDATED 518+full-span masks instead of the live detection,
+#                          and the run gets a distinct "_pcm" output dir (fresh, no
+#                          resume of the broken-mask checkpoints). Empty = old behavior.
+# Each (dw, lr[, masks]) gets its own output dir + wandb run. Examples:
+#   sbatch --qos=students_normal slurm_train_20260702.sh 0.90 5e-5   # old (live/broken masks)
+#   sbatch --qos=students_normal slurm_train_20260702.sh 0.90 5e-5 output_dyn_masks_precomputed_cs16_r518_st3_fs0  # RE-FINETUNE with good masks
 # RESUME: re-run the SAME command (auto-detects checkpoint_latest.pt in its dir).
+# On the first batch the training log prints "[dyn_mask] using PRECOMPUTED masks from ..." — confirm it.
 # WATCH : tail -f slurm_logs/train_testbed_20260702_<jobid>.out  (+ train/f_dc_absmax on W&B)
 # =============================================================================
 
 STATIC_DW=${1:-0.90}
 LR=${2:-5e-5}
+# $3 = parent dir of PRECOMPUTED masks (e.g. output_dyn_masks_precomputed_cs16_r518_st3_fs0);
+# the loader resolves <dir>/<seq>/masks/<stem>.png per sequence. Empty = live detection (old).
+DYN_MASK_DIR=${3:-}
 TAG="dw$(echo ${STATIC_DW} | tr '.' 'p')_lr${LR}"
+DYN_MASK_FLAG=""
+if [ -n "${DYN_MASK_DIR}" ]; then
+  DYN_MASK_FLAG="--dyn_mask_dir ${DYN_MASK_DIR}"
+  TAG="${TAG}_pcm"   # distinct output dir -> fresh run, never resumes a broken-mask checkpoint
+fi
 OUTPUT_DIR_NAME=output_train_testbed_${TAG}_20260706
 RUN_NAME=train_testbed_${TAG}_20260706_${SLURM_JOB_ID}
 
@@ -228,6 +244,7 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp ${CONTAINER} bash -
     --vggt4d_weights_path /mnt/home/hanmydo/DynamicReconstructionSplat/ckpts/vggt4d_model_tracker_fixed_e20.pt \
     --wandb_project dynrecsplat \
     --wandb_run_name ${RUN_NAME} \
+    ${DYN_MASK_FLAG} \
     \${RESUME_FLAG}
 " &
 TRAIN_PID=$!
