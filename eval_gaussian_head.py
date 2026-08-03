@@ -53,6 +53,7 @@ from train_temporal_gaussian_head import (
     VideoFrameDataset,
     create_model,
     compute_rendering_loss,
+    load_precomputed_masks,
     INTRINSICS_PRESETS,
     TrainingConfig,
 )
@@ -99,31 +100,6 @@ def save_dynamic_mask_overlay(image, dyn_mask, path):
     overlay = np.clip(overlay, 0, 1)
 
     Image.fromarray((overlay * 255).astype(np.uint8)).save(path)
-
-
-def load_precomputed_masks(frame_names, mask_dir, H, W, device):
-    """Load precomputed dynamic-mask PNGs by frame stem and resample to (H, W).
-
-    The precompute writes full-frame masks at detection resolution (aspect-preserved,
-    e.g. 392x518); the eval renders full-frame squash at (H, W), so a plain interpolate
-    reproduces the same squash and aligns mask to render. Missing frames -> zeros.
-
-    Returns [1, V, H, W] float in {0,1}, or None if NO frame had a mask file (so the
-    caller falls back to the live detection).
-    """
-    masks, found = [], 0
-    for stem in frame_names:
-        p = os.path.join(mask_dir, f"{stem}.png")
-        if os.path.exists(p):
-            m = np.asarray(Image.open(p).convert("L"), dtype=np.float32) / 255.0  # [Hm, Wm]
-            t = F.interpolate(torch.from_numpy(m)[None, None], size=(H, W), mode="nearest")[0, 0]
-            masks.append((t > 0.5).float())
-            found += 1
-        else:
-            masks.append(torch.zeros(H, W))
-    if found == 0:
-        return None
-    return torch.stack(masks, dim=0).unsqueeze(0).to(device)  # [1, V, H, W]
 
 
 @torch.no_grad()
@@ -188,7 +164,10 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
             if raw_names is not None:
                 # default_collate wraps each name in a 1-tuple at batch_size=1
                 frame_names = [x[0] if isinstance(x, (list, tuple)) else x for x in raw_names]
-                loaded = load_precomputed_masks(frame_names, precomputed_mask_dir, h, w, device)
+                ds = batch.get("dataset_name")
+                if isinstance(ds, (list, tuple)):
+                    ds = ds[0]
+                loaded = load_precomputed_masks(frame_names, precomputed_mask_dir, h, w, device, dataset_name=ds)
                 if loaded is not None:
                     dyn_mask = loaded
                     n_precomp_hits += 1

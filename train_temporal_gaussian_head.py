@@ -263,6 +263,7 @@ class TrainingConfig:
     scale_reg_weight: float = 0.01  # L1 penalty on Gaussian scales to prevent size collapse
     sh_reg_weight: float = 0.01     # L1 penalty on SH DC magnitude — keeps f_dc bounded when fine-tuning the GS head on OOD color distributions
     dynamic_loss_downweight: float = 0.9  # Fraction to reduce dynamic-pixel MSE weight (0=uniform, 1=fully masked)
+    dyn_mask_dir: Optional[str] = None  # If set, load PRECOMPUTED dynamic masks (by frame stem) and override the live per-window detection for BOTH the downweight loss and the temporal loss. Use the validated 518+full-span masks so fine-tuning is shaped by correct masks.
 
     # Static-first curriculum (schedule on the dynamic-pixel MSE downweight).
     # Rationale: the pretrained head is near-optimal on static Bonn geometry but
@@ -351,6 +352,7 @@ class VideoFrameDataset(Dataset):
         image_size: tuple = (518, 518),
         split: str = "train",
     ):
+        self.dataset_name = dataset_name  # for locating per-sequence precomputed masks
         self.data_dir = Path(data_dir) / dataset_name
         self.rgb_dir = self.data_dir / "rgb"
         self.depth_dir = self.data_dir / "depth"
@@ -454,6 +456,7 @@ class VideoFrameDataset(Dataset):
         result = {
             "images": torch.stack(images, dim=0),  # [V, 3, H, W]
             "frame_names": frame_names,             # list[str], len V
+            "dataset_name": self.dataset_name,      # for per-sequence precomputed masks
         }
 
         if has_all_poses and len(extrinsics) == self.num_frames:
@@ -782,6 +785,67 @@ def check_gaussian_health(gaussians, loss, step) -> bool:
     return False
 
 
+def _resolve_mask_path(mask_dir, dataset_name, stem):
+    """Locate a precomputed mask PNG. Supports two layouts:
+      - PARENT (multi-seq): <mask_dir>/<dataset_name>/masks/<stem>.png  (precompute's output)
+      - FLAT (single-seq):  <mask_dir>/<stem>.png                      (point straight at .../masks)
+    Returns the first existing path, or None.
+    """
+    if dataset_name:
+        p = os.path.join(mask_dir, dataset_name, "masks", f"{stem}.png")
+        if os.path.exists(p):
+            return p
+    p = os.path.join(mask_dir, f"{stem}.png")
+    return p if os.path.exists(p) else None
+
+
+def load_precomputed_masks(frame_names, mask_dir, H, W, device, dataset_name=None):
+    """Load precomputed dynamic-mask PNGs by frame stem and resample to (H, W).
+
+    The precompute writes full-frame masks at detection resolution (aspect-preserved,
+    e.g. 392x518); train/eval render full-frame squash at (H, W), so a plain interpolate
+    reproduces the same squash and aligns mask to render. Missing frames -> zeros.
+    `dataset_name` selects the per-sequence subdir so ONE --dyn_mask_dir works across a
+    multi-sequence ConcatDataset (see _resolve_mask_path).
+
+    Returns [1, V, H, W] float in {0,1}, or None if NO frame had a mask file (caller
+    then falls back to the live detection). Shared by train_epoch, validate and eval.
+    """
+    masks, found = [], 0
+    for stem in frame_names:
+        p = _resolve_mask_path(mask_dir, dataset_name, stem)
+        if p is not None:
+            m = np.asarray(Image.open(p).convert("L"), dtype=np.float32) / 255.0  # [Hm, Wm]
+            t = F.interpolate(torch.from_numpy(m)[None, None], size=(H, W), mode="nearest")[0, 0]
+            masks.append((t > 0.5).float())
+            found += 1
+        else:
+            masks.append(torch.zeros(H, W))
+    if found == 0:
+        return None
+    return torch.stack(masks, dim=0).unsqueeze(0).to(device)  # [1, V, H, W]
+
+
+def _override_dyn_mask(infos, batch, images, config, device):
+    """If config.dyn_mask_dir is set, replace infos['dyn_mask'] with precomputed masks
+    for this batch's frames. Both the rendering-loss downweight and the temporal loss
+    read infos['dyn_mask'], so this one override feeds correct masks to both. Returns
+    True if it overrode (for a one-time log). No-op (returns False) otherwise."""
+    if config.dyn_mask_dir is None or "frame_names" not in batch:
+        return False
+    raw = batch["frame_names"]
+    frame_names = [x[0] if isinstance(x, (list, tuple)) else x for x in raw]
+    ds = batch.get("dataset_name")
+    if isinstance(ds, (list, tuple)):
+        ds = ds[0]
+    H, W = images.shape[-2:]
+    loaded = load_precomputed_masks(frame_names, config.dyn_mask_dir, H, W, device, dataset_name=ds)
+    if loaded is not None:
+        infos['dyn_mask'] = loaded
+        return True
+    return False
+
+
 def train_epoch(
     model: AnySplat,
     dataloader: DataLoader,
@@ -836,6 +900,12 @@ def train_epoch(
             gaussians = encoder_output.gaussians
             pred_context_pose = encoder_output.pred_context_pose
             infos = encoder_output.infos
+
+            # Replace the live per-window detection with precomputed full-span masks
+            # (feeds BOTH the dynamic downweight loss and the temporal loss).
+            used_precomp = _override_dyn_mask(infos, batch, images, config, device)
+            if used_precomp and batch_idx == 0:
+                print(f"  [dyn_mask] using PRECOMPUTED masks from {config.dyn_mask_dir}")
 
             # Choose poses for rendering loss
             if config.use_gt_poses and "gt_extrinsics" in batch:
@@ -1011,6 +1081,10 @@ def validate(
             gaussians = encoder_output.gaussians
             pred_context_pose = encoder_output.pred_context_pose
             infos = encoder_output.infos
+
+            # Same precomputed-mask override as training, so the val dyn/static split
+            # is measured on the correct masks too.
+            _override_dyn_mask(infos, batch, images, config, device)
 
             # Use GT poses for validation too
             if config.use_gt_poses and "gt_extrinsics" in batch:
@@ -1282,6 +1356,12 @@ def main():
                              "were unprojected from (static ones still render into every frame). Removes the "
                              "multi-frame ghosting of moving objects, which is why fine-tuning currently DEGRADES "
                              "dynamic PSNR. Requires VGGT4D dynamic detection; off by default (baselines reproduce).")
+    parser.add_argument("--dyn_mask_dir", type=str, default=None,
+                        help="Directory of PRECOMPUTED dynamic-mask PNGs (named by rgb frame stem), e.g. "
+                             "output_dyn_masks_precomputed_cs16_r518_st3_fs49/<SEQ>/masks. When set, these "
+                             "OVERRIDE the live per-window detection for both the dynamic downweight loss and "
+                             "the temporal loss — fine-tune with the validated 518+full-span masks. For "
+                             "multi-sequence training, point at a dir whose masks cover all training sequences.")
     parser.add_argument("--no_wandb", action="store_true",
                         help="Disable wandb logging (otherwise enabled by default).")
     parser.add_argument("--wandb_project", type=str, default="dynrecsplat",
@@ -1329,6 +1409,7 @@ def main():
         scale_reg_weight=args.scale_reg_weight,
         sh_reg_weight=args.sh_reg_weight,
         dynamic_loss_downweight=args.dynamic_loss_downweight,
+        dyn_mask_dir=args.dyn_mask_dir,
         per_frame_dynamic=args.per_frame_dynamic,
         static_first_curriculum=args.static_first,
         curriculum_static_epochs=args.curriculum_static_epochs,
