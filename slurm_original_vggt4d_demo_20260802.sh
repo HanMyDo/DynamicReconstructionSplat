@@ -91,7 +91,10 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp ${CONTAINER} bash -
   cd ${VGGT4D_REPO}
   export CUDA_VISIBLE_DEVICES=0
   export PYTHONPATH=${VGGT4D_REPO}:\$PYTHONPATH
-  pip install --quiet open3d 2>/dev/null || true
+  # Container already has torch/cv2/open3d-ish deps via our requirements.txt; the
+  # original repo only additionally needs open3d + evo (evo = pose-saving in store.py,
+  # unused for masks but a top-level import). Same inline-install pattern as our slurm.
+  pip install open3d evo --quiet
   python --version && nvidia-smi
   echo ''
   echo '=== running ORIGINAL demo_vggt4d.py (unmodified) ==='
