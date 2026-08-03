@@ -424,11 +424,13 @@ class VideoFrameDataset(Dataset):
 
         images = []
         extrinsics = []  # World-to-camera (4x4)
+        frame_names = []  # rgb stems, for aligning precomputed dynamic masks in eval
         has_all_poses = True
 
         for i in range(self.num_frames):
             frame_idx = start_idx + i * self.frame_stride
             frame_path, c2w_pose = self.window_frames[frame_idx]
+            frame_names.append(frame_path.stem)
 
             # Load image, squash-resize to target size, output [0, 1]
             # Using squash resize (not aspect-ratio crop) so intrinsics
@@ -451,6 +453,7 @@ class VideoFrameDataset(Dataset):
 
         result = {
             "images": torch.stack(images, dim=0),  # [V, 3, H, W]
+            "frame_names": frame_names,             # list[str], len V
         }
 
         if has_all_poses and len(extrinsics) == self.num_frames:

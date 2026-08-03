@@ -70,6 +70,9 @@ case "${EXTRA_FLAGS}" in *frame_stride*)
   STRIDE_VAL=$(echo "${EXTRA_FLAGS}" | sed -n 's/.*--frame_stride[= ]*\([0-9][0-9]*\).*/\1/p')
   FLAG_TAG="${FLAG_TAG}_s${STRIDE_VAL}" ;;
 esac
+# precomputed-mask runs get their own tag so they don't share an output dir with the
+# live-detection run (the A/B: same rendering, dyn/static split from good vs live masks)
+case "${EXTRA_FLAGS}" in *dyn_mask_dir*) FLAG_TAG="${FLAG_TAG}_pcm" ;; esac
 [ -z "${FLAG_TAG}" ] && FLAG_TAG="_plain"
 
 # $3 = eval sequence (default held-out crowd). Use an easier single-moving-object

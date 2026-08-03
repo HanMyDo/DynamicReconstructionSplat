@@ -101,13 +101,42 @@ def save_dynamic_mask_overlay(image, dyn_mask, path):
     Image.fromarray((overlay * 255).astype(np.uint8)).save(path)
 
 
+def load_precomputed_masks(frame_names, mask_dir, H, W, device):
+    """Load precomputed dynamic-mask PNGs by frame stem and resample to (H, W).
+
+    The precompute writes full-frame masks at detection resolution (aspect-preserved,
+    e.g. 392x518); the eval renders full-frame squash at (H, W), so a plain interpolate
+    reproduces the same squash and aligns mask to render. Missing frames -> zeros.
+
+    Returns [1, V, H, W] float in {0,1}, or None if NO frame had a mask file (so the
+    caller falls back to the live detection).
+    """
+    masks, found = [], 0
+    for stem in frame_names:
+        p = os.path.join(mask_dir, f"{stem}.png")
+        if os.path.exists(p):
+            m = np.asarray(Image.open(p).convert("L"), dtype=np.float32) / 255.0  # [Hm, Wm]
+            t = F.interpolate(torch.from_numpy(m)[None, None], size=(H, W), mode="nearest")[0, 0]
+            masks.append((t > 0.5).float())
+            found += 1
+        else:
+            masks.append(torch.zeros(H, W))
+    if found == 0:
+        return None
+    return torch.stack(masks, dim=0).unsqueeze(0).to(device)  # [1, V, H, W]
+
+
 @torch.no_grad()
 def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50, image_batch_start=0,
-             per_frame_dynamic=False, leave_one_out=False):
+             per_frame_dynamic=False, leave_one_out=False, precomputed_mask_dir=None):
     os.makedirs(output_dir, exist_ok=True)
     images_dir = os.path.join(output_dir, "images")
     dyn_mask_dir = os.path.join(output_dir, "dyn_mask")
     os.makedirs(images_dir, exist_ok=True)
+    if precomputed_mask_dir is not None:
+        print(f"  dynamic masks: LOADING precomputed from {precomputed_mask_dir} "
+              f"(overrides live detection for the dyn/static split)")
+    n_precomp_hits = 0
 
     total_psnr, total_ssim = 0.0, 0.0
     total_psnr_dyn = 0.0
@@ -152,6 +181,17 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
         pred_rgb = decoder_out.color  # [B, V, 3, H, W] in [0, 1]
 
         dyn_mask = infos.get("dyn_mask", None)  # [B, V, H, W] on CPU, or None
+
+        # Override the live (per-window) detection with precomputed full-span masks.
+        if precomputed_mask_dir is not None:
+            raw_names = batch.get("frame_names")
+            if raw_names is not None:
+                # default_collate wraps each name in a 1-tuple at batch_size=1
+                frame_names = [x[0] if isinstance(x, (list, tuple)) else x for x in raw_names]
+                loaded = load_precomputed_masks(frame_names, precomputed_mask_dir, h, w, device)
+                if loaded is not None:
+                    dyn_mask = loaded
+                    n_precomp_hits += 1
 
         # --- Per-frame metrics and comparison images ---
         for v_idx in range(v):
@@ -247,6 +287,9 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
         "n_frames": n_frames,
         "n_dynamic_frames": n_dyn_frames,
         "n_static_frames": n_static_frames,
+        "mask_source": ("precomputed" if precomputed_mask_dir is not None else "live_detection"),
+        "precomputed_mask_dir": precomputed_mask_dir,
+        "n_batches_with_precomputed_mask": n_precomp_hits,
     }
 
     print(f"\nResults:")
@@ -303,6 +346,11 @@ def main():
                              "(this architecture cannot model motion) and is itself reportable.")
     parser.add_argument("--image_batch_start", type=int, default=0,
                         help="First batch index to start saving images from. Use ~half total batches for mid-sequence.")
+    parser.add_argument("--dyn_mask_dir", type=str, default=None,
+                        help="Directory of PRECOMPUTED dynamic-mask PNGs (named by rgb frame stem), e.g. "
+                             "output_dyn_masks_precomputed_cs16_r518_st3_fs49/<SEQ>/masks. When set, these "
+                             "override the live per-window detection for the dynamic/static PSNR split — "
+                             "use the validated 518+full-span masks instead of the weak in-eval detection.")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -361,7 +409,8 @@ def main():
              max_image_batches=args.max_image_batches,
              image_batch_start=args.image_batch_start,
              per_frame_dynamic=args.per_frame_dynamic,
-             leave_one_out=args.eval_loo)
+             leave_one_out=args.eval_loo,
+             precomputed_mask_dir=args.dyn_mask_dir)
 
 
 if __name__ == "__main__":
