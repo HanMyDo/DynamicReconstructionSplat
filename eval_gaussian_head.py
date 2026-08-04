@@ -133,7 +133,22 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
             images = images.unsqueeze(0)
         b, v, c, h, w = images.shape
 
-        encoder_output = model.encoder(images, global_step=0)
+        # Load precomputed masks ONCE — used for BOTH the per-frame compositing gate
+        # (passed into the encoder as dyn_mask_override -> gaussian_dyn_flag) AND the
+        # dyn/static PSNR split below.
+        precomp_mask = None
+        if precomputed_mask_dir is not None:
+            raw_names = batch.get("frame_names")
+            if raw_names is not None:
+                # default_collate wraps each name in a 1-tuple at batch_size=1
+                frame_names = [x[0] if isinstance(x, (list, tuple)) else x for x in raw_names]
+                ds = batch.get("dataset_name")
+                if isinstance(ds, (list, tuple)):
+                    ds = ds[0]
+                precomp_mask = load_precomputed_masks(
+                    frame_names, precomputed_mask_dir, h, w, device, dataset_name=ds)
+
+        encoder_output = model.encoder(images, global_step=0, dyn_mask_override=precomp_mask)
         gaussians = encoder_output.gaussians
         infos = encoder_output.infos
         pred_pose = encoder_output.pred_context_pose
@@ -156,21 +171,12 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
         )
         pred_rgb = decoder_out.color  # [B, V, 3, H, W] in [0, 1]
 
-        dyn_mask = infos.get("dyn_mask", None)  # [B, V, H, W] on CPU, or None
-
-        # Override the live (per-window) detection with precomputed full-span masks.
-        if precomputed_mask_dir is not None:
-            raw_names = batch.get("frame_names")
-            if raw_names is not None:
-                # default_collate wraps each name in a 1-tuple at batch_size=1
-                frame_names = [x[0] if isinstance(x, (list, tuple)) else x for x in raw_names]
-                ds = batch.get("dataset_name")
-                if isinstance(ds, (list, tuple)):
-                    ds = ds[0]
-                loaded = load_precomputed_masks(frame_names, precomputed_mask_dir, h, w, device, dataset_name=ds)
-                if loaded is not None:
-                    dyn_mask = loaded
-                    n_precomp_hits += 1
+        # dyn/static metrics split: prefer the precomputed mask (the same one that drove
+        # the compositing gate above), at render resolution.
+        dyn_mask = infos.get("dyn_mask", None)  # [B, V, H, W], or None
+        if precomp_mask is not None:
+            dyn_mask = precomp_mask
+            n_precomp_hits += 1
 
         # --- Per-frame metrics and comparison images ---
         for v_idx in range(v):

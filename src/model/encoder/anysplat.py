@@ -554,7 +554,12 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
         image: torch.Tensor,
         global_step: int = 0,
         visualization_dump: Optional[dict] = None,
+        dyn_mask_override: Optional[torch.Tensor] = None,
     ) -> Gaussians:
+        # dyn_mask_override: PRECOMPUTED dynamic mask [B,V,H,W] or [V,H,W] (any resolution;
+        # resampled to the Gaussian grid). When given, it REPLACES the internally-detected
+        # mask for gaussian_dyn_flag (the per-frame compositing gate) and infos['dyn_mask'],
+        # so the good full-span masks — not the weak in-forward detection — drive compositing.
         device = image.device
         b, v, _, h, w = image.shape
         distill_infos = {}
@@ -717,6 +722,23 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
 
         del aggregated_tokens_list, patch_start_idx
         torch.cuda.empty_cache()
+
+        # Override the internally-detected mask with the PRECOMPUTED one (good full-span
+        # masks), resampled to the Gaussian-grid resolution (== conf_valid_mask HxW).
+        # Everything downstream — gaussian_dyn_flag (compositing gate) and infos['dyn_mask']
+        # — then uses the good mask instead of the weak in-forward detection.
+        if dyn_mask_override is not None:
+            H_g, W_g = conf_valid_mask.shape[-2], conf_valid_mask.shape[-1]
+            ov = dyn_mask_override.to(conf_valid_mask.device).float()
+            if ov.dim() == 3:  # [V,H,W] -> [1,V,H,W]
+                ov = ov.unsqueeze(0)
+            b_o, v_o = ov.shape[0], ov.shape[1]
+            ov = F.interpolate(
+                ov.reshape(b_o * v_o, 1, ov.shape[-2], ov.shape[-1]),
+                size=(H_g, W_g), mode="nearest",
+            ).reshape(b_o, v_o, H_g, W_g)
+            dyn_mask = (ov > 0.5).float()
+            self.dyn_mask = dyn_mask
 
         pts_flat = pts_all.flatten(2, 3)
         scene_scale = pts_flat.norm(dim=-1).mean().clip(min=1e-8)

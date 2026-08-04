@@ -75,7 +75,11 @@
 # PARAMETERIZED — keeps the VGGT-Ω / v4 recipe FIXED (LR peak, warmup_ratio 0.15,
 # cosine full cycle, grad_clip 0.5, temporal 0.25, nf 12, predicted poses) and
 # varies ONLY grounding + peak LR:
-#   $1 STATIC_DOWNWEIGHT  (default 0.90 = 10% grounding, the v4-stable level)
+#   $1 DYNAMIC_DOWNWEIGHT (CONSTANT dynamic-pixel loss downweight; curriculum removed
+#                          for stability-first. 0.90 = 10% weight = v4 level (DIVERGED
+#                          with correct masks); use 0.70 = 30% weight for grounding. To
+#                          re-add the static-first curriculum later, restore --static_first
+#                          + --curriculum_* flags and set --dynamic_loss_downweight (lo).)
 #   $2 LEARNING_RATE      (default 5e-5 = v4/Ω; 3e-5 still "small peak LR" per Ω,
 #                          gentles the compressed 5-epoch warmup)
 #   $3 DYN_MASK_DIR       (optional) parent dir of PRECOMPUTED masks, e.g.
@@ -98,12 +102,17 @@ LR=${2:-5e-5}
 # $3 = parent dir of PRECOMPUTED masks (e.g. output_dyn_masks_precomputed_cs16_r518_st3_fs0);
 # the loader resolves <dir>/<seq>/masks/<stem>.png per sequence. Empty = live detection (old).
 DYN_MASK_DIR=${3:-}
+# $4 = frames per training window (default 12 = v4 recipe). Lower (e.g. 8) if the
+# gsplat rasterizer OOMs on 24GB — fewer views = less render memory. Non-12 values
+# get their own output dir so they don't resume a 12-frame checkpoint.
+NUM_FRAMES=${4:-12}
 TAG="dw$(echo ${STATIC_DW} | tr '.' 'p')_lr${LR}"
 DYN_MASK_FLAG=""
 if [ -n "${DYN_MASK_DIR}" ]; then
   DYN_MASK_FLAG="--dyn_mask_dir ${DYN_MASK_DIR}"
   TAG="${TAG}_pcm"   # distinct output dir -> fresh run, never resumes a broken-mask checkpoint
 fi
+[ "${NUM_FRAMES}" != "12" ] && TAG="${TAG}_nf${NUM_FRAMES}"
 OUTPUT_DIR_NAME=output_train_testbed_${TAG}_20260706
 RUN_NAME=train_testbed_${TAG}_20260706_${SLURM_JOB_ID}
 
@@ -198,6 +207,10 @@ trap on_walltime USR1
 enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp ${CONTAINER} bash -c "
   cd /mnt/home/hanmydo/DynamicReconstructionSplat
   export CUDA_VISIBLE_DEVICES=0
+  # Reclaim fragmented CUDA memory — the gsplat rasterizer (isect_tiles) peaks early
+  # in training (large Gaussians before scale shrinks) and OOM'd on 24GB with ~1.25 GiB
+  # stuck as reserved-but-unallocated. This is the fix the OOM error itself suggests.
+  export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
   $WANDB_SETUP
   echo 'Current directory:' \$(pwd)
   python --version
@@ -231,14 +244,10 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp ${CONTAINER} bash -
     --learning_rate ${LR} \
     --warmup_ratio 0.15 \
     --gradient_clip 0.5 \
-    --num_frames 12 \
+    --num_frames ${NUM_FRAMES} \
     --temporal_weight 0.25 \
     --sh_reg_weight 0.01 \
-    --dynamic_loss_downweight 0.9 \
-    --static_first \
-    --curriculum_static_epochs 2 \
-    --curriculum_ramp_epochs 3 \
-    --curriculum_static_downweight ${STATIC_DW} \
+    --dynamic_loss_downweight ${STATIC_DW} \
     --no_gt_poses \
     --intrinsics bonn \
     --vggt4d_weights_path /mnt/home/hanmydo/DynamicReconstructionSplat/ckpts/vggt4d_model_tracker_fixed_e20.pt \
