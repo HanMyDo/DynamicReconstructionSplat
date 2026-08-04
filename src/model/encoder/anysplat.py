@@ -633,7 +633,31 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
         dyn_mask = None
         dyn_map = None
 
-        if self.use_vggt4d:
+        if self.use_vggt4d and dyn_mask_override is not None:
+            # FAST PATH: we already have the (good, precomputed) mask, so SKIP the entire
+            # in-forward detection — Pass-1 attention AND Stage-3 refine are exactly what
+            # the override replaces, and Stage 3's open3d/KMeans is the per-window
+            # bottleneck (hours over a sequence). Feed the override straight into Pass-2
+            # token suppression. Saves ~1 aggregator pass + the whole Stage-3 refine.
+            ov = dyn_mask_override.to(image.device).float()
+            if ov.dim() == 3:  # [V,H,W] -> [1,V,H,W]
+                ov = ov.unsqueeze(0)
+            if ov.shape[-2:] != (h, w):
+                b_o, v_o = ov.shape[0], ov.shape[1]
+                ov = F.interpolate(
+                    ov.reshape(b_o * v_o, 1, ov.shape[-2], ov.shape[-1]),
+                    size=(h, w), mode="nearest",
+                ).reshape(b_o, v_o, h, w)
+            dyn_mask = (ov > 0.5).float()
+            self.dyn_mask = dyn_mask
+            with torch.no_grad():
+                with torch.amp.autocast("cuda", enabled=True, dtype=_AMP_DTYPE,):
+                    aggregated_tokens_list, patch_start_idx, _, _ = self.aggregator(
+                        image.to(_AMP_DTYPE),
+                        dyn_masks=dyn_mask.to(image.device),
+                    )
+            torch.cuda.empty_cache()
+        elif self.use_vggt4d:
             # Pass 1: extract Q/K for dynamic mask computation
             with torch.no_grad():
                 with torch.amp.autocast("cuda", enabled=True, dtype=_AMP_DTYPE,):
@@ -693,8 +717,11 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
                 pts_all = batchify_unproject_depth_map_to_point_map(
                     depth_map, extrinsic, intrinsic
                 )
-                # Stage 3: geometric refinement of coarse dynamic mask
-                if dyn_mask is not None and self.cfg.enable_dynamic_detection:
+                # Stage 3: geometric refinement of coarse dynamic mask.
+                # Skipped when dyn_mask_override is given (the precomputed mask already IS
+                # the full 3-stage result — re-refining it is the wasted open3d/KMeans cost).
+                if (dyn_mask is not None and self.cfg.enable_dynamic_detection
+                        and dyn_mask_override is None):
                     print("Refining dynamic mask with Stage 3 (geometric)...")
                     dyn_mask = self.refine_dynamic_mask(
                         image, depth_map, extrinsic, intrinsic, dyn_mask
