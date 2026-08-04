@@ -57,7 +57,7 @@ from train_temporal_gaussian_head import (
     INTRINSICS_PRESETS,
     TrainingConfig,
 )
-from src.evaluation.metrics import compute_psnr, compute_ssim
+from src.evaluation.metrics import compute_psnr, compute_ssim, compute_lpips
 from src.misc.image_io import save_interpolated_video, save_image
 from src.model.ply_export import export_ply
 
@@ -118,6 +118,13 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
     total_psnr_dyn = 0.0
     total_psnr_static = 0.0
     total_dyn_pixel_fraction = 0.0
+    # LPIPS: perceptual, and unlike PSNR it heavily penalises GHOSTING/blur of moving
+    # objects — the failure mode this thesis is about. lpips_dynamic is computed on the
+    # dynamic-region bounding-box CROP (not a zero-masked image, which would inject
+    # artificial black edges into the perceptual network).
+    total_lpips = 0.0
+    total_lpips_dyn = 0.0
+    n_lpips_dyn_frames = 0
     n_dyn_frames = 0
     n_static_frames = 0
     n_frames = 0
@@ -185,8 +192,10 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
 
             psnr_val = compute_psnr(pred_frame.unsqueeze(0), gt_frame.unsqueeze(0)).mean().item()
             ssim_val = compute_ssim(pred_frame.unsqueeze(0), gt_frame.unsqueeze(0)).mean().item()
+            lpips_val = compute_lpips(gt_frame.unsqueeze(0), pred_frame.unsqueeze(0)).mean().item()
             total_psnr += psnr_val
             total_ssim += ssim_val
+            total_lpips += lpips_val
             n_frames += 1
 
             # Dynamic-masked metrics (PSNR only — masked SSIM is unreliable due to zero-padding bias)
@@ -201,6 +210,26 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
                     mse_dyn = ((pred_frame * mask3 - gt_frame * mask3) ** 2).sum() / (3 * n_px)
                     total_psnr_dyn += -10 * torch.log10(mse_dyn + 1e-8).item()
                     n_dyn_frames += 1
+
+                    # Perceptual quality WHERE THE MOVING OBJECT IS: crop both images to
+                    # the mask's bounding box (padded, min 32px so VGG has enough support)
+                    # and run LPIPS there. A crop keeps real image context — masking to
+                    # black would create edges the perceptual net reacts to.
+                    rows = torch.any(mask > 0.5, dim=1).nonzero()
+                    cols = torch.any(mask > 0.5, dim=0).nonzero()
+                    if rows.numel() > 0 and cols.numel() > 0:
+                        H_f, W_f = mask.shape
+                        y0, y1 = rows[0].item(), rows[-1].item() + 1
+                        x0, x1 = cols[0].item(), cols[-1].item() + 1
+                        pad = 8
+                        y0, y1 = max(0, y0 - pad), min(H_f, y1 + pad)
+                        x0, x1 = max(0, x0 - pad), min(W_f, x1 + pad)
+                        if (y1 - y0) >= 32 and (x1 - x0) >= 32:
+                            total_lpips_dyn += compute_lpips(
+                                gt_frame[:, y0:y1, x0:x1].unsqueeze(0),
+                                pred_frame[:, y0:y1, x0:x1].unsqueeze(0),
+                            ).mean().item()
+                            n_lpips_dyn_frames += 1
 
                 # Static-masked metrics (complement of dyn_mask)
                 n_px_s = n_total_px - n_px
@@ -266,6 +295,8 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
     metrics = {
         "psnr": total_psnr / n_frames if n_frames > 0 else 0.0,
         "ssim": total_ssim / n_frames if n_frames > 0 else 0.0,
+        "lpips": total_lpips / n_frames if n_frames > 0 else None,
+        "lpips_dynamic": (total_lpips_dyn / n_lpips_dyn_frames) if n_lpips_dyn_frames > 0 else None,
         "psnr_dynamic": total_psnr_dyn / n_dyn_frames if n_dyn_frames > 0 else None,
         "psnr_static": total_psnr_static / n_static_frames if n_static_frames > 0 else None,
         "avg_dyn_pixel_fraction": avg_dyn_pixel_frac,
@@ -280,6 +311,10 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
     print(f"\nResults:")
     print(f"  PSNR (overall):          {metrics['psnr']:.2f} dB")
     print(f"  SSIM (overall):          {metrics['ssim']:.4f}")
+    if metrics["lpips"] is not None:
+        print(f"  LPIPS (overall, lower better): {metrics['lpips']:.4f}")
+    if metrics["lpips_dynamic"] is not None:
+        print(f"  LPIPS (dynamic crop):          {metrics['lpips_dynamic']:.4f}")
     if metrics["psnr_dynamic"] is not None:
         print(f"  PSNR (dynamic regions):  {metrics['psnr_dynamic']:.2f} dB")
         print(f"  PSNR (static  regions):  {metrics['psnr_static']:.2f} dB")
