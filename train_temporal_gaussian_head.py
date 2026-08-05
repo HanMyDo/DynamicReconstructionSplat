@@ -667,7 +667,29 @@ def compute_rendering_loss(
     pred_rgb = output.color  # [B, V, 3, H, W]
     gt_rgb = images  # Already in [0, 1]
 
-    if dyn_mask is not None and dynamic_loss_downweight > 0.0:
+    if leave_one_out and output.alpha is not None:
+        # COVERAGE-WEIGHTED loss (audit Bug 2). Under leave-one-out, pixels that NO
+        # other view covers render as background; comparing them to GT is irreducible
+        # loss whose cheapest "fix" is inflating scales to smear over the holes — a
+        # fresh divergence mode. So weight each pixel by its rendered alpha:
+        #   - detached: alpha acts as a supervision WEIGHT, not a gradient path
+        #     (lowering alpha must not lower the loss directly);
+        #   - weighted MEAN (sum(w*err)/sum(w)): shrinking coverage does not shrink
+        #     the loss, removing the shrink-to-win incentive;
+        #   - denominator expands over the channel dim (same normalization fix as
+        #     compute_temporal_loss — a [.,1,H,W] weight broadcast over C=3 would
+        #     otherwise undercount by 3x).
+        # The non-LOO branches below stay byte-identical so existing recipes reproduce.
+        coverage = output.alpha.detach().clamp(0.0, 1.0).unsqueeze(2)  # [B, V, 1, H, W]
+        weights = coverage
+        if dyn_mask is not None and dynamic_loss_downweight > 0.0:
+            weights = weights * (
+                1.0 - dynamic_loss_downweight
+                * dyn_mask.float().to(pred_rgb.device).unsqueeze(2)
+            )
+        err = F.mse_loss(pred_rgb, gt_rgb, reduction='none')
+        mse_loss = (err * weights).sum() / weights.expand_as(err).sum().clamp_min(1e-8)
+    elif dyn_mask is not None and dynamic_loss_downweight > 0.0:
         # Static pixels keep weight 1.0; dynamic pixels are downweighted.
         # Unsqueeze over channel dim so weights broadcast to [B, V, 3, H, W].
         weights = 1.0 - dynamic_loss_downweight * dyn_mask.float().to(pred_rgb.device)
@@ -831,24 +853,27 @@ def load_precomputed_masks(frame_names, mask_dir, H, W, device, dataset_name=Non
     return torch.stack(masks, dim=0).unsqueeze(0).to(device)  # [1, V, H, W]
 
 
-def _override_dyn_mask(infos, batch, images, config, device):
-    """If config.dyn_mask_dir is set, replace infos['dyn_mask'] with precomputed masks
-    for this batch's frames. Both the rendering-loss downweight and the temporal loss
-    read infos['dyn_mask'], so this one override feeds correct masks to both. Returns
-    True if it overrode (for a one-time log). No-op (returns False) otherwise."""
+def load_batch_dyn_masks(batch, images, config, device):
+    """Load this batch's PRECOMPUTED dynamic masks (config.dyn_mask_dir), or None.
+
+    Called BEFORE the encoder forward and passed as `dyn_mask_override=` so the
+    encoder takes its FAST PATH: Pass-1 attention detection and Stage-3 open3d refine
+    are skipped (they are exactly what the precomputed mask replaces — Stage 3 alone
+    is ~10s+ CPU per batch), Pass-2 token suppression is conditioned on the GOOD mask
+    (matching how evaluation runs the backbone), and infos['dyn_mask'] /
+    gaussian_dyn_flag are derived from it — so the downweight loss, the temporal
+    loss AND the compositing labels all see the same correct mask.
+    Returns [1, V, H, W] on `device`, or None (→ encoder falls back to live detection).
+    """
     if config.dyn_mask_dir is None or "frame_names" not in batch:
-        return False
+        return None
     raw = batch["frame_names"]
     frame_names = [x[0] if isinstance(x, (list, tuple)) else x for x in raw]
     ds = batch.get("dataset_name")
     if isinstance(ds, (list, tuple)):
         ds = ds[0]
     H, W = images.shape[-2:]
-    loaded = load_precomputed_masks(frame_names, config.dyn_mask_dir, H, W, device, dataset_name=ds)
-    if loaded is not None:
-        infos['dyn_mask'] = loaded
-        return True
-    return False
+    return load_precomputed_masks(frame_names, config.dyn_mask_dir, H, W, device, dataset_name=ds)
 
 
 def train_epoch(
@@ -898,19 +923,23 @@ def train_epoch(
 
         b, v, c, h, w = images.shape
 
+        # Load precomputed masks BEFORE the forward and hand them to the encoder:
+        # fast path (skips Pass-1 detection + Stage-3 refine — big per-batch speedup)
+        # AND Pass-2/token-suppression + gaussian_dyn_flag + infos['dyn_mask'] are all
+        # conditioned on the GOOD mask, exactly as in evaluation. A post-forward infos
+        # override cannot do any of that (audit Bug 1).
+        precomp_mask = load_batch_dyn_masks(batch, images, config, device)
+        if precomp_mask is not None and batch_idx == 0:
+            print(f"  [dyn_mask] using PRECOMPUTED masks from {config.dyn_mask_dir} (encoder fast path)")
+
         # Forward pass with mixed precision
         with autocast(enabled=config.mixed_precision):
             # Run encoder (uses predicted poses internally for depth unprojection)
-            encoder_output = model.encoder(images, global_step=global_step)
+            encoder_output = model.encoder(images, global_step=global_step,
+                                           dyn_mask_override=precomp_mask)
             gaussians = encoder_output.gaussians
             pred_context_pose = encoder_output.pred_context_pose
             infos = encoder_output.infos
-
-            # Replace the live per-window detection with precomputed full-span masks
-            # (feeds BOTH the dynamic downweight loss and the temporal loss).
-            used_precomp = _override_dyn_mask(infos, batch, images, config, device)
-            if used_precomp and batch_idx == 0:
-                print(f"  [dyn_mask] using PRECOMPUTED masks from {config.dyn_mask_dir}")
 
             # Choose poses for rendering loss
             if config.use_gt_poses and "gt_extrinsics" in batch:
@@ -1090,14 +1119,14 @@ def validate(
 
             b, v, c, h, w = images.shape
 
-            encoder_output = model.encoder(images, global_step=global_step)
+            # Same pre-forward mask handoff as training (fast path + consistent
+            # Pass-2 conditioning), so val measures the model exactly as trained.
+            precomp_mask = load_batch_dyn_masks(batch, images, config, device)
+            encoder_output = model.encoder(images, global_step=global_step,
+                                           dyn_mask_override=precomp_mask)
             gaussians = encoder_output.gaussians
             pred_context_pose = encoder_output.pred_context_pose
             infos = encoder_output.infos
-
-            # Same precomputed-mask override as training, so the val dyn/static split
-            # is measured on the correct masks too.
-            _override_dyn_mask(infos, batch, images, config, device)
 
             # Use GT poses for validation too
             if config.use_gt_poses and "gt_extrinsics" in batch:
@@ -1377,7 +1406,9 @@ def main():
                              "this the loss is self-reprojection (project->unproject->project returns "
                              "the same pixel and cancels pose error), which requires no multi-view "
                              "consistency and does not match how we evaluate. Validation follows the "
-                             "same protocol automatically.")
+                             "same protocol automatically. The MSE is coverage-weighted by rendered "
+                             "alpha (weighted mean, detached) so pixels no other view covers are not "
+                             "punished — otherwise the head learns to inflate scales over the holes.")
     parser.add_argument("--dyn_mask_dir", type=str, default=None,
                         help="Directory of PRECOMPUTED dynamic-mask PNGs (named by rgb frame stem), e.g. "
                              "output_dyn_masks_precomputed_cs16_r518_st3_fs49/<SEQ>/masks. When set, these "
