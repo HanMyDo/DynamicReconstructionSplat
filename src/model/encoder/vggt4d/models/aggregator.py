@@ -20,18 +20,27 @@ class AggregatorFor4D(Aggregator):
 
     def forward(self, images: torch.Tensor,
                 dyn_masks: Optional[torch.Tensor] = None,
-                enable_memory_saving: bool = True) -> Tuple[List[torch.Tensor], int]:
+                enable_memory_saving: bool = True,
+                capture_qk: bool = True) -> Tuple[List[torch.Tensor], int]:
         """
         Args:
             images (torch.Tensor): Input images with shape [B, S, 3, H, W], in range [0, 1].
                 B: batch size, S: sequence length, 3: RGB channels, H: height, W: width
             dyn_masks (torch.Tensor): Dynamic masks with shape [B, S, H, W], in range [0, 1].
+            capture_qk (bool): Collect per-layer Q/K for attention-based dynamic detection.
+                Q/K are computed by the attention either way (attention.py returns
+                already-existing tensors), so this ONLY controls whether they are
+                .detach().cpu()-copied and stacked — ~96 GPU->CPU transfers per forward.
+                Set False when the caller does NOT run compute_attention_dynamic_mask
+                (e.g. a precomputed mask is supplied): bit-identical output, much faster.
+                qk_dict is then returned as None.
 
         Returns:
-            (list[torch.Tensor], int, dict, torch.Tensor):
+            (list[torch.Tensor], int, dict | None, torch.Tensor):
                 The list of outputs from the attention blocks,
                 the patch_start_idx indicating where patch tokens begin,
-                the qk_dict containing Q/K tensors for dynamic mask extraction,
+                the qk_dict containing Q/K tensors for dynamic mask extraction
+                (None if capture_qk=False),
                 the patch_tokens from the encoder.
         """
         B, S, C_in, H, W = images.shape
@@ -94,15 +103,17 @@ class AggregatorFor4D(Aggregator):
                     tokens, frame_idx, frame_intermediates, frame_q, frame_k = self._process_frame_attention(
                         tokens, B, S, P, C, frame_idx, pos=pos, dyn_masks=dyn_masks,
                     )
-                    frame_q_list.append(frame_q.detach().cpu())
-                    frame_k_list.append(frame_k.detach().cpu())
+                    if capture_qk:
+                        frame_q_list.append(frame_q.detach().cpu())
+                        frame_k_list.append(frame_k.detach().cpu())
                     del frame_q, frame_k
                 elif attn_type == "global":
                     tokens, global_idx, global_intermediates, global_q, global_k = self._process_global_attention(
                         tokens, B, S, P, C, global_idx, pos=pos, dyn_masks=dyn_masks,
                     )
-                    global_q_list.append(global_q.detach().cpu())
-                    global_k_list.append(global_k.detach().cpu())
+                    if capture_qk:
+                        global_q_list.append(global_q.detach().cpu())
+                        global_k_list.append(global_k.detach().cpu())
                     del global_q, global_k
                 else:
                     raise ValueError(f"Unknown attention type: {attn_type}")
@@ -121,20 +132,22 @@ class AggregatorFor4D(Aggregator):
             if enable_memory_saving:
                 del concat_inter, frame_intermediates, global_intermediates
 
-        global_q = torch.stack(global_q_list, dim=0)
-        global_k = torch.stack(global_k_list, dim=0)
-        frame_q = torch.stack(frame_q_list, dim=0)
-        frame_k = torch.stack(frame_k_list, dim=0)
+        if capture_qk:
+            global_q = torch.stack(global_q_list, dim=0)
+            global_k = torch.stack(global_k_list, dim=0)
+            frame_q = torch.stack(frame_q_list, dim=0)
+            frame_k = torch.stack(frame_k_list, dim=0)
+            qk_dict = {
+                "global_q": global_q,
+                "global_k": global_k,
+                "frame_q": frame_q,
+                "frame_k": frame_k
+            }
+        else:
+            qk_dict = None
 
         if enable_memory_saving:
             del tokens
-
-        qk_dict = {
-            "global_q": global_q,
-            "global_k": global_k,
-            "frame_q": frame_q,
-            "frame_k": frame_k
-        }
 
         if "concat_inter" in locals():
             del concat_inter

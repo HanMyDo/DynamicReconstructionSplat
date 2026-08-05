@@ -251,7 +251,8 @@ def main():
             # STAGE 2: re-run WITH the coarse mask (token suppression) -> refined poses.
             with torch.amp.autocast("cuda", enabled=(device.type == "cuda"), dtype=_AMP_DTYPE):
                 tokens2, _, _, _ = encoder.aggregator(
-                    images.to(_AMP_DTYPE), dyn_masks=dyn_mask.to(images.device))
+                    images.to(_AMP_DTYPE), dyn_masks=dyn_mask.to(images.device),
+                    capture_qk=False)  # Stage 2 only needs poses; its Q/K is discarded
             with torch.amp.autocast("cuda", enabled=False):
                 pose2 = encoder.camera_head(tokens2)
                 extrinsic_s2, _ = pose_encoding_to_extri_intri(pose2[-1], images.shape[-2:])

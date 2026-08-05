@@ -655,6 +655,7 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
                     aggregated_tokens_list, patch_start_idx, _, _ = self.aggregator(
                         image.to(_AMP_DTYPE),
                         dyn_masks=dyn_mask.to(image.device),
+                        capture_qk=False,  # no detection here -> skip ~96 GPU->CPU Q/K copies
                     )
             torch.cuda.empty_cache()
         elif self.use_vggt4d:
@@ -685,6 +686,7 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
                     aggregated_tokens_list, patch_start_idx, _, _ = self.aggregator(
                         image.to(_AMP_DTYPE),
                         dyn_masks=dyn_mask.to(image.device) if dyn_mask is not None else None,
+                        capture_qk=False,  # Pass 2 output Q/K is discarded (detection used Pass 1)
                     )
             torch.cuda.empty_cache()
         else:
