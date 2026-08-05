@@ -107,12 +107,13 @@ def main():
         print(f"No sequences with groundtruth.txt found under {root}")
         return
 
-    have_score = any(r[7] is not None for r in rows)
-    rows.sort(key=lambda r: (-(r[7] or -1)) if have_score else r[2])
+    # Rank by CAMERA SPEED (available for every sequence) — dyn%/score are shown as
+    # refinement where masks exist. Ranking by score would bury every sequence whose
+    # masks we have not precomputed yet, which is most of them.
+    rows.sort(key=lambda r: r[2])
 
-    print(f"\n{len(rows)} sequences | ranked by "
-          + ("dyn_frac / cam_speed (higher = better decoupled)" if have_score
-             else "camera translation speed (lower = better decoupled)"))
+    print(f"\n{len(rows)} sequences | ranked by camera translation speed "
+          f"(lower = better decoupled); dyn%/score shown where masks exist")
     print("LOW cam speed + HIGH dyn fraction = held-out frames differ because things MOVED,\n"
           "not because the camera flew away. Those are the sequences worth evaluating on.\n")
     print(f"{'sequence':<42}{'dur_s':>7}{'cam_m/s':>9}{'cam_deg/s':>10}{'path_m':>8}"

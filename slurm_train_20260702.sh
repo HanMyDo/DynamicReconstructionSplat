@@ -140,8 +140,17 @@ echo "Job started on node: $(hostname)"
 echo "Time: $(date)"
 echo ""
 
-# 4 training sequences — held-out for eval: rgbd_bonn_crowd
-TRAIN_SEQUENCES="rgbd_bonn_crowd3 rgbd_bonn_crowd2 rgbd_bonn_balloon rgbd_bonn_synchronous"
+# TRAINING sequences (2026-08-05 split). Chosen for DIVERSITY, not camera decoupling.
+# EVAL is a disjoint set of SLOW-CAMERA sequences: synchronous2, removing_obstructing_box,
+# placing_obstructing_box. NO SCENE FAMILY MAY SPAN train/eval, hence:
+#   - rgbd_bonn_synchronous REMOVED from training (same scene as the synchronous2 eval seq)
+#   - rgbd_bonn_moving_nonobstructing_box ADDED (former eval seq; its camera is too fast
+#     to isolate dynamics, so it is more useful as training data)
+#   - rgbd_bonn_crowd is NOT an eval seq (crowd2/crowd3 are trained on)
+# Keep this list and --dataset_names below IN SYNC (extraction vs loader).
+TRAIN_SEQUENCES="rgbd_bonn_crowd3 rgbd_bonn_crowd2 rgbd_bonn_balloon rgbd_bonn_moving_nonobstructing_box"
+# Derived (never hand-edit): the loader wants a comma-separated list of the SAME sequences.
+DATASET_NAMES=$(echo ${TRAIN_SEQUENCES} | tr ' ' ',')
 
 # Per-JOB extraction dir. Two parallel runs of this launcher can co-schedule on the
 # same node; a shared /tmp path makes them race on extraction. (SLURM_JOB_ID is
@@ -244,7 +253,7 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp ${CONTAINER} bash -
 
   python train_temporal_gaussian_head.py \
     --data_dir ${BONN_DATA}/rgbd_bonn_dataset \
-    --dataset_names rgbd_bonn_crowd3,rgbd_bonn_crowd2,rgbd_bonn_balloon,rgbd_bonn_synchronous \
+    --dataset_names ${DATASET_NAMES} \
     --output_dir \${OUTPUT_DIR} \
     --num_epochs 5 \
     --val_every_epochs 1 \

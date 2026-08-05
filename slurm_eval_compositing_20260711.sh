@@ -78,10 +78,15 @@ esac
 case "${EXTRA_FLAGS}" in *dyn_mask_dir*) FLAG_TAG="${FLAG_TAG}_pcm" ;; esac
 [ -z "${FLAG_TAG}" ] && FLAG_TAG="_plain"
 
-# $3 = eval sequence (default held-out crowd). Use an easier single-moving-object
-# sequence (e.g. rgbd_bonn_person_tracking, rgbd_bonn_balloon) to test whether the
-# dynamic MASK works at all in our integration, independent of crowd's difficulty.
-EVAL_SEQ=${3:-rgbd_bonn_crowd}
+# $3 = eval sequence. VALID EVAL SET (2026-08-05 split, family-disjoint from training,
+# chosen for SLOW CAMERA so held-out frames differ because things MOVED rather than
+# because the viewpoint jumped — Bonn is monocular, so time and viewpoint are coupled):
+#   rgbd_bonn_synchronous2             (0.032 m/s, 6.64 deg/s)  <- default, best decoupled
+#   rgbd_bonn_removing_obstructing_box (0.086 m/s, 11.88 deg/s)
+#   rgbd_bonn_placing_obstructing_box  (0.098 m/s, 12.82 deg/s)
+# DO NOT eval on: crowd/crowd2/crowd3, balloon*, synchronous, moving_nonobstructing_box
+# — all are training sequences or the same scene family (leakage).
+EVAL_SEQ=${3:-rgbd_bonn_synchronous2}
 SEQ_TAG=$(echo ${EVAL_SEQ} | sed 's/rgbd_bonn_//')
 REPO="/mnt/home/hanmydo/DynamicReconstructionSplat"
 VGGT4D_CKPT="${REPO}/ckpts/vggt4d_model_tracker_fixed_e20.pt"
