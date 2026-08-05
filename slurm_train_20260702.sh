@@ -106,6 +106,14 @@ DYN_MASK_DIR=${3:-}
 # gsplat rasterizer OOMs on 24GB — fewer views = less render memory. Non-12 values
 # get their own output dir so they don't resume a 12-frame checkpoint.
 NUM_FRAMES=${4:-12}
+# $5 = 1 -> LEAVE-ONE-OUT training objective (render each view from the OTHERS only).
+# Without it the loss is self-reprojection, which cancels pose error and needs no
+# multi-view consistency — the likely reason earlier fine-tunes never generalised.
+TRAIN_LOO=${5:-0}
+TRAIN_LOO_FLAG=""
+if [ "${TRAIN_LOO}" = "1" ]; then
+  TRAIN_LOO_FLAG="--train_loo"
+fi
 TAG="dw$(echo ${STATIC_DW} | tr '.' 'p')_lr${LR}"
 DYN_MASK_FLAG=""
 if [ -n "${DYN_MASK_DIR}" ]; then
@@ -113,6 +121,7 @@ if [ -n "${DYN_MASK_DIR}" ]; then
   TAG="${TAG}_pcm"   # distinct output dir -> fresh run, never resumes a broken-mask checkpoint
 fi
 [ "${NUM_FRAMES}" != "12" ] && TAG="${TAG}_nf${NUM_FRAMES}"
+[ "${TRAIN_LOO}" = "1" ] && TAG="${TAG}_loo"   # own output dir: different objective, don't resume a self-reprojection ckpt
 OUTPUT_DIR_NAME=output_train_testbed_${TAG}_20260706
 RUN_NAME=train_testbed_${TAG}_20260706_${SLURM_JOB_ID}
 
@@ -253,7 +262,7 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp ${CONTAINER} bash -
     --vggt4d_weights_path /mnt/home/hanmydo/DynamicReconstructionSplat/ckpts/vggt4d_model_tracker_fixed_e20.pt \
     --wandb_project dynrecsplat \
     --wandb_run_name ${RUN_NAME} \
-    ${DYN_MASK_FLAG} \
+    ${DYN_MASK_FLAG} ${TRAIN_LOO_FLAG} \
     \${RESUME_FLAG}
 " &
 TRAIN_PID=$!

@@ -263,6 +263,11 @@ class TrainingConfig:
     scale_reg_weight: float = 0.01  # L1 penalty on Gaussian scales to prevent size collapse
     sh_reg_weight: float = 0.01     # L1 penalty on SH DC magnitude — keeps f_dc bounded when fine-tuning the GS head on OOD color distributions
     dynamic_loss_downweight: float = 0.9  # Fraction to reduce dynamic-pixel MSE weight (0=uniform, 1=fully masked)
+    # Leave-one-out training objective: render each view from the OTHER views only.
+    # Off = the legacy self-reprojection objective (nearly free, cancels pose error,
+    # does not require multi-view consistency) — the likely reason fine-tuning never
+    # generalised to held-out views. Requires voxelize=False (needs gaussian_frame_idx).
+    train_loo: bool = False
     dyn_mask_dir: Optional[str] = None  # If set, load PRECOMPUTED dynamic masks (by frame stem) and override the live per-window detection for BOTH the downweight loss and the temporal loss. Use the validated 518+full-span masks so fine-tuning is shaped by correct masks.
 
     # Static-first curriculum (schedule on the dynamic-pixel MSE downweight).
@@ -929,15 +934,23 @@ def train_epoch(
                     render_intrinsics[:, :, 2],
                 ], dim=2)
 
-            # Compute losses
+            # Compute losses.
+            # train_loo: render each view WITHOUT its own Gaussians, so the head must
+            # reconstruct it from the OTHER views. Without this the loss is
+            # SELF-REPROJECTION (unproject pixel from view j -> project back into view j
+            # returns the same pixel, cancelling pose error exactly), which is nearly
+            # free and requires no multi-view consistency — i.e. the objective does not
+            # ask for what evaluation measures. LOO aligns training with the held-out
+            # protocol. Needs gaussian_frame_idx (requires voxelize=False).
             mse_loss, _ = compute_rendering_loss(
                 model, images, gaussians, render_extrinsics, render_intrinsics,
                 dyn_mask=infos.get('dyn_mask', None),
                 dynamic_loss_downweight=dyn_downweight,
                 gaussian_frame_idx=(infos.get('gaussian_frame_idx')
-                                    if config.per_frame_dynamic else None),
+                                    if (config.per_frame_dynamic or config.train_loo) else None),
                 gaussian_dyn_flag=(infos.get('gaussian_dyn_flag')
                                    if config.per_frame_dynamic else None),
+                leave_one_out=config.train_loo,
             )
 
             temporal_loss = compute_temporal_loss(infos)
@@ -1105,14 +1118,16 @@ def validate(
                     render_intrinsics[:, :, 2],
                 ], dim=2)
 
-            # Validation must use the SAME compositing as training, or val PSNR
-            # measures a different renderer than the one being optimised.
+            # Validation must use the SAME compositing AND the same held-out protocol
+            # as training, or val PSNR measures a different renderer/task than the one
+            # being optimised (train_loo -> val must also be leave-one-out).
             _, render_output = compute_rendering_loss(
                 model, images, gaussians, render_extrinsics, render_intrinsics,
                 gaussian_frame_idx=(infos.get('gaussian_frame_idx')
-                                    if config.per_frame_dynamic else None),
+                                    if (config.per_frame_dynamic or config.train_loo) else None),
                 gaussian_dyn_flag=(infos.get('gaussian_dyn_flag')
                                    if config.per_frame_dynamic else None),
+                leave_one_out=config.train_loo,
             )
 
             # Match eval_gaussian_head.py: clamp to [0,1] then accumulate PSNR/SSIM/MSE
@@ -1356,6 +1371,13 @@ def main():
                              "were unprojected from (static ones still render into every frame). Removes the "
                              "multi-frame ghosting of moving objects, which is why fine-tuning currently DEGRADES "
                              "dynamic PSNR. Requires VGGT4D dynamic detection; off by default (baselines reproduce).")
+    parser.add_argument("--train_loo", action="store_true",
+                        help="LEAVE-ONE-OUT training objective: render each view WITHOUT its own "
+                             "Gaussians, so it must be reconstructed from the OTHER views. Without "
+                             "this the loss is self-reprojection (project->unproject->project returns "
+                             "the same pixel and cancels pose error), which requires no multi-view "
+                             "consistency and does not match how we evaluate. Validation follows the "
+                             "same protocol automatically.")
     parser.add_argument("--dyn_mask_dir", type=str, default=None,
                         help="Directory of PRECOMPUTED dynamic-mask PNGs (named by rgb frame stem), e.g. "
                              "output_dyn_masks_precomputed_cs16_r518_st3_fs49/<SEQ>/masks. When set, these "
@@ -1409,6 +1431,7 @@ def main():
         scale_reg_weight=args.scale_reg_weight,
         sh_reg_weight=args.sh_reg_weight,
         dynamic_loss_downweight=args.dynamic_loss_downweight,
+        train_loo=args.train_loo,
         dyn_mask_dir=args.dyn_mask_dir,
         per_frame_dynamic=args.per_frame_dynamic,
         static_first_curriculum=args.static_first,
