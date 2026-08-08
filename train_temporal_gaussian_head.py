@@ -617,6 +617,9 @@ def compute_rendering_loss(
     gaussian_frame_idx: Optional[torch.Tensor] = None,
     gaussian_dyn_flag: Optional[torch.Tensor] = None,
     leave_one_out: bool = False,
+    dyn_centroid: Optional[torch.Tensor] = None,
+    dyn_centroid_pred: Optional[torch.Tensor] = None,
+    per_frame_compositing: bool = False,
 ) -> tuple:
     """
     Compute MSE rendering loss by rendering predicted Gaussians with given poses.
@@ -662,6 +665,9 @@ def compute_rendering_loss(
         gaussian_frame_idx=gaussian_frame_idx,
         gaussian_dyn_flag=gaussian_dyn_flag,
         leave_one_out=leave_one_out,
+        dyn_centroid=dyn_centroid,
+        dyn_centroid_pred=dyn_centroid_pred,
+        per_frame_compositing=per_frame_compositing,
     )
 
     pred_rgb = output.color  # [B, V, 3, H, W]
@@ -979,6 +985,7 @@ def train_epoch(
                                     if (config.per_frame_dynamic or config.train_loo) else None),
                 gaussian_dyn_flag=(infos.get('gaussian_dyn_flag')
                                    if config.per_frame_dynamic else None),
+                per_frame_compositing=config.per_frame_dynamic,
                 leave_one_out=config.train_loo,
             )
 
@@ -1156,6 +1163,7 @@ def validate(
                                     if (config.per_frame_dynamic or config.train_loo) else None),
                 gaussian_dyn_flag=(infos.get('gaussian_dyn_flag')
                                    if config.per_frame_dynamic else None),
+                per_frame_compositing=config.per_frame_dynamic,
                 leave_one_out=config.train_loo,
             )
 

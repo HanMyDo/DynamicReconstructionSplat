@@ -149,6 +149,51 @@ def rearrange_head(feat, patch_size, H, W):
     return feat
 
 
+def predict_centroid_leave_one_out(centroids, valid, min_pts=3):
+    """Predict the dynamic-content centroid at each frame j WITHOUT using frame j.
+
+    centroids: [B, V, 3] per-frame 3D centroid of the dynamic points.
+    valid:     [B, V] bool — frames with enough dynamic points to trust.
+
+    For every target j we fit a straight line (constant velocity) to the centroids of
+    the OTHER valid frames, as a function of frame index, and evaluate it at j. Frame
+    j's own centroid is excluded, so this is usable under leave-one-out: the predicted
+    position at the held-out timestamp is an extrapolation/interpolation of the motion
+    seen in the source frames, never a read-out of the target frame.
+
+    Fewer than `min_pts` usable source frames -> fall back to their mean (no motion
+    estimate); none -> fall back to frame j's own centroid (displacement becomes 0).
+
+    Returns [B, V, 3].
+    """
+    B, V, _ = centroids.shape
+    idx = torch.arange(V, device=centroids.device, dtype=centroids.dtype)
+    pred = centroids.clone()
+    for b in range(B):
+        for j in range(V):
+            m = valid[b].clone()
+            m[j] = False                      # exclude the target frame (no leak)
+            k = int(m.sum())
+            if k == 0:
+                continue                      # keep own centroid -> zero displacement
+            t = idx[m]
+            c = centroids[b][m]               # [k, 3]
+            if k < min_pts:
+                pred[b, j] = c.mean(0)
+                continue
+            # least-squares line fit per axis: c ≈ a * t + b0
+            t_mean = t.mean()
+            c_mean = c.mean(0)
+            dt = t - t_mean
+            denom = (dt * dt).sum()
+            if denom < 1e-8:
+                pred[b, j] = c_mean
+                continue
+            slope = (dt.unsqueeze(-1) * (c - c_mean)).sum(0) / denom   # [3]
+            pred[b, j] = c_mean + slope * (idx[j] - t_mean)
+    return pred
+
+
 class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
     backbone: nn.Module
     gaussian_adapter: GaussianAdapter
@@ -929,6 +974,28 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
         # Gaussian->frame mapping does not survive voxel fusion).
         infos["gaussian_frame_idx"] = gaussian_frame_idx
         infos["gaussian_dyn_flag"] = gaussian_dyn_flag
+
+        # --- First-order MOTION MODEL for the dynamic content ------------------
+        # Gaussian positions come from the FROZEN depth/pose heads, so a moving object
+        # is reconstructed only where it was in its OWN source frame. To render it at
+        # another timestamp it has to be MOVED. We estimate its motion as the 3D
+        # centroid of the dynamic points per frame, then (leak-free) predict the
+        # centroid at each target view j by a linear fit over the OTHER frames only —
+        # frame j's own mask/depth is never used, so this stays valid under
+        # leave-one-out. The decoder displaces dynamic Gaussians by
+        # pred_centroid[j] - centroid[i].
+        # Rigid (translation-only) and one motion for all dynamic content: a
+        # deliberate first-order model, not a deformation field.
+        if dyn_mask is not None and self.cfg.enable_dynamic_detection:
+            dm = (dyn_mask > 0.5) & conf_valid_mask                     # [B,V,H,W]
+            n_dyn = dm.flatten(2).sum(-1)                              # [B,V]
+            ctr = (pts_all * dm.unsqueeze(-1)).flatten(2, 3).sum(2)    # [B,V,3]
+            ctr = ctr / n_dyn.clamp_min(1).unsqueeze(-1).float()
+            valid = n_dyn >= 32                                        # too few pts -> unusable
+            infos["dyn_centroid"] = ctr
+            infos["dyn_centroid_valid"] = valid
+            infos["dyn_centroid_pred"] = predict_centroid_leave_one_out(ctr, valid)
+        # ----------------------------------------------------------------------
 
         # Store per-frame Gaussian parameters for temporal consistency loss (Fix 3)
         # out shape: [B, V, raw_gs_dim+1, H, W] where raw_gs_dim = 1 + 7 + 3*d_sh

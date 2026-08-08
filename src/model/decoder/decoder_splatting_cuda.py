@@ -53,6 +53,9 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
         gaussian_frame_idx: Tensor | None = None,
         gaussian_dyn_flag: Tensor | None = None,
         leave_one_out: bool = False,
+        dyn_centroid: Tensor | None = None,
+        dyn_centroid_pred: Tensor | None = None,
+        per_frame_compositing: bool = False,
     ) -> DecoderOutput:
         B, V, _, _  = intrinsics.shape
         H, W = image_shape
@@ -98,7 +101,7 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
 
                     # (1) Per-frame dynamic compositing (needs the dynamic flags):
                     #     dynamic Gaussians survive ONLY in their own frame.
-                    if gaussian_dyn_flag is not None:
+                    if gaussian_dyn_flag is not None and per_frame_compositing:
                         dyn_i = gaussian_dyn_flag[i].to(opacity_i.device).float()
                         gate = gate * (1.0 - dyn_i * (1.0 - own_frame))
 
@@ -117,7 +120,32 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
 
                     opacity_ij = opacity_i * gate
                 # ----------------------------------------------------------------
-                rendering, alpha, _ = rasterization(xyz_i, rotation_i, scale_i, opacity_ij, feature_i,
+
+                # --- (3) MOTION DISPLACEMENT of dynamic Gaussians ---------------
+                # Positions come from the frozen depth/pose heads, so a dynamic
+                # Gaussian sits where its object was in ITS OWN source frame i. To
+                # render target view j we translate it by the object's estimated
+                # motion between t_i and t_j:
+                #     disp = pred_centroid[j] - centroid[i]
+                # pred_centroid[j] is fitted from the OTHER frames only (see
+                # predict_centroid_leave_one_out), so this never reads frame j and
+                # stays valid under leave-one-out. Static Gaussians are untouched.
+                xyz_ij = xyz_i
+                if (dyn_centroid is not None and dyn_centroid_pred is not None
+                        and gaussian_frame_idx is not None and gaussian_dyn_flag is not None):
+                    fidx = gaussian_frame_idx[i].to(xyz_i.device).long().clamp_min(0)  # -1 padding -> 0
+                    dynf = gaussian_dyn_flag[i].to(xyz_i.device).float()                # [N]
+                    # A Gaussian rendered into its OWN source frame is already at the
+                    # correct place for that timestamp — displacing it would MOVE the
+                    # object off its own observation. Zero the displacement there.
+                    # (Under leave_one_out these are gated out anyway, but this keeps
+                    # --track_dynamic correct when used WITHOUT LOO.)
+                    move = (dynf * (1.0 - (fidx == j).float())).unsqueeze(-1)          # [N,1]
+                    src_c = dyn_centroid[i].to(xyz_i.device)[fidx]                      # [N,3]
+                    tgt_c = dyn_centroid_pred[i].to(xyz_i.device)[j].unsqueeze(0)       # [1,3]
+                    xyz_ij = xyz_i + move * (tgt_c - src_c)
+                # ----------------------------------------------------------------
+                rendering, alpha, _ = rasterization(xyz_ij, rotation_i, scale_i, opacity_ij, feature_i,
                                                 test_w2c_i[j:j+1], test_intr_i[j:j+1], W, H, sh_degree=sh_degree, 
                                                 # near_plane=near[i].mean(), far_plane=far[i].mean(),
                                                 render_mode="RGB+D", packed=False,
@@ -150,8 +178,13 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
         gaussian_frame_idx: Tensor | None = None,
         gaussian_dyn_flag: Tensor | None = None,
         leave_one_out: bool = False,
+        dyn_centroid: Tensor | None = None,
+        dyn_centroid_pred: Tensor | None = None,
+        per_frame_compositing: bool = False,
     ) -> DecoderOutput:
 
         return self.rendering_fn(gaussians, extrinsics, intrinsics, near, far, image_shape, depth_mode, cam_rot_delta, cam_trans_delta,
-                                 gaussian_frame_idx=gaussian_frame_idx, gaussian_dyn_flag=gaussian_dyn_flag, leave_one_out=leave_one_out)
+                                 gaussian_frame_idx=gaussian_frame_idx, gaussian_dyn_flag=gaussian_dyn_flag, leave_one_out=leave_one_out,
+                                 dyn_centroid=dyn_centroid, dyn_centroid_pred=dyn_centroid_pred,
+                                 per_frame_compositing=per_frame_compositing)
 

@@ -104,7 +104,8 @@ def save_dynamic_mask_overlay(image, dyn_mask, path):
 
 @torch.no_grad()
 def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50, image_batch_start=0,
-             per_frame_dynamic=False, leave_one_out=False, precomputed_mask_dir=None):
+             per_frame_dynamic=False, leave_one_out=False, precomputed_mask_dir=None,
+             track_dynamic=False):
     os.makedirs(output_dir, exist_ok=True)
     images_dir = os.path.join(output_dir, "images")
     dyn_mask_dir = os.path.join(output_dir, "dyn_mask")
@@ -171,10 +172,15 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
         _, decoder_out = compute_rendering_loss(
             model, images, gaussians, ext, intr,
             gaussian_frame_idx=(infos.get("gaussian_frame_idx")
-                                if (per_frame_dynamic or leave_one_out) else None),
+                                if (per_frame_dynamic or leave_one_out or track_dynamic) else None),
             gaussian_dyn_flag=(infos.get("gaussian_dyn_flag")
-                               if per_frame_dynamic else None),
+                               if (per_frame_dynamic or track_dynamic) else None),
             leave_one_out=leave_one_out,
+            per_frame_compositing=per_frame_dynamic,
+            # Motion displacement of dynamic Gaussians (needs the per-frame centroids
+            # the encoder computed). Off by default so baselines reproduce exactly.
+            dyn_centroid=(infos.get("dyn_centroid") if track_dynamic else None),
+            dyn_centroid_pred=(infos.get("dyn_centroid_pred") if track_dynamic else None),
         )
         pred_rgb = decoder_out.color  # [B, V, 3, H, W] in [0, 1]
 
@@ -303,6 +309,7 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
         "n_frames": n_frames,
         "n_dynamic_frames": n_dyn_frames,
         "n_static_frames": n_static_frames,
+        "track_dynamic": track_dynamic,
         "mask_source": ("precomputed" if precomputed_mask_dir is not None else "live_detection"),
         "precomputed_mask_dir": precomputed_mask_dir,
         "n_batches_with_precomputed_mask": n_precomp_hits,
@@ -366,6 +373,12 @@ def main():
                              "(this architecture cannot model motion) and is itself reportable.")
     parser.add_argument("--image_batch_start", type=int, default=0,
                         help="First batch index to start saving images from. Use ~half total batches for mid-sequence.")
+    parser.add_argument("--track_dynamic", action="store_true",
+                        help="Displace dynamic Gaussians by the object's estimated motion when "
+                             "rendering another timestamp (first-order rigid model from per-frame "
+                             "dynamic centroids; target-frame centroid is fitted from the OTHER "
+                             "frames only, so it is leave-one-out safe). Off = Gaussians stay at "
+                             "their source-frame positions (the baseline).")
     parser.add_argument("--dyn_mask_dir", type=str, default=None,
                         help="Directory of PRECOMPUTED dynamic-mask PNGs (named by rgb frame stem), e.g. "
                              "output_dyn_masks_precomputed_cs16_r518_st3_fs49/<SEQ>/masks. When set, these "
@@ -430,7 +443,8 @@ def main():
              image_batch_start=args.image_batch_start,
              per_frame_dynamic=args.per_frame_dynamic,
              leave_one_out=args.eval_loo,
-             precomputed_mask_dir=args.dyn_mask_dir)
+             precomputed_mask_dir=args.dyn_mask_dir,
+             track_dynamic=args.track_dynamic)
 
 
 if __name__ == "__main__":
