@@ -114,6 +114,7 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
         print(f"  dynamic masks: LOADING precomputed from {precomputed_mask_dir} "
               f"(overrides live detection for the dyn/static split)")
     n_precomp_hits = 0
+    n_group_motion = 0   # batches where the tracker-driven motion model was available
 
     total_psnr, total_ssim = 0.0, 0.0
     total_psnr_dyn = 0.0
@@ -179,10 +180,23 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
             per_frame_compositing=per_frame_dynamic,
             # Motion displacement of dynamic Gaussians (needs the per-frame centroids
             # the encoder computed). Off by default so baselines reproduce exactly.
-            dyn_centroid=(infos.get("dyn_centroid") if track_dynamic else None),
-            dyn_centroid_pred=(infos.get("dyn_centroid_pred") if track_dynamic else None),
-            dyn_centroid_valid=(infos.get("dyn_centroid_valid") if track_dynamic else None),
+            # Single-centroid (one rigid motion for ALL dynamic content) is only used
+            # when groups are disabled. With groups requested, a tracker failure must
+            # mean NO displacement — never a silent downgrade to the crude mechanism,
+            # which would look like "tracking doesn't help".
+            dyn_centroid=(infos.get("dyn_centroid")
+                          if (track_dynamic and config.dyn_motion_groups == 0) else None),
+            dyn_centroid_pred=(infos.get("dyn_centroid_pred")
+                               if (track_dynamic and config.dyn_motion_groups == 0) else None),
+            dyn_centroid_valid=(infos.get("dyn_centroid_valid")
+                                if (track_dynamic and config.dyn_motion_groups == 0) else None),
+            dyn_group_centroid=(infos.get("dyn_group_centroid") if track_dynamic else None),
+            dyn_group_pred=(infos.get("dyn_group_pred") if track_dynamic else None),
+            dyn_group_valid=(infos.get("dyn_group_valid") if track_dynamic else None),
+            gaussian_group_idx=(infos.get("gaussian_group_idx") if track_dynamic else None),
         )
+        if infos.get("dyn_group_pred") is not None:
+            n_group_motion += 1
         pred_rgb = decoder_out.color  # [B, V, 3, H, W] in [0, 1]
 
         # dyn/static metrics split: prefer the precomputed mask (the same one that drove
@@ -311,6 +325,8 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
         "n_dynamic_frames": n_dyn_frames,
         "n_static_frames": n_static_frames,
         "track_dynamic": track_dynamic,
+        "dyn_motion_groups": config.dyn_motion_groups,
+        "n_batches_with_group_motion": n_group_motion,
         "mask_source": ("precomputed" if precomputed_mask_dir is not None else "live_detection"),
         "precomputed_mask_dir": precomputed_mask_dir,
         "n_batches_with_precomputed_mask": n_precomp_hits,
@@ -374,6 +390,11 @@ def main():
                              "(this architecture cannot model motion) and is itself reportable.")
     parser.add_argument("--image_batch_start", type=int, default=0,
                         help="First batch index to start saving images from. Use ~half total batches for mid-sequence.")
+    parser.add_argument("--dyn_motion_groups", type=int, default=1,
+                        help="With --track_dynamic: number of independently-moving GROUPS to model "
+                             "(tracker-driven piecewise-rigid motion). 1 = one rigid motion for all "
+                             "dynamic content (the crude version that failed); 3-4 lets e.g. a person "
+                             "and a box move differently. Needs VGGT4D (uses its point tracker).")
     parser.add_argument("--track_dynamic", action="store_true",
                         help="Displace dynamic Gaussians by the object's estimated motion when "
                              "rendering another timestamp (first-order rigid model from per-frame "
@@ -403,6 +424,7 @@ def main():
         use_vggt4d=not args.no_vggt4d,
         enable_dynamic_detection=not args.no_vggt4d,
         vggt4d_weights_path=args.vggt4d_weights_path,
+        dyn_motion_groups=(args.dyn_motion_groups if args.track_dynamic else 0),
     )
 
     print(f"\nLoading {args.split} dataset...")

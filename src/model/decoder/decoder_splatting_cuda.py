@@ -56,6 +56,10 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
         dyn_centroid: Tensor | None = None,
         dyn_centroid_pred: Tensor | None = None,
         dyn_centroid_valid: Tensor | None = None,
+        dyn_group_centroid: Tensor | None = None,
+        dyn_group_pred: Tensor | None = None,
+        dyn_group_valid: Tensor | None = None,
+        gaussian_group_idx: Tensor | None = None,
         per_frame_compositing: bool = False,
     ) -> DecoderOutput:
         B, V, _, _  = intrinsics.shape
@@ -132,7 +136,24 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
                 # predict_centroid_leave_one_out), so this never reads frame j and
                 # stays valid under leave-one-out. Static Gaussians are untouched.
                 xyz_ij = xyz_i
-                if (dyn_centroid is not None and dyn_centroid_pred is not None
+                if (dyn_group_centroid is not None and dyn_group_pred is not None
+                        and gaussian_group_idx is not None and gaussian_frame_idx is not None
+                        and gaussian_dyn_flag is not None):
+                    # PIECEWISE-RIGID: each Gaussian follows the group (moving object)
+                    # it belongs to, so a person and a box get different velocities.
+                    fidx = gaussian_frame_idx[i].to(xyz_i.device).long().clamp_min(0)
+                    gidx = gaussian_group_idx[i].to(xyz_i.device).long()
+                    dynf = gaussian_dyn_flag[i].to(xyz_i.device).float()
+                    has_g = (gidx >= 0).float()          # -1 = static / unassigned
+                    gidx = gidx.clamp_min(0)
+                    move = dynf * has_g * (1.0 - (fidx == j).float())
+                    if dyn_group_valid is not None:
+                        gv = dyn_group_valid[i].to(xyz_i.device).float()      # [V,K]
+                        move = move * gv[fidx, gidx] * gv[j, gidx]
+                    src_c = dyn_group_centroid[i].to(xyz_i.device)[fidx, gidx]   # [N,3]
+                    tgt_c = dyn_group_pred[i].to(xyz_i.device)[j, gidx]          # [N,3]
+                    xyz_ij = xyz_i + move.unsqueeze(-1) * (tgt_c - src_c)
+                elif (dyn_centroid is not None and dyn_centroid_pred is not None
                         and gaussian_frame_idx is not None and gaussian_dyn_flag is not None):
                     fidx = gaussian_frame_idx[i].to(xyz_i.device).long().clamp_min(0)  # -1 padding -> 0
                     dynf = gaussian_dyn_flag[i].to(xyz_i.device).float()                # [N]
@@ -193,6 +214,10 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
         dyn_centroid: Tensor | None = None,
         dyn_centroid_pred: Tensor | None = None,
         dyn_centroid_valid: Tensor | None = None,
+        dyn_group_centroid: Tensor | None = None,
+        dyn_group_pred: Tensor | None = None,
+        dyn_group_valid: Tensor | None = None,
+        gaussian_group_idx: Tensor | None = None,
         per_frame_compositing: bool = False,
     ) -> DecoderOutput:
 
@@ -200,5 +225,7 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
                                  gaussian_frame_idx=gaussian_frame_idx, gaussian_dyn_flag=gaussian_dyn_flag, leave_one_out=leave_one_out,
                                  dyn_centroid=dyn_centroid, dyn_centroid_pred=dyn_centroid_pred,
                                  dyn_centroid_valid=dyn_centroid_valid,
+                                 dyn_group_centroid=dyn_group_centroid, dyn_group_pred=dyn_group_pred,
+                                 dyn_group_valid=dyn_group_valid, gaussian_group_idx=gaussian_group_idx,
                                  per_frame_compositing=per_frame_compositing)
 

@@ -75,7 +75,13 @@ case "${EXTRA_FLAGS}" in *frame_stride*)
 esac
 # precomputed-mask runs get their own tag so they don't share an output dir with the
 # live-detection run (the A/B: same rendering, dyn/static split from good vs live masks)
-case "${EXTRA_FLAGS}" in *track_dynamic*) FLAG_TAG="${FLAG_TAG}_trk" ;; esac
+case "${EXTRA_FLAGS}" in *track_dynamic*)
+  # group count belongs in the tag: K=1 and K=4 are DIFFERENT mechanisms and must not
+  # share (or overwrite) an output dir — and neither may clobber the earlier
+  # single-centroid _trk result.
+  GRP=$(echo "${EXTRA_FLAGS}" | sed -n 's/.*--dyn_motion_groups[= ]*\([0-9][0-9]*\).*/\1/p')
+  FLAG_TAG="${FLAG_TAG}_trk${GRP:-1}" ;;
+esac
 case "${EXTRA_FLAGS}" in *dyn_mask_dir*) FLAG_TAG="${FLAG_TAG}_pcm" ;; esac
 [ -z "${FLAG_TAG}" ] && FLAG_TAG="_plain"
 

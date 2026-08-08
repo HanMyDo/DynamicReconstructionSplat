@@ -268,6 +268,8 @@ class TrainingConfig:
     # does not require multi-view consistency) — the likely reason fine-tuning never
     # generalised to held-out views. Requires voxelize=False (needs gaussian_frame_idx).
     train_loo: bool = False
+    # >0 = tracker-driven piecewise-rigid motion for dynamic Gaussians (K groups).
+    dyn_motion_groups: int = 0
     dyn_mask_dir: Optional[str] = None  # If set, load PRECOMPUTED dynamic masks (by frame stem) and override the live per-window detection for BOTH the downweight loss and the temporal loss. Use the validated 518+full-span masks so fine-tuning is shaped by correct masks.
 
     # Static-first curriculum (schedule on the dynamic-pixel MSE downweight).
@@ -515,6 +517,7 @@ def create_model(config: TrainingConfig) -> AnySplat:
         enable_dynamic_detection=config.enable_dynamic_detection,
         dynamic_mask_threshold=None,
         dynamic_n_clusters=64,
+        dyn_motion_groups=config.dyn_motion_groups,
         suppress_dynamic_gaussians=False,  # Bonn task: reconstruct dynamic objects, not suppress them
         use_temporal_attention=False,
     )
@@ -620,6 +623,10 @@ def compute_rendering_loss(
     dyn_centroid: Optional[torch.Tensor] = None,
     dyn_centroid_pred: Optional[torch.Tensor] = None,
     dyn_centroid_valid: Optional[torch.Tensor] = None,
+    dyn_group_centroid: Optional[torch.Tensor] = None,
+    dyn_group_pred: Optional[torch.Tensor] = None,
+    dyn_group_valid: Optional[torch.Tensor] = None,
+    gaussian_group_idx: Optional[torch.Tensor] = None,
     per_frame_compositing: bool = False,
 ) -> tuple:
     """
@@ -669,6 +676,10 @@ def compute_rendering_loss(
         dyn_centroid=dyn_centroid,
         dyn_centroid_pred=dyn_centroid_pred,
         dyn_centroid_valid=dyn_centroid_valid,
+        dyn_group_centroid=dyn_group_centroid,
+        dyn_group_pred=dyn_group_pred,
+        dyn_group_valid=dyn_group_valid,
+        gaussian_group_idx=gaussian_group_idx,
         per_frame_compositing=per_frame_compositing,
     )
 

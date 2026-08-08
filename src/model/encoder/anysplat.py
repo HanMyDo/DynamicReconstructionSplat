@@ -50,6 +50,7 @@ from src.model.encoder.vggt.layers.mlp import Mlp
 from src.model.encoder.vggt.models.vggt import VGGT
 from src.model.encoder.vggt4d.models.vggt4d import VGGTFor4D
 from src.model.encoder.vggt4d.utils import organize_qk_dict
+from src.model.encoder.dyn_motion import compute_dyn_group_motion
 from src.model.encoder.vggt4d.masks import (
     extract_dyn_map,
     cluster_attention_maps,
@@ -130,6 +131,7 @@ class EncoderAnySplatCfg:
     # Dynamic mask extraction options
     enable_dynamic_detection: bool = False
     dynamic_mask_threshold: Optional[float] = None  # None = use adaptive threshold
+    dyn_motion_groups: int = 0   # >0 enables tracker-driven piecewise-rigid motion (K groups)
     dynamic_n_clusters: int = 64  # Number of clusters for KMeans refinement
     suppress_dynamic_gaussians: bool = False
     # Temporal attention options for Gaussian head (Fix 2 for dynamic handling)
@@ -229,6 +231,9 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
         self.pred_pose = cfg.pred_pose
 
         self.camera_head = model_full.camera_head
+        # Point tracker: weights come with the VGGT4D checkpoint (model_tracker_fixed).
+        # Kept (frozen) so the dynamic-motion model can get temporal correspondence.
+        self.track_head = getattr(model_full, 'track_head', None)
         if self.cfg.pred_head_type == "depth":
             self.depth_head = model_full.depth_head
         else:
@@ -794,6 +799,22 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
             image_size=(h, w),
         )
 
+        # --- piecewise-rigid motion of the dynamic content (tracker-driven) -------
+        # Must run while the aggregated tokens still exist (the tracker consumes them).
+        self._dyn_group_map = None
+        self._dyn_group_motion = None
+        if (dyn_mask is not None and self.cfg.enable_dynamic_detection
+                and getattr(self, "track_head", None) is not None
+                and getattr(self.cfg, "dyn_motion_groups", 0) > 0):
+            _m = compute_dyn_group_motion(
+                self.track_head, aggregated_tokens_list, image, patch_start_idx,
+                pts_all, dyn_mask, conf_valid_mask,
+                n_groups=self.cfg.dyn_motion_groups,
+            )
+            if _m is not None:
+                self._dyn_group_motion = _m[:3]
+                self._dyn_group_map = _m[3]
+        # -------------------------------------------------------------------------
         del aggregated_tokens_list, patch_start_idx
         torch.cuda.empty_cache()
 
@@ -827,7 +848,7 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
         # Only well-defined WITHOUT voxelization: voxelizaton_with_fusion() merges
         # points from different frames into one anchor, destroying the 1:1
         # Gaussian -> (frame, pixel) correspondence this relies on.
-        frame_idx_list, dyn_flag_list = [], []
+        frame_idx_list, dyn_flag_list, group_idx_list = [], [], []
         track_frame_idx = not self.cfg.voxelize
         if self.cfg.voxelize:
             for b_i in range(b):
@@ -855,6 +876,8 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
                     dyn_flag_list.append(
                         dyn_mask[b_i].to(pts_all.device).float()[conf_valid_mask[b_i]]
                     )
+                if self._dyn_group_map is not None:
+                    group_idx_list.append(self._dyn_group_map[b_i][conf_valid_mask[b_i]])
 
         max_voxels = max(f.shape[0] for f in neural_feats_list)
         neural_feats = self.pad_tensor_list(
@@ -871,6 +894,11 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
         gaussian_frame_idx = (
             self.pad_tensor_list(frame_idx_list, (max_voxels,), -1)
             if track_frame_idx
+            else None
+        )
+        gaussian_group_idx = (
+            self.pad_tensor_list(group_idx_list, (max_voxels,), -1)
+            if (track_frame_idx and group_idx_list)
             else None
         )
         gaussian_dyn_flag = (
@@ -936,6 +964,10 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
                 gaussian_dyn_flag = (
                     gaussian_dyn_flag[gaussian_usage].view(b, -1).contiguous()
                 )
+            if gaussian_group_idx is not None:
+                gaussian_group_idx = (
+                    gaussian_group_idx[gaussian_usage].view(b, -1).contiguous()
+                )
 
             print(
                 f"finally pruned {gaussian_usage.shape[1] - neural_pts.shape[1]} gaussians out of {gaussian_usage.shape[1]}"
@@ -974,6 +1006,12 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
         # Gaussian->frame mapping does not survive voxel fusion).
         infos["gaussian_frame_idx"] = gaussian_frame_idx
         infos["gaussian_dyn_flag"] = gaussian_dyn_flag
+        if self._dyn_group_motion is not None:
+            gc, gp, gv = self._dyn_group_motion
+            infos["dyn_group_centroid"] = gc      # [B,V,K,3]
+            infos["dyn_group_pred"] = gp          # [B,V,K,3] leave-one-out prediction
+            infos["dyn_group_valid"] = gv         # [B,V,K]
+            infos["gaussian_group_idx"] = gaussian_group_idx
 
         # --- First-order MOTION MODEL for the dynamic content ------------------
         # Gaussian positions come from the FROZEN depth/pose heads, so a moving object
