@@ -55,6 +55,7 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
         leave_one_out: bool = False,
         dyn_centroid: Tensor | None = None,
         dyn_centroid_pred: Tensor | None = None,
+        dyn_centroid_valid: Tensor | None = None,
         per_frame_compositing: bool = False,
     ) -> DecoderOutput:
         B, V, _, _  = intrinsics.shape
@@ -140,7 +141,18 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
                     # object off its own observation. Zero the displacement there.
                     # (Under leave_one_out these are gated out anyway, but this keeps
                     # --track_dynamic correct when used WITHOUT LOO.)
-                    move = (dynf * (1.0 - (fidx == j).float())).unsqueeze(-1)          # [N,1]
+                    move = dynf * (1.0 - (fidx == j).float())                          # [N]
+                    # A frame with too few dynamic points has a MEANINGLESS centroid
+                    # (the mean of ~nothing), so displacing its Gaussians by
+                    # pred[j] - garbage flings them across the scene and corrupts even
+                    # static image regions. Only move Gaussians whose SOURCE frame had
+                    # a usable centroid, and only toward a usable prediction.
+                    if dyn_centroid_valid is not None:
+                        okv = dyn_centroid_valid[i].to(xyz_i.device).float()           # [V]
+                        move = move * okv[fidx]
+                        if okv.sum() < 2:      # no motion estimate at all -> no displacement
+                            move = move * 0.0
+                    move = move.unsqueeze(-1)                                          # [N,1]
                     src_c = dyn_centroid[i].to(xyz_i.device)[fidx]                      # [N,3]
                     tgt_c = dyn_centroid_pred[i].to(xyz_i.device)[j].unsqueeze(0)       # [1,3]
                     xyz_ij = xyz_i + move * (tgt_c - src_c)
@@ -180,11 +192,13 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
         leave_one_out: bool = False,
         dyn_centroid: Tensor | None = None,
         dyn_centroid_pred: Tensor | None = None,
+        dyn_centroid_valid: Tensor | None = None,
         per_frame_compositing: bool = False,
     ) -> DecoderOutput:
 
         return self.rendering_fn(gaussians, extrinsics, intrinsics, near, far, image_shape, depth_mode, cam_rot_delta, cam_trans_delta,
                                  gaussian_frame_idx=gaussian_frame_idx, gaussian_dyn_flag=gaussian_dyn_flag, leave_one_out=leave_one_out,
                                  dyn_centroid=dyn_centroid, dyn_centroid_pred=dyn_centroid_pred,
+                                 dyn_centroid_valid=dyn_centroid_valid,
                                  per_frame_compositing=per_frame_compositing)
 

@@ -181,6 +181,7 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
             # the encoder computed). Off by default so baselines reproduce exactly.
             dyn_centroid=(infos.get("dyn_centroid") if track_dynamic else None),
             dyn_centroid_pred=(infos.get("dyn_centroid_pred") if track_dynamic else None),
+            dyn_centroid_valid=(infos.get("dyn_centroid_valid") if track_dynamic else None),
         )
         pred_rgb = decoder_out.color  # [B, V, 3, H, W] in [0, 1]
 

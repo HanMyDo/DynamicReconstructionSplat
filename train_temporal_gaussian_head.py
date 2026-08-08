@@ -619,6 +619,7 @@ def compute_rendering_loss(
     leave_one_out: bool = False,
     dyn_centroid: Optional[torch.Tensor] = None,
     dyn_centroid_pred: Optional[torch.Tensor] = None,
+    dyn_centroid_valid: Optional[torch.Tensor] = None,
     per_frame_compositing: bool = False,
 ) -> tuple:
     """
@@ -667,6 +668,7 @@ def compute_rendering_loss(
         leave_one_out=leave_one_out,
         dyn_centroid=dyn_centroid,
         dyn_centroid_pred=dyn_centroid_pred,
+        dyn_centroid_valid=dyn_centroid_valid,
         per_frame_compositing=per_frame_compositing,
     )
 
