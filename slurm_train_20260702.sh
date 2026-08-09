@@ -110,6 +110,15 @@ NUM_FRAMES=${4:-12}
 # Without it the loss is self-reprojection, which cancels pose error and needs no
 # multi-view consistency — the likely reason earlier fine-tunes never generalised.
 TRAIN_LOO=${5:-0}
+# $6 SCALE_REG : L1 on mean Gaussian scale. This term PENALISES LARGE SCALES, i.e. it
+#   pushes scales DOWN (its old comment claimed the opposite). Measured: at 0.01 it drove
+#   a 26x scale collapse (0.0041 -> 0.00016) -> splats too small to cover surfaces ->
+#   f_dc inflates to recover the lost alpha -> the recurring 'f_dc runaway'. Use 0.
+# $7 TEMPORAL_W: the "temporal" loss diffs head outputs at the SAME PIXEL across adjacent
+#   frames. With a moving camera the same pixel is a DIFFERENT scene point, so it is a
+#   cross-view smoothness prior, not temporal consistency. Use 0 for a clean experiment.
+SCALE_REG=${6:-0.01}
+TEMPORAL_W=${7:-0.25}
 TRAIN_LOO_FLAG=""
 if [ "${TRAIN_LOO}" = "1" ]; then
   TRAIN_LOO_FLAG="--train_loo"
@@ -121,7 +130,10 @@ if [ -n "${DYN_MASK_DIR}" ]; then
   TAG="${TAG}_pcm"   # distinct output dir -> fresh run, never resumes a broken-mask checkpoint
 fi
 [ "${NUM_FRAMES}" != "12" ] && TAG="${TAG}_nf${NUM_FRAMES}"
-[ "${TRAIN_LOO}" = "1" ] && TAG="${TAG}_loo"   # own output dir: different objective, don't resume a self-reprojection ckpt
+[ "${TRAIN_LOO}" = "1" ] && TAG="${TAG}_loo"
+# non-default auxiliary weights change the objective -> own output dir
+[ "${SCALE_REG}" != "0.01" ] && TAG="${TAG}_sr$(echo ${SCALE_REG} | tr '.' 'p')"
+[ "${TEMPORAL_W}" != "0.25" ] && TAG="${TAG}_tw$(echo ${TEMPORAL_W} | tr '.' 'p')"   # own output dir: different objective, don't resume a self-reprojection ckpt
 OUTPUT_DIR_NAME=output_train_testbed_${TAG}_20260706
 RUN_NAME=train_testbed_${TAG}_20260706_${SLURM_JOB_ID}
 
@@ -263,7 +275,8 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp ${CONTAINER} bash -
     --warmup_ratio 0.15 \
     --gradient_clip 0.5 \
     --num_frames ${NUM_FRAMES} \
-    --temporal_weight 0.25 \
+    --temporal_weight ${TEMPORAL_W} \
+    --scale_reg_weight ${SCALE_REG} \
     --sh_reg_weight 0.01 \
     --dynamic_loss_downweight ${STATIC_DW} \
     --no_gt_poses \

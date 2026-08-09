@@ -260,7 +260,12 @@ class TrainingConfig:
     # Loss weights
     mse_weight: float = 1.0
     temporal_consistency_weight: float = 0.1
-    scale_reg_weight: float = 0.01  # L1 penalty on Gaussian scales to prevent size collapse
+    # L1 penalty on MEAN Gaussian scale. NOTE: this penalises LARGE scales, i.e. it
+    # PUSHES SCALES DOWN -- it does NOT 'prevent size collapse' as previously commented,
+    # it CAUSES it. Measured: it drove a 26x scale collapse (0.0041 -> 0.00016), which
+    # then forces f_dc to inflate to compensate for the lost alpha (the recurring
+    # 'f_dc runaway'). Set to 0 unless you specifically want smaller Gaussians.
+    scale_reg_weight: float = 0.01
     sh_reg_weight: float = 0.01     # L1 penalty on SH DC magnitude — keeps f_dc bounded when fine-tuning the GS head on OOD color distributions
     dynamic_loss_downweight: float = 0.9  # Fraction to reduce dynamic-pixel MSE weight (0=uniform, 1=fully masked)
     # Leave-one-out training objective: render each view from the OTHER views only.
@@ -686,29 +691,14 @@ def compute_rendering_loss(
     pred_rgb = output.color  # [B, V, 3, H, W]
     gt_rgb = images  # Already in [0, 1]
 
-    if leave_one_out and output.alpha is not None:
-        # COVERAGE-WEIGHTED loss (audit Bug 2). Under leave-one-out, pixels that NO
-        # other view covers render as background; comparing them to GT is irreducible
-        # loss whose cheapest "fix" is inflating scales to smear over the holes — a
-        # fresh divergence mode. So weight each pixel by its rendered alpha:
-        #   - detached: alpha acts as a supervision WEIGHT, not a gradient path
-        #     (lowering alpha must not lower the loss directly);
-        #   - weighted MEAN (sum(w*err)/sum(w)): shrinking coverage does not shrink
-        #     the loss, removing the shrink-to-win incentive;
-        #   - denominator expands over the channel dim (same normalization fix as
-        #     compute_temporal_loss — a [.,1,H,W] weight broadcast over C=3 would
-        #     otherwise undercount by 3x).
-        # The non-LOO branches below stay byte-identical so existing recipes reproduce.
-        coverage = output.alpha.detach().clamp(0.0, 1.0).unsqueeze(2)  # [B, V, 1, H, W]
-        weights = coverage
-        if dyn_mask is not None and dynamic_loss_downweight > 0.0:
-            weights = weights * (
-                1.0 - dynamic_loss_downweight
-                * dyn_mask.float().to(pred_rgb.device).unsqueeze(2)
-            )
-        err = F.mse_loss(pred_rgb, gt_rgb, reduction='none')
-        mse_loss = (err * weights).sum() / weights.expand_as(err).sum().clamp_min(1e-8)
-    elif dyn_mask is not None and dynamic_loss_downweight > 0.0:
+    # NOTE: no coverage/alpha weighting here, deliberately. An earlier version weighted
+    # the LOO loss by rendered alpha so that pixels no other view covers were not
+    # punished. That opened the opposite loophole: uncovered pixels carry zero weight,
+    # so the model could ABANDON difficult pixels for free and sharpen the rest -- which
+    # is how the Gaussian scales collapsed 26x (0.0041 -> 0.00016) while PSNR still rose.
+    # The evaluation metric is an UNWEIGHTED mean over all pixels, so training uses the
+    # same unweighted loss: optimise exactly what is measured, no reweighting.
+    if dyn_mask is not None and dynamic_loss_downweight > 0.0:
         # Static pixels keep weight 1.0; dynamic pixels are downweighted.
         # Unsqueeze over channel dim so weights broadcast to [B, V, 3, H, W].
         weights = 1.0 - dynamic_loss_downweight * dyn_mask.float().to(pred_rgb.device)

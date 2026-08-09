@@ -214,4 +214,32 @@ def compute_dyn_group_motion(
 
     if not any_ok:
         return None
+
+    # --- DIAGNOSTIC: did the mechanism actually DO anything? ----------------------
+    # Without this, "tracking ~= baseline" is ambiguous: it could mean the
+    # displacement does not help, OR that the validity/distance gates suppressed
+    # nearly all displacement so the mechanism never really acted. Report the share
+    # of dynamic pixels that received a motion, and how far they would move.
+    n_dyn_px = int(dyn.sum())
+    n_assigned = int((group_map >= 0).sum())
+    mags = []
+    for b in range(B):
+        for k in range(n_groups):
+            ok = valid[b, :, k]
+            if int(ok.sum()) < 2:
+                continue
+            for i in range(V):
+                if not bool(ok[i]):
+                    continue
+                d = (pred[b, :, k] - centroid[b, i, k]).norm(dim=-1)   # over targets j
+                mags.append(d[ok])
+    if mags:
+        m = torch.cat(mags)
+        print(f"[DynMotion] assigned {n_assigned}/{n_dyn_px} dynamic px "
+              f"({100.0 * n_assigned / max(n_dyn_px, 1):.1f}%) | displacement "
+              f"median={m.median().item():.4f} mean={m.mean().item():.4f} "
+              f"p90={m.quantile(0.9).item():.4f} (world units)")
+    else:
+        print(f"[DynMotion] assigned {n_assigned}/{n_dyn_px} dynamic px — NO usable motion")
+    # -----------------------------------------------------------------------------
     return centroid, pred, valid, group_map
