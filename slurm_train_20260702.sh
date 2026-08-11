@@ -125,6 +125,14 @@ TRAIN_LOO=${5:-0}
 #   0.5 randomises the regime per step so the SAME Gaussians must be valid with AND
 #   without their own frame. No extra memory (one regime per step).
 LOO_PROB=${8:-1.0}
+# $9  SH_REG  : L2 on f_dc. The fine-tuned head shows a GLOBAL DC brightness shift
+#   (f_dc mean +0.810 vs +0.091 frozen) -> washed-out PLY under full compositing. A MEAN
+#   penalty could not catch the max outliers historically, but this is a mean shift,
+#   which is exactly what it can catch. Upstream AnySplat has no such term; 0.01 is ours.
+# $10 LPIPS_W : perceptual loss. AnySplat trains with 0.05; our loop was MSE-only, which
+#   is why PSNR improves while LPIPS regresses (0.311 -> 0.324). 0.05 restores upstream.
+SH_REG=${9:-0.01}
+LPIPS_W=${10:-0.0}
 SCALE_REG=${6:-0.01}
 TEMPORAL_W=${7:-0.25}
 TRAIN_LOO_FLAG=""
@@ -142,7 +150,9 @@ fi
 # non-default auxiliary weights change the objective -> own output dir
 [ "${SCALE_REG}" != "0.01" ] && TAG="${TAG}_sr$(echo ${SCALE_REG} | tr '.' 'p')"
 [ "${TEMPORAL_W}" != "0.25" ] && TAG="${TAG}_tw$(echo ${TEMPORAL_W} | tr '.' 'p')"
-[ "${LOO_PROB}" != "1.0" ] && TAG="${TAG}_lp$(echo ${LOO_PROB} | tr '.' 'p')"   # own output dir: different objective, don't resume a self-reprojection ckpt
+[ "${LOO_PROB}" != "1.0" ] && TAG="${TAG}_lp$(echo ${LOO_PROB} | tr '.' 'p')"
+[ "${SH_REG}" != "0.01" ] && TAG="${TAG}_shr$(echo ${SH_REG} | tr '.' 'p')"
+[ "${LPIPS_W}" != "0.0" ] && TAG="${TAG}_lpips$(echo ${LPIPS_W} | tr '.' 'p')"   # own output dir: different objective, don't resume a self-reprojection ckpt
 OUTPUT_DIR_NAME=output_train_testbed_${TAG}_20260706
 RUN_NAME=train_testbed_${TAG}_20260706_${SLURM_JOB_ID}
 
@@ -286,7 +296,8 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp ${CONTAINER} bash -
     --num_frames ${NUM_FRAMES} \
     --temporal_weight ${TEMPORAL_W} \
     --scale_reg_weight ${SCALE_REG} \
-    --sh_reg_weight 0.01 \
+    --sh_reg_weight ${SH_REG} \
+    --lpips_weight ${LPIPS_W} \
     --dynamic_loss_downweight ${STATIC_DW} \
     --no_gt_poses \
     --intrinsics bonn \

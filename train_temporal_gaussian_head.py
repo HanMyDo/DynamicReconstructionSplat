@@ -53,7 +53,7 @@ from src.model.encoder.anysplat import EncoderAnySplatCfg, OpacityMappingCfg
 from src.model.encoder.common.gaussian_adapter import GaussianAdapterCfg
 from src.model.decoder.decoder_splatting_cuda import DecoderSplattingCUDACfg
 from src.model.encoder.visualization.encoder_visualizer_epipolar_cfg import EncoderVisualizerEpipolarCfg
-from src.evaluation.metrics import compute_psnr, compute_ssim
+from src.evaluation.metrics import compute_psnr, compute_ssim, get_lpips
 
 
 # ============================================================================
@@ -276,6 +276,15 @@ class TrainingConfig:
     # iteration so the SAME Gaussians must be valid both with and without their own
     # frame, removing that conditioning ambiguity. Costs no extra memory: each step still
     # renders exactly one regime. 0.5 = balanced.
+    # Perceptual loss. AnySplat's own training uses [mse, lpips, depth_consis] with
+    # lpips weight 0.05; our hand-rolled loop used MSE ONLY, which is why the fine-tuned
+    # head improves PSNR while LPIPS gets WORSE (0.311 -> 0.324) — the classic L2-vs-
+    # perceptual trade. Restoring the upstream term targets exactly that regression.
+    lpips_weight: float = 0.0
+    # LPIPS is differentiable, so its VGG activations are retained for backward. Scoring
+    # all V views would blow the 24GB budget the rasterizer already strains, so score a
+    # random subset each step (unbiased in expectation, bounded memory).
+    lpips_views: int = 2
     train_loo_prob: float = 1.0
     # Leave-one-out training objective: render each view from the OTHER views only.
     # Off = the legacy self-reprojection objective (nearly free, cancels pose error,
@@ -995,7 +1004,7 @@ def train_epoch(
                 config.train_loo_prob >= 1.0
                 or torch.rand(()).item() < config.train_loo_prob)
 
-            mse_loss, _ = compute_rendering_loss(
+            mse_loss, render_out = compute_rendering_loss(
                 model, images, gaussians, render_extrinsics, render_intrinsics,
                 dyn_mask=infos.get('dyn_mask', None),
                 dynamic_loss_downweight=dyn_downweight,
@@ -1021,9 +1030,23 @@ def train_epoch(
             # (max/mean ratio ~9× observed in v3).
             sh_reg = gaussians.harmonics[:, :, :, 0].pow(2).mean()
 
+            # Perceptual term on a random subset of views (see lpips_views).
+            lpips_loss = torch.zeros((), device=images.device)
+            if config.lpips_weight > 0.0 and render_out is not None:
+                pred_v = render_out.color[0].clamp(0, 1)      # [V, 3, H, W]
+                gt_v = images[0].clamp(0, 1)
+                k = min(config.lpips_views, pred_v.shape[0])
+                sel = torch.randperm(pred_v.shape[0], device=pred_v.device)[:k]
+                # NOT compute_lpips(): that helper is @torch.no_grad, so using it as a
+                # loss would silently contribute ZERO gradient. Call the cached LPIPS
+                # module directly so the term actually trains.
+                lpips_loss = get_lpips(pred_v.device).forward(
+                    gt_v[sel], pred_v[sel], normalize=True).mean()
+
             # Total loss
             loss = (
                 config.mse_weight * mse_loss +
+                config.lpips_weight * lpips_loss +
                 config.temporal_consistency_weight * temporal_loss +
                 config.scale_reg_weight * scale_reg +
                 config.sh_reg_weight * sh_reg
@@ -1428,6 +1451,13 @@ def main():
                              "were unprojected from (static ones still render into every frame). Removes the "
                              "multi-frame ghosting of moving objects, which is why fine-tuning currently DEGRADES "
                              "dynamic PSNR. Requires VGGT4D dynamic detection; off by default (baselines reproduce).")
+    parser.add_argument("--lpips_weight", type=float, default=0.0,
+                        help="Perceptual (LPIPS) loss weight. AnySplat trains with 0.05; our loop used "
+                             "MSE only, which is why PSNR improves while LPIPS regresses. Set 0.05 to "
+                             "restore the upstream term.")
+    parser.add_argument("--lpips_views", type=int, default=2,
+                        help="Views per step to score LPIPS on (memory bound; LPIPS is differentiable "
+                             "so its VGG activations are retained for backward).")
     parser.add_argument("--train_loo_prob", type=float, default=1.0,
                         help="With --train_loo: probability of using the leave-one-out renderer on a "
                              "given step (1.0 = always). Training ONLY under LOO teaches the head to "
@@ -1498,6 +1528,8 @@ def main():
         sh_reg_weight=args.sh_reg_weight,
         dynamic_loss_downweight=args.dynamic_loss_downweight,
         train_loo=args.train_loo,
+        lpips_weight=args.lpips_weight,
+        lpips_views=args.lpips_views,
         train_loo_prob=args.train_loo_prob,
         dyn_mask_dir=args.dyn_mask_dir,
         per_frame_dynamic=args.per_frame_dynamic,
