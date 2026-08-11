@@ -117,6 +117,14 @@ TRAIN_LOO=${5:-0}
 # $7 TEMPORAL_W: the "temporal" loss diffs head outputs at the SAME PIXEL across adjacent
 #   frames. With a moving camera the same pixel is a DIFFERENT scene point, so it is a
 #   cross-view smoothness prior, not temporal consistency. Use 0 for a clean experiment.
+# $8 LOO_PROB: with $5=1, fraction of steps using the LEAVE-ONE-OUT renderer.
+#   1.0 = always LOO -> the head only ever sees "own-frame Gaussians absent" and
+#   compensates with brighter/more opaque Gaussians (measured: f_dc mean +0.810 vs
+#   +0.091 frozen, opacity 2x). Correct under LOO, but OVER-BRIGHT under normal full
+#   compositing -> washed-out PLY, and f_dc is unbounded so it also feeds the divergence.
+#   0.5 randomises the regime per step so the SAME Gaussians must be valid with AND
+#   without their own frame. No extra memory (one regime per step).
+LOO_PROB=${8:-1.0}
 SCALE_REG=${6:-0.01}
 TEMPORAL_W=${7:-0.25}
 TRAIN_LOO_FLAG=""
@@ -133,7 +141,8 @@ fi
 [ "${TRAIN_LOO}" = "1" ] && TAG="${TAG}_loo"
 # non-default auxiliary weights change the objective -> own output dir
 [ "${SCALE_REG}" != "0.01" ] && TAG="${TAG}_sr$(echo ${SCALE_REG} | tr '.' 'p')"
-[ "${TEMPORAL_W}" != "0.25" ] && TAG="${TAG}_tw$(echo ${TEMPORAL_W} | tr '.' 'p')"   # own output dir: different objective, don't resume a self-reprojection ckpt
+[ "${TEMPORAL_W}" != "0.25" ] && TAG="${TAG}_tw$(echo ${TEMPORAL_W} | tr '.' 'p')"
+[ "${LOO_PROB}" != "1.0" ] && TAG="${TAG}_lp$(echo ${LOO_PROB} | tr '.' 'p')"   # own output dir: different objective, don't resume a self-reprojection ckpt
 OUTPUT_DIR_NAME=output_train_testbed_${TAG}_20260706
 RUN_NAME=train_testbed_${TAG}_20260706_${SLURM_JOB_ID}
 
@@ -284,7 +293,7 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp ${CONTAINER} bash -
     --vggt4d_weights_path /mnt/home/hanmydo/DynamicReconstructionSplat/ckpts/vggt4d_model_tracker_fixed_e20.pt \
     --wandb_project dynrecsplat \
     --wandb_run_name ${RUN_NAME} \
-    ${DYN_MASK_FLAG} ${TRAIN_LOO_FLAG} \
+    ${DYN_MASK_FLAG} ${TRAIN_LOO_FLAG} --train_loo_prob ${LOO_PROB} \
     \${RESUME_FLAG}
 " &
 TRAIN_PID=$!

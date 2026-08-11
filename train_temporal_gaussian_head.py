@@ -268,6 +268,15 @@ class TrainingConfig:
     scale_reg_weight: float = 0.01
     sh_reg_weight: float = 0.01     # L1 penalty on SH DC magnitude — keeps f_dc bounded when fine-tuning the GS head on OOD color distributions
     dynamic_loss_downweight: float = 0.9  # Fraction to reduce dynamic-pixel MSE weight (0=uniform, 1=fully masked)
+    # Fraction of iterations trained with the LEAVE-ONE-OUT renderer when train_loo is on.
+    # 1.0 = always LOO (the head then only ever sees the "own-frame Gaussians absent"
+    # regime, and compensates with brighter/more opaque Gaussians -- measured: f_dc mean
+    # +0.810 vs +0.091 frozen, opacity 2x -- which is correct for LOO but over-bright
+    # under NORMAL full compositing, e.g. in a viewer). <1.0 randomises the regime per
+    # iteration so the SAME Gaussians must be valid both with and without their own
+    # frame, removing that conditioning ambiguity. Costs no extra memory: each step still
+    # renders exactly one regime. 0.5 = balanced.
+    train_loo_prob: float = 1.0
     # Leave-one-out training objective: render each view from the OTHER views only.
     # Off = the legacy self-reprojection objective (nearly free, cancels pose error,
     # does not require multi-view consistency) — the likely reason fine-tuning never
@@ -980,6 +989,12 @@ def train_epoch(
             # free and requires no multi-view consistency — i.e. the objective does not
             # ask for what evaluation measures. LOO aligns training with the held-out
             # protocol. Needs gaussian_frame_idx (requires voxelize=False).
+            # Randomise the compositing regime for THIS step (see train_loo_prob).
+            # One regime per step -> identical memory; the mix happens in expectation.
+            use_loo = config.train_loo and (
+                config.train_loo_prob >= 1.0
+                or torch.rand(()).item() < config.train_loo_prob)
+
             mse_loss, _ = compute_rendering_loss(
                 model, images, gaussians, render_extrinsics, render_intrinsics,
                 dyn_mask=infos.get('dyn_mask', None),
@@ -989,7 +1004,7 @@ def train_epoch(
                 gaussian_dyn_flag=(infos.get('gaussian_dyn_flag')
                                    if config.per_frame_dynamic else None),
                 per_frame_compositing=config.per_frame_dynamic,
-                leave_one_out=config.train_loo,
+                leave_one_out=use_loo,
             )
 
             temporal_loss = compute_temporal_loss(infos)
@@ -1157,6 +1172,8 @@ def validate(
                     render_intrinsics[:, :, 2],
                 ], dim=2)
 
+            # Validation stays ALWAYS leave-one-out (not randomised) so val PSNR remains
+            # directly comparable to the held-out eval protocol across runs.
             # Validation must use the SAME compositing AND the same held-out protocol
             # as training, or val PSNR measures a different renderer/task than the one
             # being optimised (train_loo -> val must also be leave-one-out).
@@ -1167,7 +1184,7 @@ def validate(
                 gaussian_dyn_flag=(infos.get('gaussian_dyn_flag')
                                    if config.per_frame_dynamic else None),
                 per_frame_compositing=config.per_frame_dynamic,
-                leave_one_out=config.train_loo,
+                leave_one_out=config.train_loo,  # validation: ALWAYS LOO (comparable to the eval protocol)
             )
 
             # Match eval_gaussian_head.py: clamp to [0,1] then accumulate PSNR/SSIM/MSE
@@ -1411,6 +1428,13 @@ def main():
                              "were unprojected from (static ones still render into every frame). Removes the "
                              "multi-frame ghosting of moving objects, which is why fine-tuning currently DEGRADES "
                              "dynamic PSNR. Requires VGGT4D dynamic detection; off by default (baselines reproduce).")
+    parser.add_argument("--train_loo_prob", type=float, default=1.0,
+                        help="With --train_loo: probability of using the leave-one-out renderer on a "
+                             "given step (1.0 = always). Training ONLY under LOO teaches the head to "
+                             "compensate for the missing own-frame Gaussians with brighter/more opaque "
+                             "output, which is correct under LOO but over-bright under normal full "
+                             "compositing (visible as a washed-out PLY). 0.5 randomises the regime so "
+                             "the same Gaussians must be valid in both. No extra memory: one regime per step.")
     parser.add_argument("--train_loo", action="store_true",
                         help="LEAVE-ONE-OUT training objective: render each view WITHOUT its own "
                              "Gaussians, so it must be reconstructed from the OTHER views. Without "
@@ -1474,6 +1498,7 @@ def main():
         sh_reg_weight=args.sh_reg_weight,
         dynamic_loss_downweight=args.dynamic_loss_downweight,
         train_loo=args.train_loo,
+        train_loo_prob=args.train_loo_prob,
         dyn_mask_dir=args.dyn_mask_dir,
         per_frame_dynamic=args.per_frame_dynamic,
         static_first_curriculum=args.static_first,

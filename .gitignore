@@ -213,3 +213,5 @@ old_*/
 # they don't match output_*/ above — match any dir containing "_output_".
 *_output_*/
 2604*/
+ckpts/
+RESULT_*/
