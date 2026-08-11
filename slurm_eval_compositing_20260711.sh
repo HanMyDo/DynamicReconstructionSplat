@@ -49,6 +49,13 @@
 
 CKPT_ARG=${1:-baseline}
 EXTRA_FLAGS=${2:-}
+# $4 NUM_FRAMES: views per window. 12 = the protocol EVERY stored baseline used -> keep 12
+# for anything you want to compare against them. Use a different value ONLY to match a
+# checkpoint's TRAINING window (e.g. 6): under leave-one-out each pixel is rebuilt from
+# V-1 sources, so a head trained with 5 contributors but evaluated with 11 over-
+# accumulates opacity/brightness. Non-12 values get their own output dir.
+# Must be set BEFORE FLAG_TAG is built below.
+NUM_FRAMES=${4:-12}
 
 if [ "${CKPT_ARG}" = "baseline" ]; then
   CKPT_FLAG=""
@@ -83,6 +90,7 @@ case "${EXTRA_FLAGS}" in *track_dynamic*)
   FLAG_TAG="${FLAG_TAG}_trk${GRP:-1}" ;;
 esac
 case "${EXTRA_FLAGS}" in *dyn_mask_dir*) FLAG_TAG="${FLAG_TAG}_pcm" ;; esac
+[ "${NUM_FRAMES}" != "12" ] && FLAG_TAG="${FLAG_TAG}_nf${NUM_FRAMES}"
 [ -z "${FLAG_TAG}" ] && FLAG_TAG="_plain"
 
 # $3 = eval sequence. VALID EVAL SET (2026-08-05 split, family-disjoint from training,
@@ -146,7 +154,7 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp ${CONTAINER} bash -
     --data_dir ${BONN_DATA}/rgbd_bonn_dataset \
     --dataset_name ${EVAL_SEQ} \
     --intrinsics bonn \
-    --num_frames 12 \
+    --num_frames ${NUM_FRAMES} \
     --split all \
     --image_batch_start 400 \
     --vggt4d_weights_path ${VGGT4D_CKPT} \
