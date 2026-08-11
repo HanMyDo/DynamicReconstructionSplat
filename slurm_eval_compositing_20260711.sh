@@ -89,6 +89,7 @@ case "${EXTRA_FLAGS}" in *track_dynamic*)
   GRP=$(echo "${EXTRA_FLAGS}" | sed -n 's/.*--dyn_motion_groups[= ]*\([0-9][0-9]*\).*/\1/p')
   FLAG_TAG="${FLAG_TAG}_trk${GRP:-1}" ;;
 esac
+case "${EXTRA_FLAGS}" in *gain_correct*) FLAG_TAG="${FLAG_TAG}_gc" ;; esac
 case "${EXTRA_FLAGS}" in *dyn_mask_dir*) FLAG_TAG="${FLAG_TAG}_pcm" ;; esac
 [ "${NUM_FRAMES}" != "12" ] && FLAG_TAG="${FLAG_TAG}_nf${NUM_FRAMES}"
 [ -z "${FLAG_TAG}" ] && FLAG_TAG="_plain"

@@ -102,10 +102,51 @@ def save_dynamic_mask_overlay(image, dyn_mask, path):
     Image.fromarray((overlay * 255).astype(np.uint8)).save(path)
 
 
+def optimal_gain(pred, gt):
+    """Least-squares scalar g minimising ||g*pred - gt||^2, i.e. a pure EXPOSURE fix.
+
+    Control for the following confound: the frozen head was trained by AnySplat under
+    FULL compositing, where each pixel's own-frame Gaussian supplies most of the energy.
+    Under leave-one-out that contribution is gone, so the frozen model systematically
+    UNDER-renders. Fine-tuning can then win a large PSNR delta by simply turning the gain
+    up -- with no structural improvement at all. Applying the optimal gain to the FROZEN
+    model measures how much of the reported gain is merely this brightness mismatch.
+    """
+    num = (pred * gt).sum()
+    den = (pred * pred).sum().clamp_min(1e-8)
+    return (num / den).clamp(0.1, 10.0)
+
+
+def umeyama_ate(pred_xyz, gt_xyz):
+    """Sim(3)-aligned ATE (RMSE, metres) between two camera-centre trajectories.
+
+    Bonn's GT poses live in a different world frame (and scale) than the predicted ones,
+    so a similarity alignment is required before any comparison is meaningful -- this is
+    the standard trajectory-evaluation procedure. Returns None if degenerate.
+    """
+    X = np.asarray(pred_xyz, dtype=np.float64).T          # 3 x N
+    Y = np.asarray(gt_xyz, dtype=np.float64).T
+    if X.shape[1] < 3:
+        return None
+    mx, my = X.mean(1, keepdims=True), Y.mean(1, keepdims=True)
+    Xc, Yc = X - mx, Y - my
+    var = (Xc ** 2).sum()
+    if var < 1e-12:
+        return None
+    U, D, Vt = np.linalg.svd(Yc @ Xc.T / X.shape[1])
+    S = np.eye(3)
+    if np.linalg.det(U @ Vt) < 0:
+        S[2, 2] = -1.0
+    R = U @ S @ Vt
+    scale = np.trace(np.diag(D) @ S) / (var / X.shape[1])
+    err = Y - (scale * R @ X + (my - scale * R @ mx))
+    return float(np.sqrt((err ** 2).sum(0).mean()))
+
+
 @torch.no_grad()
 def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50, image_batch_start=0,
              per_frame_dynamic=False, leave_one_out=False, precomputed_mask_dir=None,
-             track_dynamic=False):
+             track_dynamic=False, gain_correct=False):
     os.makedirs(output_dir, exist_ok=True)
     images_dir = os.path.join(output_dir, "images")
     dyn_mask_dir = os.path.join(output_dir, "dyn_mask")
@@ -115,6 +156,8 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
               f"(overrides live detection for the dyn/static split)")
     n_precomp_hits = 0
     n_group_motion = 0   # batches where the tracker-driven motion model was available
+    total_gain = 0.0; n_gain = 0            # mean applied exposure gain (diagnostic)
+    total_ate = 0.0;  n_ate = 0             # per-window Sim(3)-aligned ATE
 
     total_psnr, total_ssim = 0.0, 0.0
     total_psnr_dyn = 0.0
@@ -199,6 +242,22 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
             n_group_motion += 1
         pred_rgb = decoder_out.color  # [B, V, 3, H, W] in [0, 1]
 
+        # --- per-window camera-trajectory error (Sim3-aligned ATE) -------------
+        # VGGT4D's actual published contribution is pose robustness under dynamics, which
+        # rendering PSNR barely reflects. This measures it directly.
+        if "gt_extrinsics" in batch:
+            try:
+                gt_w2c = batch["gt_extrinsics"].to(device).float()
+                if gt_w2c.dim() == 3:
+                    gt_w2c = gt_w2c.unsqueeze(0)
+                gt_c2w = torch.linalg.inv(gt_w2c[0])              # [V,4,4]
+                a = umeyama_ate(ext[0][:, :3, 3].cpu().numpy(),
+                                gt_c2w[:, :3, 3].cpu().numpy())
+                if a is not None:
+                    total_ate += a; n_ate += 1
+            except Exception:
+                pass
+
         # dyn/static metrics split: prefer the precomputed mask (the same one that drove
         # the compositing gate above), at render resolution.
         dyn_mask = infos.get("dyn_mask", None)  # [B, V, H, W], or None
@@ -210,6 +269,14 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
         for v_idx in range(v):
             pred_frame = pred_rgb[0, v_idx].clamp(0, 1)   # [3, H, W]
             gt_frame = images[0, v_idx].clamp(0, 1)        # [3, H, W]
+
+            # EXPOSURE CONTROL: rescale the prediction by its optimal scalar before
+            # scoring. Structure is untouched, so any PSNR this recovers was a pure
+            # brightness mismatch -- not reconstruction quality.
+            if gain_correct:
+                g = optimal_gain(pred_frame, gt_frame)
+                pred_frame = (pred_frame * g).clamp(0, 1)
+                total_gain += float(g); n_gain += 1
 
             psnr_val = compute_psnr(pred_frame.unsqueeze(0), gt_frame.unsqueeze(0)).mean().item()
             ssim_val = compute_ssim(pred_frame.unsqueeze(0), gt_frame.unsqueeze(0)).mean().item()
@@ -324,6 +391,10 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
         "n_frames": n_frames,
         "n_dynamic_frames": n_dyn_frames,
         "n_static_frames": n_static_frames,
+        "gain_correct": gain_correct,
+        "mean_applied_gain": (total_gain / n_gain) if n_gain else None,
+        "ate_sim3_rmse_m": (total_ate / n_ate) if n_ate else None,
+        "n_windows_with_ate": n_ate,
         "track_dynamic": track_dynamic,
         "dyn_motion_groups": config.dyn_motion_groups,
         "n_batches_with_group_motion": n_group_motion,
@@ -395,6 +466,11 @@ def main():
                              "(tracker-driven piecewise-rigid motion). 1 = one rigid motion for all "
                              "dynamic content (the crude version that failed); 3-4 lets e.g. a person "
                              "and a box move differently. Needs VGGT4D (uses its point tracker).")
+    parser.add_argument("--gain_correct", action="store_true",
+                        help="CONTROL: rescale each rendered frame by its optimal least-squares "
+                             "scalar before computing metrics (pure exposure fix, no structural "
+                             "change). Run on the FROZEN baseline to see how much of a fine-tuned "
+                             "gain is merely brightness matching.")
     parser.add_argument("--track_dynamic", action="store_true",
                         help="Displace dynamic Gaussians by the object's estimated motion when "
                              "rendering another timestamp (first-order rigid model from per-frame "
@@ -467,7 +543,8 @@ def main():
              per_frame_dynamic=args.per_frame_dynamic,
              leave_one_out=args.eval_loo,
              precomputed_mask_dir=args.dyn_mask_dir,
-             track_dynamic=args.track_dynamic)
+             track_dynamic=args.track_dynamic,
+             gain_correct=args.gain_correct)
 
 
 if __name__ == "__main__":
