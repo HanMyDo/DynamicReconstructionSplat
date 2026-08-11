@@ -105,7 +105,12 @@ EVAL_SEQ=${3:-rgbd_bonn_synchronous2}
 SEQ_TAG=$(echo ${EVAL_SEQ} | sed 's/rgbd_bonn_//')
 REPO="/mnt/home/hanmydo/DynamicReconstructionSplat"
 VGGT4D_CKPT="${REPO}/ckpts/vggt4d_model_tracker_fixed_e20.pt"
-OUT_DIR="output_eval_${MODE_TAG}${FLAG_TAG}_${SEQ_TAG}_20260711"
+# Date suffix = TODAY by default, so a rerun on a different day can never overwrite an
+# earlier result. (The flag tag encodes flags but NOT which checkpoint was used, so
+# without this an `ft` rerun silently clobbers a previous `ft` number — it already
+# happened once.) Override with EVAL_DATE=20260711 to reproduce an old path exactly.
+DATE_TAG=${EVAL_DATE:-$(date +%Y%m%d)}
+OUT_DIR="output_eval_${MODE_TAG}${FLAG_TAG}_${SEQ_TAG}_${DATE_TAG}"
 
 export ENROOT_RUNTIME_PATH=/tmp/$USER/runtime
 export ENROOT_CACHE_PATH=/tmp/$USER/cache
