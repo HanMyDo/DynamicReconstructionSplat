@@ -1049,6 +1049,18 @@ def train_epoch(
                 if vm.shape != alpha.shape:
                     vm = torch.ones_like(alpha)
                 opacity_loss = F.mse_loss(alpha, vm)
+                # One-time proof the term is LIVE (alpha real, differentiable, shapes sane).
+                # Every silent-inert bug we hit (compute_lpips under @no_grad, the empty
+                # $MASKS dir) was invisible because nothing printed. This prints.
+                if not getattr(train_epoch, "_opac_logged", False):
+                    train_epoch._opac_logged = True
+                    print(f"[opacity_cov] LIVE w={config.opacity_weight} | "
+                          f"alpha{tuple(alpha.shape)} mean={alpha.mean().item():.4f} "
+                          f"min={alpha.min().item():.4f} "
+                          f"frac<0.5={(alpha < 0.5).float().mean().item():.3f} | "
+                          f"target mean={vm.mean().item():.4f} | "
+                          f"requires_grad={alpha.requires_grad} | "
+                          f"loss={opacity_loss.item():.5f}", flush=True)
 
             # Perceptual term on a random subset of views (see lpips_views).
             lpips_loss = torch.zeros((), device=images.device)
@@ -1130,6 +1142,14 @@ def train_epoch(
                 'train/temporal': temporal_loss.item(),
                 'train/scale_reg': scale_reg.item(),
                 'train/sh_reg': sh_reg.item(),
+                'train/opacity_cov': float(opacity_loss),
+                # THE health metric for this run: alpha_mean is the quantity that
+                # collapsed (only 19.7% of Gaussians renderable vs 68.9% frozen).
+                # It must rise/hold, not fall.
+                'train/alpha_mean': (float(render_out.alpha.mean())
+                                     if render_out is not None
+                                     and getattr(render_out, 'alpha', None) is not None
+                                     else 0.0),
                 'train/f_dc_absmax': f_dc_absmax,
                 'train/scale_max': scale_max,
                 'train/lr': last_lrs[0],
