@@ -280,6 +280,15 @@ class TrainingConfig:
     # lpips weight 0.05; our hand-rolled loop used MSE ONLY, which is why the fine-tuned
     # head improves PSNR while LPIPS gets WORSE (0.311 -> 0.324) — the classic L2-vs-
     # perceptual trade. Restoring the upstream term targets exactly that regression.
+    # COVERAGE supervision, taken from AnySplat's own loss suite (src/loss/loss_opacity.py,
+    # upstream weight 0.1): MSE(rendered_alpha, valid_mask). It penalises alpha BELOW the
+    # valid mask, i.e. it punishes holes/transparency. This is the direct counter to the
+    # scale collapse we measured three separate times (scale_reg, my alpha-weighted loss,
+    # and LPIPS all shrank splats because with V redundant Gaussians per surface shrinking
+    # is free): collapsed scales lower rendered alpha, and this term charges for that.
+    # NOTE it deliberately does NOT exclude uncovered pixels -- excluding them is exactly
+    # what let an earlier version abandon hard pixels and shrink.
+    opacity_weight: float = 0.0
     lpips_weight: float = 0.0
     # LPIPS is differentiable, so its VGG activations are retained for backward. Scoring
     # all V views would blow the 24GB budget the rasterizer already strains, so score a
@@ -1030,6 +1039,17 @@ def train_epoch(
             # (max/mean ratio ~9× observed in v3).
             sh_reg = gaussians.harmonics[:, :, :, 0].pow(2).mean()
 
+            # Coverage term: push rendered alpha up to the valid mask (see opacity_weight).
+            opacity_loss = torch.zeros((), device=images.device)
+            if config.opacity_weight > 0.0 and render_out is not None \
+                    and getattr(render_out, "alpha", None) is not None:
+                alpha = render_out.alpha
+                vm = encoder_output.depth_dict.get("conf_valid_mask")
+                vm = torch.ones_like(alpha) if vm is None else vm.float().to(alpha.device)
+                if vm.shape != alpha.shape:
+                    vm = torch.ones_like(alpha)
+                opacity_loss = F.mse_loss(alpha, vm)
+
             # Perceptual term on a random subset of views (see lpips_views).
             lpips_loss = torch.zeros((), device=images.device)
             if config.lpips_weight > 0.0 and render_out is not None:
@@ -1047,6 +1067,7 @@ def train_epoch(
             loss = (
                 config.mse_weight * mse_loss +
                 config.lpips_weight * lpips_loss +
+                config.opacity_weight * opacity_loss +
                 config.temporal_consistency_weight * temporal_loss +
                 config.scale_reg_weight * scale_reg +
                 config.sh_reg_weight * sh_reg
@@ -1451,6 +1472,10 @@ def main():
                              "were unprojected from (static ones still render into every frame). Removes the "
                              "multi-frame ghosting of moving objects, which is why fine-tuning currently DEGRADES "
                              "dynamic PSNR. Requires VGGT4D dynamic detection; off by default (baselines reproduce).")
+    parser.add_argument("--opacity_weight", type=float, default=0.0,
+                        help="Coverage loss MSE(rendered_alpha, valid_mask) from AnySplat's own suite "
+                             "(upstream 0.1). Penalises holes/transparency, so it is the direct counter "
+                             "to scale collapse (small splats -> low alpha -> charged for).")
     parser.add_argument("--lpips_weight", type=float, default=0.0,
                         help="Perceptual (LPIPS) loss weight. AnySplat trains with 0.05; our loop used "
                              "MSE only, which is why PSNR improves while LPIPS regresses. Set 0.05 to "
@@ -1528,6 +1553,7 @@ def main():
         sh_reg_weight=args.sh_reg_weight,
         dynamic_loss_downweight=args.dynamic_loss_downweight,
         train_loo=args.train_loo,
+        opacity_weight=args.opacity_weight,
         lpips_weight=args.lpips_weight,
         lpips_views=args.lpips_views,
         train_loo_prob=args.train_loo_prob,

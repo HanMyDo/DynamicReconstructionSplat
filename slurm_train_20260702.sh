@@ -133,6 +133,13 @@ LOO_PROB=${8:-1.0}
 #   is why PSNR improves while LPIPS regresses (0.311 -> 0.324). 0.05 restores upstream.
 SH_REG=${9:-0.01}
 LPIPS_W=${10:-0.0}
+# $11 OPAC_W: AnySplat's OWN coverage loss MSE(alpha, valid_mask), upstream weight 0.1.
+#   Penalises alpha BELOW the valid mask => charges for holes/transparency. This is the
+#   direct counter to the scale collapse measured 3x (scale_reg, alpha-weighted loss,
+#   LPIPS all shrank splats: with V redundant Gaussians per surface, shrinking is free).
+#   Measured symptom it targets: only 19.7% of Gaussians large/opaque enough to render
+#   (vs 68.9% frozen) => transparent, missing background in the exported PLY.
+OPAC_W=${11:-0.0}
 SCALE_REG=${6:-0.01}
 TEMPORAL_W=${7:-0.25}
 TRAIN_LOO_FLAG=""
@@ -152,7 +159,8 @@ fi
 [ "${TEMPORAL_W}" != "0.25" ] && TAG="${TAG}_tw$(echo ${TEMPORAL_W} | tr '.' 'p')"
 [ "${LOO_PROB}" != "1.0" ] && TAG="${TAG}_lp$(echo ${LOO_PROB} | tr '.' 'p')"
 [ "${SH_REG}" != "0.01" ] && TAG="${TAG}_shr$(echo ${SH_REG} | tr '.' 'p')"
-[ "${LPIPS_W}" != "0.0" ] && TAG="${TAG}_lpips$(echo ${LPIPS_W} | tr '.' 'p')"   # own output dir: different objective, don't resume a self-reprojection ckpt
+[ "${LPIPS_W}" != "0.0" ] && TAG="${TAG}_lpips$(echo ${LPIPS_W} | tr '.' 'p')"
+[ "${OPAC_W}" != "0.0" ] && TAG="${TAG}_opac$(echo ${OPAC_W} | tr '.' 'p')"   # own output dir: different objective, don't resume a self-reprojection ckpt
 OUTPUT_DIR_NAME=output_train_testbed_${TAG}_20260706
 RUN_NAME=train_testbed_${TAG}_20260706_${SLURM_JOB_ID}
 
@@ -298,6 +306,7 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp ${CONTAINER} bash -
     --scale_reg_weight ${SCALE_REG} \
     --sh_reg_weight ${SH_REG} \
     --lpips_weight ${LPIPS_W} \
+    --opacity_weight ${OPAC_W} \
     --dynamic_loss_downweight ${STATIC_DW} \
     --no_gt_poses \
     --intrinsics bonn \
