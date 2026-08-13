@@ -293,6 +293,7 @@ class TrainingConfig:
     # Removes the V-copies-per-surface redundancy that made shrinking free.
     hybrid_voxelize: bool = False
     voxel_size: float = 0.001
+    scale_mult: float = 1.0
     opacity_weight: float = 0.0
     lpips_weight: float = 0.0
     # LPIPS is differentiable, so its VGG activations are retained for backward. Scoring
@@ -983,6 +984,25 @@ def train_epoch(
             encoder_output = model.encoder(images, global_step=global_step,
                                            dyn_mask_override=precomp_mask)
             gaussians = encoder_output.gaussians
+            # SCALE INIT for hybrid fusion. The head's pretrained scales are sized for
+            # ~0.001 point spacing; under fusion at voxel_size 0.005 the spacing is ~5x
+            # larger, so unmodified splats cover a small fraction of each surface and
+            # training would start at ~10 dB and spend epochs merely growing them.
+            # Measured on the frozen head: a 5x enlargement recovers static 10.20 ->
+            # 18.19 dB, which is what identified the collapse as COVERAGE rather than
+            # geometry. This constant multiplier just starts the optimiser in that
+            # basin; the head still learns per-Gaussian scales from there (which the
+            # global multiplier cannot do -- it wrongly inflates the per-pixel dynamic
+            # Gaussians too, dyn 20.64 -> 13.91).
+            if config.scale_mult != 1.0:
+                gaussians.scales = gaussians.scales * config.scale_mult
+                if getattr(gaussians, "covariances", None) is not None:
+                    # covariance is quadratic in linear size; gsplat renders covars
+                    gaussians.covariances = gaussians.covariances * (config.scale_mult ** 2)
+                if global_step == 0:
+                    print(f"[scale_mult] train init x{config.scale_mult} -> "
+                          f"scale_mean={float(gaussians.scales.mean()):.6f} "
+                          f"covar_mean={float(gaussians.covariances.mean()):.9f}", flush=True)
             pred_context_pose = encoder_output.pred_context_pose
             infos = encoder_output.infos
 
@@ -1503,6 +1523,12 @@ def main():
                              "were unprojected from (static ones still render into every frame). Removes the "
                              "multi-frame ghosting of moving objects, which is why fine-tuning currently DEGRADES "
                              "dynamic PSNR. Requires VGGT4D dynamic detection; off by default (baselines reproduce).")
+    parser.add_argument("--scale_mult", type=float, default=1.0,
+                        help="Multiply Gaussian scales (and covariances) at construction. Use ~5 "
+                             "with --voxel_size 0.005: fused spacing is ~5x the pretrained scale, "
+                             "and 5x measurably recovers static 10.20 -> 18.19 dB on the frozen "
+                             "head. Starts training in the right basin instead of growing scales "
+                             "for several epochs.")
     parser.add_argument("--voxel_size", type=float, default=0.001,
                         help="Fusion voxel edge length (see --hybrid_voxelize). Default 0.001 "
                              "equals the point spacing, so it merges nothing; sweep upward.")
@@ -1594,6 +1620,7 @@ def main():
         train_loo=args.train_loo,
         hybrid_voxelize=args.hybrid_voxelize,
         voxel_size=args.voxel_size,
+        scale_mult=args.scale_mult,
         opacity_weight=args.opacity_weight,
         lpips_weight=args.lpips_weight,
         lpips_views=args.lpips_views,

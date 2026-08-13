@@ -140,6 +140,21 @@ LPIPS_W=${10:-0.0}
 #   Measured symptom it targets: only 19.7% of Gaussians large/opaque enough to render
 #   (vs 68.9% frozen) => transparent, missing background in the exported PLY.
 OPAC_W=${11:-0.0}
+# $12 HYBRID_VOX: 1 -> fuse STATIC pixels into shared voxels (one set per target view,
+#   that view excluded so leave-one-out stays exact); dynamic pixels stay per-pixel with
+#   their frame index. Removes the V-copies-per-surface redundancy that made shrinking
+#   free (3 measured scale collapses; only 19.7% of Gaussians renderable vs 68.9% frozen).
+# $13 VOXEL_SIZE: 0.005 measured fusion ratio 0.107 (800k gaussians vs 1.2M per-pixel).
+#   The default 0.001 equals the point spacing and merges NOTHING (ratio 0.9, 4.86M).
+# $14 SCALE_MULT: ~5 with voxel 0.005. Fused spacing is ~5x the pretrained scale, so
+#   unmodified splats undercover: frozen static 10.20 dB, and 5x recovers it to 18.19.
+#   That recovery is what proved the collapse is COVERAGE (trainable) not GEOMETRY.
+HYBRID_VOX=${12:-0}
+VOXEL_SIZE=${13:-0.001}
+SCALE_MULT=${14:-1.0}
+HYB_FLAG=""
+[ "${HYBRID_VOX}" = "1" ] && HYB_FLAG="--hybrid_voxelize"
+
 SCALE_REG=${6:-0.01}
 TEMPORAL_W=${7:-0.25}
 TRAIN_LOO_FLAG=""
@@ -160,7 +175,9 @@ fi
 [ "${LOO_PROB}" != "1.0" ] && TAG="${TAG}_lp$(echo ${LOO_PROB} | tr '.' 'p')"
 [ "${SH_REG}" != "0.01" ] && TAG="${TAG}_shr$(echo ${SH_REG} | tr '.' 'p')"
 [ "${LPIPS_W}" != "0.0" ] && TAG="${TAG}_lpips$(echo ${LPIPS_W} | tr '.' 'p')"
-[ "${OPAC_W}" != "0.0" ] && TAG="${TAG}_opac$(echo ${OPAC_W} | tr '.' 'p')"   # own output dir: different objective, don't resume a self-reprojection ckpt
+[ "${OPAC_W}" != "0.0" ] && TAG="${TAG}_opac$(echo ${OPAC_W} | tr '.' 'p')"
+[ "${HYBRID_VOX}" = "1" ] && TAG="${TAG}_hyb$(echo ${VOXEL_SIZE} | tr '.' 'p')"
+[ "${SCALE_MULT}" != "1.0" ] && TAG="${TAG}_sm$(echo ${SCALE_MULT} | tr '.' 'p')"   # own output dir: different objective, don't resume a self-reprojection ckpt
 OUTPUT_DIR_NAME=output_train_testbed_${TAG}_20260706
 RUN_NAME=train_testbed_${TAG}_20260706_${SLURM_JOB_ID}
 
@@ -307,6 +324,9 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp ${CONTAINER} bash -
     --sh_reg_weight ${SH_REG} \
     --lpips_weight ${LPIPS_W} \
     --opacity_weight ${OPAC_W} \
+    ${HYB_FLAG} \
+    --voxel_size ${VOXEL_SIZE} \
+    --scale_mult ${SCALE_MULT} \
     --dynamic_loss_downweight ${STATIC_DW} \
     --no_gt_poses \
     --intrinsics bonn \
