@@ -12,7 +12,14 @@ inflates for a trivial reason. Static is where our entire measured gain sits
 Test 3 corrupts the excluded frame beyond recognition and demands the output be
 bit-identical -- that is the only way to prove no information path exists.
 """
+import sys
 import types
+from pathlib import Path
+
+# Repo root on sys.path: `python tests/test_hybrid_fusion.py` puts tests/ there,
+# not the root, so `import src...` fails. Do this BEFORE importing src.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 import torch
 
 from src.model.encoder.anysplat import EncoderAnySplat

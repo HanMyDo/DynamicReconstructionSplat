@@ -45,6 +45,7 @@ enroot create --name ${CONTAINER} ~/anysplat.sqsh
 enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp ${CONTAINER} bash -c "
   cd ${REPO}
   export CUDA_VISIBLE_DEVICES=0
+  export PYTHONPATH=${REPO}:\$PYTHONPATH
   python tests/test_hybrid_fusion.py
 "
 STATUS=$?
