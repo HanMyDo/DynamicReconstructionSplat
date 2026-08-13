@@ -126,6 +126,13 @@ class EncoderAnySplatCfg:
     conf_threshold: float = 0.1
     intermediate_layer_idx: Optional[List[int]] = None
     voxelize: bool = False
+    # HYBRID: fuse STATIC pixels into shared voxels (one Gaussian per voxel, per
+    # target view, with that view excluded from the fusion so LOO stays exact) and
+    # keep DYNAMIC pixels per-pixel with their frame index. Removes the V-copies-
+    # per-surface redundancy that makes shrinking free -- the cause of the three
+    # measured scale collapses and the transparent PLY -- while preserving the
+    # per-frame identity every dynamic mechanism needs. Requires dynamic masks.
+    hybrid_voxelize: bool = False
     use_vggt4d: bool = False
     vggt4d_weights_path: Optional[str] = None
     # Dynamic mask extraction options
@@ -917,7 +924,52 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
         # Gaussian -> (frame, pixel) correspondence this relies on.
         frame_idx_list, dyn_flag_list, group_idx_list = [], [], []
         track_frame_idx = not self.cfg.voxelize
-        if self.cfg.voxelize:
+        only_view_list = []
+        use_hybrid = (self.cfg.hybrid_voxelize and not self.cfg.voxelize
+                      and dyn_mask is not None)
+        if use_hybrid:
+            # One FUSED STATIC set per target view (view j excluded from its own set,
+            # so leave-one-out remains exact -- see voxelize_static_hybrid), plus the
+            # DYNAMIC pixels kept per-pixel with their source frame index.
+            fidx_vhw = (
+                torch.arange(v, device=pts_all.device).view(v, 1, 1).expand(v, h, w)
+            )
+            dm_dev = dyn_mask.to(pts_all.device)
+            for b_i in range(b):
+                stat_m = conf_valid_mask[b_i] & (dm_dev[b_i] <= 0.5)
+                dyn_m = conf_valid_mask[b_i] & (dm_dev[b_i] > 0.5)
+                pts_b = pts_all[b_i].permute(0, 3, 1, 2).contiguous()
+                feats_b, pts_parts, fidx_parts, dyn_parts, ov_parts = [], [], [], [], []
+                for j in range(v):
+                    vp, vf = self.voxelize_static_hybrid(
+                        anchor_feats[b_i], pts_b, self.voxel_size, conf[b_i],
+                        stat_m, exclude_frame=j,
+                    )
+                    pts_parts.append(vp)
+                    feats_b.append(vf)
+                    # fused voxels have no single source frame -> -1 (never own-frame)
+                    fidx_parts.append(torch.full((vp.shape[0],), -1,
+                                                 device=vp.device, dtype=torch.long))
+                    dyn_parts.append(torch.zeros(vp.shape[0], device=vp.device))
+                    ov_parts.append(torch.full((vp.shape[0],), j,
+                                               device=vp.device, dtype=torch.long))
+                # dynamic: per-pixel, keeps frame identity, normal LOO/compositing rules
+                pts_parts.append(pts_all[b_i][dyn_m])
+                feats_b.append(anchor_feats[b_i].permute(0, 2, 3, 1)[dyn_m])
+                fidx_parts.append(fidx_vhw[dyn_m])
+                dyn_parts.append(torch.ones(int(dyn_m.sum()), device=pts_all.device))
+                ov_parts.append(torch.full((int(dyn_m.sum()),), -1,
+                                           device=pts_all.device, dtype=torch.long))
+
+                neural_pts_list.append(torch.cat(pts_parts, 0))
+                neural_feats_list.append(torch.cat(feats_b, 0))
+                frame_idx_list.append(torch.cat(fidx_parts, 0))
+                dyn_flag_list.append(torch.cat(dyn_parts, 0))
+                only_view_list.append(torch.cat(ov_parts, 0))
+            print(f"[hybrid] {v} fused static sets + dynamic per-pixel -> "
+                  f"{neural_pts_list[0].shape[0]} gaussians "
+                  f"(per-pixel would be {v*h*w})", flush=True)
+        elif self.cfg.voxelize:
             for b_i in range(b):
                 neural_pts, neural_feats = self.voxelizaton_with_fusion(
                     anchor_feats[b_i],
@@ -927,7 +979,7 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
                 )
                 neural_feats_list.append(neural_feats)
                 neural_pts_list.append(neural_pts)
-        else:
+        elif not use_hybrid:
             # (v, h, w) row-major frame index. Selected with the SAME conf mask, in the
             # SAME order as the Gaussians below, so entry i here IS Gaussian i.
             fidx_vhw = (
@@ -966,6 +1018,11 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
         gaussian_group_idx = (
             self.pad_tensor_list(group_idx_list, (max_voxels,), -1)
             if (track_frame_idx and group_idx_list)
+            else None
+        )
+        gaussian_only_view = (
+            self.pad_tensor_list(only_view_list, (max_voxels,), -1)
+            if only_view_list
             else None
         )
         gaussian_dyn_flag = (
@@ -1027,6 +1084,10 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
                 gaussian_frame_idx = (
                     gaussian_frame_idx[gaussian_usage].view(b, -1).contiguous()
                 )
+            if gaussian_only_view is not None:
+                gaussian_only_view = (
+                    gaussian_only_view[gaussian_usage].view(b, -1).contiguous()
+                )
             if gaussian_dyn_flag is not None:
                 gaussian_dyn_flag = (
                     gaussian_dyn_flag[gaussian_usage].view(b, -1).contiguous()
@@ -1072,6 +1133,10 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
         # Gaussians ONLY into their own frame. Both are None when voxelize=True (the
         # Gaussian->frame mapping does not survive voxel fusion).
         infos["gaussian_frame_idx"] = gaussian_frame_idx
+        # HYBRID: which target view a PRE-FUSED static set belongs to (-1 = normal
+        # Gaussian). The decoder renders it only into that view and exempts it from
+        # the LOO drop, because view j was already excluded when the set was fused.
+        infos["gaussian_only_view"] = gaussian_only_view
         infos["gaussian_dyn_flag"] = gaussian_dyn_flag
         if self._dyn_group_motion is not None:
             gc, gp, gv = self._dyn_group_motion

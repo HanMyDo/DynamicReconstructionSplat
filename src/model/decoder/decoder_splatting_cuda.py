@@ -52,6 +52,7 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
         cam_trans_delta: Float[Tensor, "batch view 3"] | None = None,
         gaussian_frame_idx: Tensor | None = None,
         gaussian_dyn_flag: Tensor | None = None,
+        gaussian_only_view: Tensor | None = None,
         leave_one_out: bool = False,
         dyn_centroid: Tensor | None = None,
         dyn_centroid_pred: Tensor | None = None,
@@ -120,7 +121,30 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
                     #     actually MODELLING its motion — which this architecture
                     #     cannot do — so a large LOO gap is the expected, reportable
                     #     result, not a bug.
-                    if leave_one_out:
+                    # (2b) HYBRID pre-fused static sets. A fused voxel has no single
+                    #      source frame, so LOO cannot drop view j's contribution by
+                    #      frame index — the exclusion has to happen INSIDE the fusion
+                    #      instead (voxelize_static_hybrid(exclude_frame=j)). The
+                    #      encoder therefore emits one static set PER TARGET VIEW,
+                    #      labelled with only_view = j. Such a Gaussian:
+                    #        - renders ONLY into view j (its set was built for view j),
+                    #        - is EXEMPT from the LOO drop below, because view j was
+                    #          already excluded when the set was fused. Applying the
+                    #          drop again would delete the entire static background.
+                    #      only_view < 0 means "normal Gaussian", i.e. unchanged
+                    #      behaviour for every existing run.
+                    if gaussian_only_view is not None:
+                        ov_i = gaussian_only_view[i].to(opacity_i.device)
+                        is_pref = (ov_i >= 0)
+                        gate = gate * torch.where(
+                            is_pref, (ov_i == j).float(), torch.ones_like(opacity_i)
+                        )
+                        if leave_one_out:
+                            # drop own-frame Gaussians ONLY for non-prefused ones
+                            gate = gate * torch.where(
+                                is_pref, torch.ones_like(opacity_i), 1.0 - own_frame
+                            )
+                    elif leave_one_out:
                         gate = gate * (1.0 - own_frame)
 
                     opacity_ij = opacity_i * gate
@@ -210,6 +234,7 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
         cam_trans_delta: Float[Tensor, "batch view 3"] | None = None,
         gaussian_frame_idx: Tensor | None = None,
         gaussian_dyn_flag: Tensor | None = None,
+        gaussian_only_view: Tensor | None = None,
         leave_one_out: bool = False,
         dyn_centroid: Tensor | None = None,
         dyn_centroid_pred: Tensor | None = None,
@@ -222,7 +247,7 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
     ) -> DecoderOutput:
 
         return self.rendering_fn(gaussians, extrinsics, intrinsics, near, far, image_shape, depth_mode, cam_rot_delta, cam_trans_delta,
-                                 gaussian_frame_idx=gaussian_frame_idx, gaussian_dyn_flag=gaussian_dyn_flag, leave_one_out=leave_one_out,
+                                 gaussian_frame_idx=gaussian_frame_idx, gaussian_dyn_flag=gaussian_dyn_flag, gaussian_only_view=gaussian_only_view, leave_one_out=leave_one_out,
                                  dyn_centroid=dyn_centroid, dyn_centroid_pred=dyn_centroid_pred,
                                  dyn_centroid_valid=dyn_centroid_valid,
                                  dyn_group_centroid=dyn_group_centroid, dyn_group_pred=dyn_group_pred,

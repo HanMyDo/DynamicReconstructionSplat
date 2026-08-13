@@ -288,6 +288,10 @@ class TrainingConfig:
     # is free): collapsed scales lower rendered alpha, and this term charges for that.
     # NOTE it deliberately does NOT exclude uncovered pixels -- excluding them is exactly
     # what let an earlier version abandon hard pixels and shrink.
+    # HYBRID voxelization: fuse static pixels into shared voxels (one set per target
+    # view, that view excluded so LOO stays exact), keep dynamic pixels per-pixel.
+    # Removes the V-copies-per-surface redundancy that made shrinking free.
+    hybrid_voxelize: bool = False
     opacity_weight: float = 0.0
     lpips_weight: float = 0.0
     # LPIPS is differentiable, so its VGG activations are retained for backward. Scoring
@@ -547,6 +551,7 @@ def create_model(config: TrainingConfig) -> AnySplat:
         use_vggt4d=config.use_vggt4d,
         vggt4d_weights_path=config.vggt4d_weights_path,
         enable_dynamic_detection=config.enable_dynamic_detection,
+        hybrid_voxelize=config.hybrid_voxelize,
         dynamic_mask_threshold=None,
         dynamic_n_clusters=64,
         dyn_motion_groups=config.dyn_motion_groups,
@@ -651,6 +656,7 @@ def compute_rendering_loss(
     dynamic_loss_downweight: float = 0.0,
     gaussian_frame_idx: Optional[torch.Tensor] = None,
     gaussian_dyn_flag: Optional[torch.Tensor] = None,
+    gaussian_only_view=None,
     leave_one_out: bool = False,
     dyn_centroid: Optional[torch.Tensor] = None,
     dyn_centroid_pred: Optional[torch.Tensor] = None,
@@ -704,6 +710,7 @@ def compute_rendering_loss(
         "depth",
         gaussian_frame_idx=gaussian_frame_idx,
         gaussian_dyn_flag=gaussian_dyn_flag,
+        gaussian_only_view=gaussian_only_view,
         leave_one_out=leave_one_out,
         dyn_centroid=dyn_centroid,
         dyn_centroid_pred=dyn_centroid_pred,
@@ -1019,6 +1026,7 @@ def train_epoch(
                 dynamic_loss_downweight=dyn_downweight,
                 gaussian_frame_idx=(infos.get('gaussian_frame_idx')
                                     if (config.per_frame_dynamic or config.train_loo) else None),
+                gaussian_only_view=infos.get('gaussian_only_view'),
                 gaussian_dyn_flag=(infos.get('gaussian_dyn_flag')
                                    if config.per_frame_dynamic else None),
                 per_frame_compositing=config.per_frame_dynamic,
@@ -1245,6 +1253,7 @@ def validate(
                 model, images, gaussians, render_extrinsics, render_intrinsics,
                 gaussian_frame_idx=(infos.get('gaussian_frame_idx')
                                     if (config.per_frame_dynamic or config.train_loo) else None),
+                gaussian_only_view=infos.get('gaussian_only_view'),
                 gaussian_dyn_flag=(infos.get('gaussian_dyn_flag')
                                    if config.per_frame_dynamic else None),
                 per_frame_compositing=config.per_frame_dynamic,
@@ -1492,6 +1501,11 @@ def main():
                              "were unprojected from (static ones still render into every frame). Removes the "
                              "multi-frame ghosting of moving objects, which is why fine-tuning currently DEGRADES "
                              "dynamic PSNR. Requires VGGT4D dynamic detection; off by default (baselines reproduce).")
+    parser.add_argument("--hybrid_voxelize", action="store_true",
+                        help="Fuse STATIC pixels into shared voxels (one set per target view, "
+                             "that view excluded so leave-one-out stays exact) and keep DYNAMIC "
+                             "pixels per-pixel. Removes the redundancy that made scale collapse "
+                             "free. Requires dynamic masks (--dyn_mask_dir).")
     parser.add_argument("--opacity_weight", type=float, default=0.0,
                         help="Coverage loss MSE(rendered_alpha, valid_mask) from AnySplat's own suite "
                              "(upstream 0.1). Penalises holes/transparency, so it is the direct counter "
@@ -1573,6 +1587,7 @@ def main():
         sh_reg_weight=args.sh_reg_weight,
         dynamic_loss_downweight=args.dynamic_loss_downweight,
         train_loo=args.train_loo,
+        hybrid_voxelize=args.hybrid_voxelize,
         opacity_weight=args.opacity_weight,
         lpips_weight=args.lpips_weight,
         lpips_views=args.lpips_views,

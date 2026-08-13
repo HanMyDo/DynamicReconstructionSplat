@@ -217,6 +217,7 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
             model, images, gaussians, ext, intr,
             gaussian_frame_idx=(infos.get("gaussian_frame_idx")
                                 if (per_frame_dynamic or leave_one_out or track_dynamic) else None),
+            gaussian_only_view=infos.get("gaussian_only_view"),
             gaussian_dyn_flag=(infos.get("gaussian_dyn_flag")
                                if (per_frame_dynamic or track_dynamic) else None),
             leave_one_out=leave_one_out,
