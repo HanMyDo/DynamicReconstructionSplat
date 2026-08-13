@@ -455,6 +455,11 @@ def main():
                         help="Render dynamic Gaussians ONLY into the frame they were unprojected from "
                              "(static ones still render into every frame). Removes the multi-frame ghosting "
                              "of moving objects. Requires VGGT4D dynamic detection. Off = original behaviour.")
+    parser.add_argument("--voxel_size", type=float, default=0.001,
+                        help="Fusion voxel edge length. MUST exceed the inter-frame point "
+                             "spacing or nothing merges: the default 0.001 equals the frozen "
+                             "Gaussian scale p50 (0.00095), so every point got its own voxel "
+                             "and the measured fusion ratio was ~0.9 instead of ~1/V.")
     parser.add_argument("--hybrid_voxelize", action="store_true",
                         help="Fuse STATIC pixels into shared voxels (one set per target view, "
                              "that view excluded so leave-one-out stays exact); dynamic pixels "
@@ -505,6 +510,7 @@ def main():
         use_vggt4d=not args.no_vggt4d,
         enable_dynamic_detection=not args.no_vggt4d,
         hybrid_voxelize=args.hybrid_voxelize,
+        voxel_size=args.voxel_size,
         vggt4d_weights_path=args.vggt4d_weights_path,
         dyn_motion_groups=(args.dyn_motion_groups if args.track_dynamic else 0),
     )

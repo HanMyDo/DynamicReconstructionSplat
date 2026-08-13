@@ -292,6 +292,7 @@ class TrainingConfig:
     # view, that view excluded so LOO stays exact), keep dynamic pixels per-pixel.
     # Removes the V-copies-per-surface redundancy that made shrinking free.
     hybrid_voxelize: bool = False
+    voxel_size: float = 0.001
     opacity_weight: float = 0.0
     lpips_weight: float = 0.0
     # LPIPS is differentiable, so its VGG activations are retained for backward. Scoring
@@ -552,6 +553,7 @@ def create_model(config: TrainingConfig) -> AnySplat:
         vggt4d_weights_path=config.vggt4d_weights_path,
         enable_dynamic_detection=config.enable_dynamic_detection,
         hybrid_voxelize=config.hybrid_voxelize,
+        voxel_size=config.voxel_size,
         dynamic_mask_threshold=None,
         dynamic_n_clusters=64,
         dyn_motion_groups=config.dyn_motion_groups,
@@ -1501,6 +1503,9 @@ def main():
                              "were unprojected from (static ones still render into every frame). Removes the "
                              "multi-frame ghosting of moving objects, which is why fine-tuning currently DEGRADES "
                              "dynamic PSNR. Requires VGGT4D dynamic detection; off by default (baselines reproduce).")
+    parser.add_argument("--voxel_size", type=float, default=0.001,
+                        help="Fusion voxel edge length (see --hybrid_voxelize). Default 0.001 "
+                             "equals the point spacing, so it merges nothing; sweep upward.")
     parser.add_argument("--hybrid_voxelize", action="store_true",
                         help="Fuse STATIC pixels into shared voxels (one set per target view, "
                              "that view excluded so leave-one-out stays exact) and keep DYNAMIC "
@@ -1588,6 +1593,7 @@ def main():
         dynamic_loss_downweight=args.dynamic_loss_downweight,
         train_loo=args.train_loo,
         hybrid_voxelize=args.hybrid_voxelize,
+        voxel_size=args.voxel_size,
         opacity_weight=args.opacity_weight,
         lpips_weight=args.lpips_weight,
         lpips_views=args.lpips_views,

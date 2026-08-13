@@ -40,11 +40,18 @@
 # =============================================================================
 
 EVAL_SEQ=${1:-rgbd_bonn_removing_obstructing_box}
+# $2 VOXEL_SIZE: fusion voxel edge. The default 0.001 EQUALS the frozen Gaussian scale
+# p50 (0.00095) = the point spacing, so every point got its own voxel and the measured
+# fusion ratio was ~0.9 (4.86M gaussians vs 1.2M per-pixel: 4x the cost, zero benefit).
+# The v per-target-view sets cost v x the fused count, so the hybrid only breaks even
+# when fusion merges ~v:1, i.e. ratio ~1/v = 0.167 at v=6. Sweep upward: 0.002 0.005 0.01.
+VOXEL_SIZE=${2:-0.001}
 SEQ_TAG=$(echo ${EVAL_SEQ} | sed 's/rgbd_bonn_//')
 REPO="/mnt/home/hanmydo/DynamicReconstructionSplat"
 VGGT4D_CKPT="${REPO}/ckpts/vggt4d_model_tracker_fixed_e20.pt"
 MASKS="output_dyn_masks_precomputed_cs16_r518_st3_fs0"
-OUT_DIR="output_test_hybrid_e2e_${SEQ_TAG}_$(date +%Y%m%d)"
+VTAG=$(echo ${VOXEL_SIZE} | tr '.' 'p')
+OUT_DIR="output_test_hybrid_e2e_${SEQ_TAG}_vox${VTAG}_$(date +%Y%m%d)"
 
 export ENROOT_RUNTIME_PATH=/tmp/$USER/runtime
 export ENROOT_CACHE_PATH=/tmp/$USER/cache
@@ -82,6 +89,7 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp ${CONTAINER} bash -
     --vggt4d_weights_path ${VGGT4D_CKPT} \
     --dyn_mask_dir ${MASKS} \
     --hybrid_voxelize \
+    --voxel_size ${VOXEL_SIZE} \
     --eval_loo \
     --output_dir ${OUT_DIR}
 

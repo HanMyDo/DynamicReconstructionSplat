@@ -966,9 +966,16 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
                 frame_idx_list.append(torch.cat(fidx_parts, 0))
                 dyn_flag_list.append(torch.cat(dyn_parts, 0))
                 only_view_list.append(torch.cat(ov_parts, 0))
-            print(f"[hybrid] {v} fused static sets + dynamic per-pixel -> "
-                  f"{neural_pts_list[0].shape[0]} gaussians "
-                  f"(per-pixel would be {v*h*w})", flush=True)
+            _tot = neural_pts_list[0].shape[0]
+            _per_set = (_tot - int(dyn_m.sum())) / max(v, 1)
+            _static_pp = float(stat_m.sum())
+            # ratio ~1/v means the v copies of a surface fused into one Gaussian (the
+            # goal). ratio ~1 means voxel_size is at or below the point spacing and
+            # NOTHING merged -- then the v sets are pure v-fold cost for no benefit.
+            print(f"[hybrid] vox={self.voxel_size} {v} static sets + dyn per-pixel -> "
+                  f"{_tot} gaussians (per-pixel {v*h*w}) | "
+                  f"fusion ratio {_per_set/max(_static_pp,1):.3f} "
+                  f"(target ~{1.0/max(v,1):.3f}, 1.0 = no merging)", flush=True)
         elif self.cfg.voxelize:
             for b_i in range(b):
                 neural_pts, neural_feats = self.voxelizaton_with_fusion(
