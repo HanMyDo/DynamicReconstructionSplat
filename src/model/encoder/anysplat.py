@@ -393,6 +393,73 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
             padded.append(t)
         return torch.stack(padded)
 
+    def voxelize_static_hybrid(self, img_feat, pts3d, voxel_size, conf,
+                               static_mask, exclude_frame: int = -1):
+        """HYBRID fusion: fuse ONLY static pixels into shared voxels, optionally
+        excluding one source frame.
+
+        WHY HYBRID. With voxelize=False every pixel of every frame becomes its own
+        Gaussian, so a surface seen by V frames carries V redundant copies. That
+        redundancy is what makes SHRINKING FREE: any one copy can collapse and the
+        others still cover the surface. We measured the consequence three separate
+        times (scale_reg, an alpha-weighted loss, and LPIPS each drove a collapse),
+        and the last one left only 19.7% of Gaussians large enough to render (vs
+        68.9% frozen) -> the transparent, background-less PLY. Fusing static points
+        removes the redundancy, so a Gaussian must actually cover its own patch.
+
+        WHY NOT FUSE EVERYTHING. Fusion averages points from different frames into
+        one anchor, which destroys the 1:1 Gaussian -> (frame, pixel) mapping. For
+        static content that is exactly right (the surface IS shared across frames).
+        For a MOVING point it is wrong twice over: the "shared" surface is at a
+        different place in each frame, so the average is a smear, and we lose the
+        per-frame identity that every temporal/dynamic mechanism needs. So dynamic
+        pixels stay per-pixel with their frame index; only static content is fused.
+
+        WHY exclude_frame. Fused voxels have no single source frame, so leave-one-out
+        can no longer drop view j's own contribution (the decoder drops on
+        `fidx == j`). A fused voxel would carry view j's OWN depth estimate into
+        view j's render -- project->unproject->project, i.e. the self-reprojection
+        shortcut that inflates static PSNR for a trivial reason. Since static is
+        where our entire measured gain sits, that would silently invalidate the
+        result. Passing exclude_frame=j rebuilds the static set from the OTHER
+        frames only, keeping LOO exact.
+
+        Args:
+            img_feat:    [V, C, H, W] anchor features
+            pts3d:       [V, 3, H, W] world points
+            conf:        [V, H, W]    confidence (fusion weight)
+            static_mask: [V, H, W]    True where the pixel is static AND conf-valid
+            exclude_frame: frame index to leave out of the fusion (-1 = keep all)
+
+        Returns:
+            (voxel_pts [M,3], voxel_feats [M,C]) -- M = number of occupied voxels.
+        """
+        V, C, H, W = img_feat.shape
+        keep = static_mask.clone()
+        if exclude_frame >= 0:
+            keep[exclude_frame] = False
+
+        pts_f = pts3d.permute(0, 2, 3, 1).flatten(0, 2)[keep.flatten()]      # [N,3]
+        feat_f = img_feat.permute(0, 2, 3, 1).flatten(0, 2)[keep.flatten()]  # [N,C]
+        conf_f = conf.flatten()[keep.flatten()]                              # [N]
+        if pts_f.numel() == 0:
+            return (pts_f.new_zeros((0, 3)), feat_f.new_zeros((0, feat_f.shape[-1])))
+
+        voxel_indices = (pts_f / voxel_size).round().int()
+        _, inverse_indices, _ = torch.unique(
+            voxel_indices, dim=0, return_inverse=True, return_counts=True
+        )
+        # Confidence-softmax weights within each voxel (same scheme as the
+        # upstream fusion, just restricted to the kept points).
+        conf_voxel_max, _ = scatter_max(conf_f, inverse_indices, dim=0)
+        conf_exp = torch.exp(conf_f - conf_voxel_max[inverse_indices])
+        voxel_weights = scatter_add(conf_exp, inverse_indices, dim=0)
+        weights = (conf_exp / (voxel_weights[inverse_indices] + 1e-6)).unsqueeze(-1)
+
+        voxel_pts = scatter_add(pts_f * weights, inverse_indices, dim=0)
+        voxel_feats = scatter_add(feat_f * weights, inverse_indices, dim=0)
+        return voxel_pts, voxel_feats
+
     def voxelizaton_with_fusion(self, img_feat, pts3d, voxel_size, conf=None):
         # img_feat: B*V, C, H, W
         # pts3d: B*V, 3, H, W
