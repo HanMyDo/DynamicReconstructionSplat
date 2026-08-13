@@ -455,6 +455,10 @@ def main():
                         help="Render dynamic Gaussians ONLY into the frame they were unprojected from "
                              "(static ones still render into every frame). Removes the multi-frame ghosting "
                              "of moving objects. Requires VGGT4D dynamic detection. Off = original behaviour.")
+    parser.add_argument("--hybrid_voxelize", action="store_true",
+                        help="Fuse STATIC pixels into shared voxels (one set per target view, "
+                             "that view excluded so leave-one-out stays exact); dynamic pixels "
+                             "stay per-pixel. Requires dynamic masks (--dyn_mask_dir).")
     parser.add_argument("--eval_loo", action="store_true",
                         help="Leave-one-out: when rendering view j, drop ALL Gaussians that came from view j, "
                              "so j must be reconstructed from the OTHER frames. The honest control against "
@@ -500,6 +504,7 @@ def main():
         num_frames=args.num_frames,
         use_vggt4d=not args.no_vggt4d,
         enable_dynamic_detection=not args.no_vggt4d,
+        hybrid_voxelize=args.hybrid_voxelize,
         vggt4d_weights_path=args.vggt4d_weights_path,
         dyn_motion_groups=(args.dyn_motion_groups if args.track_dynamic else 0),
     )
