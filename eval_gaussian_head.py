@@ -146,7 +146,7 @@ def umeyama_ate(pred_xyz, gt_xyz):
 @torch.no_grad()
 def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50, image_batch_start=0,
              per_frame_dynamic=False, leave_one_out=False, precomputed_mask_dir=None,
-             track_dynamic=False, gain_correct=False):
+             track_dynamic=False, gain_correct=False, scale_mult=1.0):
     os.makedirs(output_dir, exist_ok=True)
     images_dir = os.path.join(output_dir, "images")
     dyn_mask_dir = os.path.join(output_dir, "dyn_mask")
@@ -212,10 +212,15 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
         # GEOMETRIC -- fusion averaged depth estimates that disagree -- and no
         # head fine-tuning can repair it, because means come from the FROZEN
         # depth head. Never use this for a reported number.
-        if getattr(config, "scale_mult", 1.0) != 1.0:
-            gaussians.scales = gaussians.scales * config.scale_mult
+        if batch_idx == 0:
+            print(f"[scale_mult] effective={scale_mult} "
+                  f"(1.0 = diagnostic OFF) scale_mean_before={float(gaussians.scales.mean()):.6f}",
+                  flush=True)
+        if scale_mult != 1.0:
+            gaussians.scales = gaussians.scales * scale_mult
             if batch_idx == 0:
-                print(f"[scale_mult] DIAGNOSTIC: scales x{config.scale_mult}", flush=True)
+                print(f"[scale_mult] APPLIED x{scale_mult} -> "
+                      f"scale_mean_after={float(gaussians.scales.mean()):.6f}", flush=True)
         infos = encoder_output.infos
         pred_pose = encoder_output.pred_context_pose
 
@@ -569,6 +574,7 @@ def main():
     print(f"\nRunning evaluation on {args.split} split ({len(dataset)} batches)...")
     print(f"  per_frame_dynamic={args.per_frame_dynamic}  leave_one_out={args.eval_loo}")
     evaluate(model, dataloader, config, args.output_dir, device,
+             scale_mult=args.scale_mult,
              max_image_batches=args.max_image_batches,
              image_batch_start=args.image_batch_start,
              per_frame_dynamic=args.per_frame_dynamic,
