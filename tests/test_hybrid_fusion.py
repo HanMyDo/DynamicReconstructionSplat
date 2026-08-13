@@ -1,4 +1,4 @@
-"""Correctness tests for hybrid static-fusion (AnySplat.voxelize_static_hybrid).
+"""Correctness tests for hybrid static-fusion (EncoderAnySplat.voxelize_static_hybrid).
 
 Run on the cluster (needs torch + torch_scatter):
     python tests/test_hybrid_fusion.py
@@ -15,10 +15,10 @@ bit-identical -- that is the only way to prove no information path exists.
 import types
 import torch
 
-from src.model.encoder.anysplat import AnySplat
+from src.model.encoder.anysplat import EncoderAnySplat
 
 # The method never touches `self`, so a dummy instance exercises the real code.
-fuse = lambda *a, **k: AnySplat.voxelize_static_hybrid(types.SimpleNamespace(), *a, **k)
+fuse = lambda *a, **k: EncoderAnySplat.voxelize_static_hybrid(types.SimpleNamespace(), *a, **k)
 
 
 def main() -> int:
