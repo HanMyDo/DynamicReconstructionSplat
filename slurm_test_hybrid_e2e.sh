@@ -46,12 +46,20 @@ EVAL_SEQ=${1:-rgbd_bonn_removing_obstructing_box}
 # The v per-target-view sets cost v x the fused count, so the hybrid only breaks even
 # when fusion merges ~v:1, i.e. ratio ~1/v = 0.167 at v=6. Sweep upward: 0.002 0.005 0.01.
 VOXEL_SIZE=${2:-0.001}
+# $3 SCALE_MULT (diagnostic): enlarge splats at render time. At voxel_size 0.005 the
+# fused point spacing is ~5x the frozen head's scale p50 (0.00095), so frozen splats
+# cover a small fraction of each surface. Recovery under scale_mult => the collapse is
+# COVERAGE and training fixes it; no recovery => GEOMETRIC (fusion averaged depths that
+# disagree) and no head fine-tuning can repair it. Never report a scale_mult number.
+SCALE_MULT=${3:-1.0}
 SEQ_TAG=$(echo ${EVAL_SEQ} | sed 's/rgbd_bonn_//')
 REPO="/mnt/home/hanmydo/DynamicReconstructionSplat"
 VGGT4D_CKPT="${REPO}/ckpts/vggt4d_model_tracker_fixed_e20.pt"
 MASKS="output_dyn_masks_precomputed_cs16_r518_st3_fs0"
 VTAG=$(echo ${VOXEL_SIZE} | tr '.' 'p')
-OUT_DIR="output_test_hybrid_e2e_${SEQ_TAG}_vox${VTAG}_$(date +%Y%m%d)"
+STAG=""
+[ "${SCALE_MULT}" != "1.0" ] && STAG="_sm$(echo ${SCALE_MULT} | tr '.' 'p')"
+OUT_DIR="output_test_hybrid_e2e_${SEQ_TAG}_vox${VTAG}${STAG}_$(date +%Y%m%d)"
 
 export ENROOT_RUNTIME_PATH=/tmp/$USER/runtime
 export ENROOT_CACHE_PATH=/tmp/$USER/cache
@@ -90,6 +98,7 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp ${CONTAINER} bash -
     --dyn_mask_dir ${MASKS} \
     --hybrid_voxelize \
     --voxel_size ${VOXEL_SIZE} \
+    --scale_mult ${SCALE_MULT} \
     --eval_loo \
     --output_dir ${OUT_DIR}
 

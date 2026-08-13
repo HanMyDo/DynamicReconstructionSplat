@@ -202,6 +202,20 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
 
         encoder_output = model.encoder(images, global_step=0, dyn_mask_override=precomp_mask)
         gaussians = encoder_output.gaussians
+        # DIAGNOSTIC ONLY (--scale_mult): enlarge every Gaussian at render time.
+        # Discriminates the two explanations for the static-PSNR collapse under
+        # hybrid fusion. The frozen head's scales are sized for ~0.001 point
+        # spacing; at voxel_size 0.005 the fused spacing is ~5x larger, so the
+        # splats cover a small fraction of the surface. If PSNR RECOVERS when we
+        # simply scale them up, the collapse is COVERAGE (which training fixes,
+        # since scale is a head output). If it does NOT recover, the collapse is
+        # GEOMETRIC -- fusion averaged depth estimates that disagree -- and no
+        # head fine-tuning can repair it, because means come from the FROZEN
+        # depth head. Never use this for a reported number.
+        if getattr(config, "scale_mult", 1.0) != 1.0:
+            gaussians.scales = gaussians.scales * config.scale_mult
+            if batch_idx == 0:
+                print(f"[scale_mult] DIAGNOSTIC: scales x{config.scale_mult}", flush=True)
         infos = encoder_output.infos
         pred_pose = encoder_output.pred_context_pose
 
@@ -455,6 +469,11 @@ def main():
                         help="Render dynamic Gaussians ONLY into the frame they were unprojected from "
                              "(static ones still render into every frame). Removes the multi-frame ghosting "
                              "of moving objects. Requires VGGT4D dynamic detection. Off = original behaviour.")
+    parser.add_argument("--scale_mult", type=float, default=1.0,
+                        help="DIAGNOSTIC: multiply all Gaussian scales at render time. Used to "
+                             "separate a coverage collapse (training can fix: scale is a head "
+                             "output) from a geometric one (training CANNOT fix: means come from "
+                             "the frozen depth head). Never report a number produced with this.")
     parser.add_argument("--voxel_size", type=float, default=0.001,
                         help="Fusion voxel edge length. MUST exceed the inter-frame point "
                              "spacing or nothing merges: the default 0.001 equals the frozen "
