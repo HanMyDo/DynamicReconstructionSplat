@@ -214,13 +214,23 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
         # depth head. Never use this for a reported number.
         if batch_idx == 0:
             print(f"[scale_mult] effective={scale_mult} "
-                  f"(1.0 = diagnostic OFF) scale_mean_before={float(gaussians.scales.mean()):.6f}",
+                  f"(1.0 = diagnostic OFF) scale_mean={float(gaussians.scales.mean()):.6f} "
+                  f"covar_mean={float(gaussians.covariances.mean()):.9f}",
                   flush=True)
         if scale_mult != 1.0:
             gaussians.scales = gaussians.scales * scale_mult
+            # THE COVARIANCES ARE WHAT ACTUALLY RENDER. decoder_splatting_cuda passes
+            # covars=covar_i to gsplat.rasterization, and gsplat uses explicit covars
+            # INSTEAD of scales/quats when they are supplied -- so scaling .scales
+            # alone changes nothing (measured: metrics byte-identical). Covariance is
+            # quadratic in linear size, hence scale_mult ** 2.
+            if getattr(gaussians, "covariances", None) is not None:
+                gaussians.covariances = gaussians.covariances * (scale_mult ** 2)
             if batch_idx == 0:
                 print(f"[scale_mult] APPLIED x{scale_mult} -> "
-                      f"scale_mean_after={float(gaussians.scales.mean()):.6f}", flush=True)
+                      f"scale_mean={float(gaussians.scales.mean()):.6f} "
+                      f"covar_mean={float(gaussians.covariances.mean()):.9f} "
+                      f"(covar scaled by {scale_mult ** 2})", flush=True)
         infos = encoder_output.infos
         pred_pose = encoder_output.pred_context_pose
 
