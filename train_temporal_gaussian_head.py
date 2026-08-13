@@ -521,7 +521,6 @@ def create_model(config: TrainingConfig) -> AnySplat:
     encoder_cfg = EncoderAnySplatCfg(
         name="anysplat",
         anchor_feat_dim=83,
-        voxel_size=0.001,
         n_offsets=2,
         d_feature=32,
         add_view=False,
@@ -553,6 +552,7 @@ def create_model(config: TrainingConfig) -> AnySplat:
         vggt4d_weights_path=config.vggt4d_weights_path,
         enable_dynamic_detection=config.enable_dynamic_detection,
         hybrid_voxelize=config.hybrid_voxelize,
+        # fusion voxel edge: must EXCEED point spacing or nothing merges (see --voxel_size)
         voxel_size=config.voxel_size,
         dynamic_mask_threshold=None,
         dynamic_n_clusters=64,
