@@ -89,6 +89,14 @@ case "${EXTRA_FLAGS}" in *track_dynamic*)
   GRP=$(echo "${EXTRA_FLAGS}" | sed -n 's/.*--dyn_motion_groups[= ]*\([0-9][0-9]*\).*/\1/p')
   FLAG_TAG="${FLAG_TAG}_trk${GRP:-1}" ;;
 esac
+# hybrid fusion: voxel size AND scale multiplier must both be in the tag — they are
+# different operating points and must never share (or clobber) an output dir.
+case "${EXTRA_FLAGS}" in *hybrid_voxelize*)
+  VOX=$(echo "${EXTRA_FLAGS}" | sed -n 's/.*--voxel_size[= ]*\([0-9.]*\).*/\1/p')
+  SM=$(echo "${EXTRA_FLAGS}" | sed -n 's/.*--scale_mult[= ]*\([0-9.]*\).*/\1/p')
+  FLAG_TAG="${FLAG_TAG}_hyb$(echo ${VOX:-0.001} | tr '.' 'p')"
+  [ -n "${SM}" ] && FLAG_TAG="${FLAG_TAG}_sm$(echo ${SM} | tr '.' 'p')" ;;
+esac
 case "${EXTRA_FLAGS}" in *gain_correct*) FLAG_TAG="${FLAG_TAG}_gc" ;; esac
 case "${EXTRA_FLAGS}" in *dyn_mask_dir*) FLAG_TAG="${FLAG_TAG}_pcm" ;; esac
 [ "${NUM_FRAMES}" != "12" ] && FLAG_TAG="${FLAG_TAG}_nf${NUM_FRAMES}"
