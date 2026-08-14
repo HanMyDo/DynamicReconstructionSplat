@@ -146,7 +146,8 @@ def umeyama_ate(pred_xyz, gt_xyz):
 @torch.no_grad()
 def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50, image_batch_start=0,
              per_frame_dynamic=False, leave_one_out=False, precomputed_mask_dir=None,
-             track_dynamic=False, gain_correct=False, scale_mult=1.0):
+             track_dynamic=False, gain_correct=False, scale_mult=1.0,
+             image_save_every=1):
     os.makedirs(output_dir, exist_ok=True)
     images_dir = os.path.join(output_dir, "images")
     dyn_mask_dir = os.path.join(output_dir, "dyn_mask")
@@ -357,8 +358,19 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
                     total_psnr_static += -10 * torch.log10(mse_static + 1e-8).item()
                     n_static_frames += 1
 
-            # Save GT | predicted comparison image for a window of batches
-            if image_batch_start <= batch_idx < image_batch_start + max_image_batches:
+            # Save GT | predicted comparison image for a window of batches.
+            # --image_save_every thins these out: the evaluated batches are CONSECUTIVE
+            # sliding windows, so batch 400 and 401 differ by one frame and 50 of them
+            # are near-duplicates (300 images of almost the same moment). Saving every
+            # Nth batch spreads the figures over the evaluated span instead.
+            # NOTE the movement you want to SEE is mostly WITHIN a batch: at
+            # --frame_stride 8 the six views v00..v05 of one batch are 8 frames apart,
+            # so they span ~48 frames (~1.5 s) — that is where an object visibly moves.
+            _save_this = (
+                image_batch_start <= batch_idx < image_batch_start + max_image_batches
+                and ((batch_idx - image_batch_start) % max(image_save_every, 1) == 0)
+            )
+            if _save_this:
                 comparison = torch.cat([gt_frame, pred_frame], dim=2)  # side by side [3, H, 2W]
                 save_image(comparison, os.path.join(images_dir, f"b{batch_idx:04d}_v{v_idx:02d}.png"))
 
@@ -484,6 +496,11 @@ def main():
                         help="Render dynamic Gaussians ONLY into the frame they were unprojected from "
                              "(static ones still render into every frame). Removes the multi-frame ghosting "
                              "of moving objects. Requires VGGT4D dynamic detection. Off = original behaviour.")
+    parser.add_argument("--image_save_every", type=int, default=1,
+                        help="Save a comparison image every Nth evaluated batch. The evaluated "
+                             "batches are CONSECUTIVE sliding windows (400,401,...), so they are "
+                             "near-duplicates; N=10 gives ~5 well-separated moments instead of 50 "
+                             "nearly identical ones. Does not change any metric.")
     parser.add_argument("--scale_mult", type=float, default=1.0,
                         help="DIAGNOSTIC: multiply all Gaussian scales at render time. Used to "
                              "separate a coverage collapse (training can fix: scale is a head "
@@ -585,6 +602,7 @@ def main():
     print(f"  per_frame_dynamic={args.per_frame_dynamic}  leave_one_out={args.eval_loo}")
     evaluate(model, dataloader, config, args.output_dir, device,
              scale_mult=args.scale_mult,
+             image_save_every=args.image_save_every,
              max_image_batches=args.max_image_batches,
              image_batch_start=args.image_batch_start,
              per_frame_dynamic=args.per_frame_dynamic,
