@@ -152,6 +152,13 @@ OPAC_W=${11:-0.0}
 HYBRID_VOX=${12:-0}
 VOXEL_SIZE=${13:-0.001}
 SCALE_MULT=${14:-1.0}
+# $15 FRAME_STRIDE: gap between the frames of a training window. DEFAULT 1 = SIX
+#   CONSECUTIVE FRAMES = ~0.2 s, in which nothing in Bonn moves -- so every fine-tune
+#   so far was trained on windows containing NO motion, while eval uses stride 8
+#   (~1.5 s). That is the same "window too short in time" defect we fixed on the EVAL
+#   side months ago and never applied here, and it means no run has ever had the
+#   chance to learn dynamics. Set 8 to match the eval protocol.
+FRAME_STRIDE=${15:-1}
 HYB_FLAG=""
 [ "${HYBRID_VOX}" = "1" ] && HYB_FLAG="--hybrid_voxelize"
 
@@ -177,7 +184,8 @@ fi
 [ "${LPIPS_W}" != "0.0" ] && TAG="${TAG}_lpips$(echo ${LPIPS_W} | tr '.' 'p')"
 [ "${OPAC_W}" != "0.0" ] && TAG="${TAG}_opac$(echo ${OPAC_W} | tr '.' 'p')"
 [ "${HYBRID_VOX}" = "1" ] && TAG="${TAG}_hyb$(echo ${VOXEL_SIZE} | tr '.' 'p')"
-[ "${SCALE_MULT}" != "1.0" ] && TAG="${TAG}_sm$(echo ${SCALE_MULT} | tr '.' 'p')"   # own output dir: different objective, don't resume a self-reprojection ckpt
+[ "${SCALE_MULT}" != "1.0" ] && TAG="${TAG}_sm$(echo ${SCALE_MULT} | tr '.' 'p')"
+[ "${FRAME_STRIDE}" != "1" ] && TAG="${TAG}_fs${FRAME_STRIDE}"   # own output dir: different objective, don't resume a self-reprojection ckpt
 OUTPUT_DIR_NAME=output_train_testbed_${TAG}_20260706
 RUN_NAME=train_testbed_${TAG}_20260706_${SLURM_JOB_ID}
 
@@ -327,6 +335,7 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp ${CONTAINER} bash -
     ${HYB_FLAG} \
     --voxel_size ${VOXEL_SIZE} \
     --scale_mult ${SCALE_MULT} \
+    --frame_stride ${FRAME_STRIDE} \
     --dynamic_loss_downweight ${STATIC_DW} \
     --no_gt_poses \
     --intrinsics bonn \
