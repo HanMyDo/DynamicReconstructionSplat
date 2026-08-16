@@ -165,7 +165,7 @@ FRAME_STRIDE=${15:-1}
 #   bigger GPU: depth_head grads + Adam state on top of the rasterizer.
 UNFREEZE_DEPTH=${16:-0}
 UNFREEZE_FLAG=""
-[ "${UNFREEZE_DEPTH}" = "1" ] && UNFREEZE_FLAG="--unfreeze_depth_head
+[ "${UNFREEZE_DEPTH}" = "1" ] && UNFREEZE_FLAG="--unfreeze_depth_head"
 HYB_FLAG=""
 [ "${HYBRID_VOX}" = "1" ] && HYB_FLAG="--hybrid_voxelize"
 
