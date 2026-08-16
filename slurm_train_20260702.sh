@@ -159,6 +159,13 @@ SCALE_MULT=${14:-1.0}
 #   side months ago and never applied here, and it means no run has ever had the
 #   chance to learn dynamics. Set 8 to match the eval protocol.
 FRAME_STRIDE=${15:-1}
+# $16 UNFREEZE_DEPTH: 1 -> also train depth_head (Gaussian POSITIONS). Attacks the
+#   inter-frame depth disagreement that underlies the PLY ribbons, the hybrid fusion
+#   failure and the LOO shrink incentive. Upstream AnySplat trains it. Needs the
+#   bigger GPU: depth_head grads + Adam state on top of the rasterizer.
+UNFREEZE_DEPTH=${16:-0}
+UNFREEZE_FLAG=""
+[ "${UNFREEZE_DEPTH}" = "1" ] && UNFREEZE_FLAG="--unfreeze_depth_head
 HYB_FLAG=""
 [ "${HYBRID_VOX}" = "1" ] && HYB_FLAG="--hybrid_voxelize"
 
@@ -185,7 +192,8 @@ fi
 [ "${OPAC_W}" != "0.0" ] && TAG="${TAG}_opac$(echo ${OPAC_W} | tr '.' 'p')"
 [ "${HYBRID_VOX}" = "1" ] && TAG="${TAG}_hyb$(echo ${VOXEL_SIZE} | tr '.' 'p')"
 [ "${SCALE_MULT}" != "1.0" ] && TAG="${TAG}_sm$(echo ${SCALE_MULT} | tr '.' 'p')"
-[ "${FRAME_STRIDE}" != "1" ] && TAG="${TAG}_fs${FRAME_STRIDE}"   # own output dir: different objective, don't resume a self-reprojection ckpt
+[ "${FRAME_STRIDE}" != "1" ] && TAG="${TAG}_fs${FRAME_STRIDE}"
+[ "${UNFREEZE_DEPTH}" = "1" ] && TAG="${TAG}_dh"   # own output dir: different objective, don't resume a self-reprojection ckpt
 OUTPUT_DIR_NAME=output_train_testbed_${TAG}_20260706
 RUN_NAME=train_testbed_${TAG}_20260706_${SLURM_JOB_ID}
 
@@ -336,6 +344,7 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp ${CONTAINER} bash -
     --voxel_size ${VOXEL_SIZE} \
     --scale_mult ${SCALE_MULT} \
     --frame_stride ${FRAME_STRIDE} \
+    ${UNFREEZE_FLAG} \
     --dynamic_loss_downweight ${STATIC_DW} \
     --no_gt_poses \
     --intrinsics bonn \

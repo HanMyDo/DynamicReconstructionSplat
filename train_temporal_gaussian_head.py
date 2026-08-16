@@ -291,6 +291,7 @@ class TrainingConfig:
     # HYBRID voxelization: fuse static pixels into shared voxels (one set per target
     # view, that view excluded so LOO stays exact), keep dynamic pixels per-pixel.
     # Removes the V-copies-per-surface redundancy that made shrinking free.
+    unfreeze_depth_head: bool = False
     hybrid_voxelize: bool = False
     voxel_size: float = 0.001
     scale_mult: float = 1.0
@@ -589,15 +590,35 @@ def create_model(config: TrainingConfig) -> AnySplat:
     return model
 
 
-def freeze_backbone(model: AnySplat):
-    """Freeze VGGT4D backbone; train only the Gaussian head (gaussian_param_head + gaussian_adapter)."""
+def freeze_backbone(model: AnySplat, unfreeze_depth_head: bool = False):
+    """Freeze the VGGT4D backbone; train the Gaussian head (+ optionally depth_head).
+
+    unfreeze_depth_head trains the module that produces Gaussian POSITIONS
+    (means = origins + directions * depths). Rationale: inter-frame depth
+    disagreement is the common root of three measured problems -- the PLY's
+    ribbon artefact (same surface at different depths per frame), the hybrid
+    fusion failure (averaging disagreeing depths misplaces the fused point), and
+    the leave-one-out shrink incentive (a Gaussian is only ever graded from views
+    where it is misplaced, so shrinking reduces its error contribution). AnySplat
+    itself trains depth_head (freeze_backbone: false + depth_consis loss).
+
+    It does NOT enable dynamics: no per-pixel head can place an object at a target
+    timestamp because the target index never enters it -- confirmed empirically by
+    the stride-8 control (real motion in training: static +0.44, dynamic +0.03).
+    """
+    global _TRAINABLE_PREFIXES
     for param in model.encoder.aggregator.parameters():
         param.requires_grad = False
     for param in model.encoder.camera_head.parameters():
         param.requires_grad = False
     if hasattr(model.encoder, 'depth_head'):
         for param in model.encoder.depth_head.parameters():
-            param.requires_grad = False
+            param.requires_grad = bool(unfreeze_depth_head)
+        if unfreeze_depth_head and 'depth_head' not in _TRAINABLE_PREFIXES:
+            # MUST happen for the weights to survive save/load (see _TRAINABLE_PREFIXES)
+            _TRAINABLE_PREFIXES.append('depth_head')
+            print("[unfreeze] depth_head is TRAINABLE and will be saved/restored",
+                  flush=True)
     if hasattr(model.encoder, 'point_head'):
         for param in model.encoder.point_head.parameters():
             param.requires_grad = False
@@ -1384,8 +1405,22 @@ def head_state_dict(model):
     counterpart of the one in load_checkpoint / eval_gaussian_head.py, so old
     full checkpoints and new head-only ones both load identically.
     """
+    prefixes = trainable_prefixes()
     return {k: v for k, v in model.state_dict().items()
-            if 'gaussian_param_head' in k or 'gaussian_adapter' in k}
+            if any(pfx in k for pfx in prefixes)}
+
+
+# WHAT THE CHECKPOINT CONTAINS. This list is the SINGLE source of truth: it drives
+# both what train saves and what eval restores (eval reads it back out of the
+# checkpoint). Keeping it implicit is a silent-wrong-number trap -- unfreezing a
+# module without adding it here trains the module, DISCARDS it at save time, and
+# then evaluates with pretrained weights, producing plausible numbers that mean
+# nothing. Set by freeze_backbone() according to what was actually unfrozen.
+_TRAINABLE_PREFIXES = ['gaussian_param_head', 'gaussian_adapter']
+
+
+def trainable_prefixes():
+    return list(_TRAINABLE_PREFIXES)
 
 
 def save_checkpoint(model, optimizer, scheduler, epoch, global_step, config, epoch_completed=False):
@@ -1404,6 +1439,7 @@ def save_checkpoint(model, optimizer, scheduler, epoch, global_step, config, epo
         'epoch_completed': epoch_completed,
         'global_step': global_step,
         'model_state_dict': head_state_dict(model),  # head/adapter only (~tens of MB)
+        'saved_prefixes': trainable_prefixes(),
         'optimizer_state_dict': optimizer.state_dict(),
         'scheduler_state_dict': scheduler.state_dict(),
         'config': config.__dict__,
@@ -1532,6 +1568,11 @@ def main():
     parser.add_argument("--voxel_size", type=float, default=0.001,
                         help="Fusion voxel edge length (see --hybrid_voxelize). Default 0.001 "
                              "equals the point spacing, so it merges nothing; sweep upward.")
+    parser.add_argument("--unfreeze_depth_head", action="store_true",
+                        help="Also train depth_head (Gaussian POSITIONS). Targets inter-frame "
+                             "depth disagreement, the common root of the PLY ribbons, the fusion "
+                             "failure and the LOO shrink incentive. Upstream AnySplat trains it. "
+                             "Does NOT enable dynamics (no target-timestamp input).")
     parser.add_argument("--hybrid_voxelize", action="store_true",
                         help="Fuse STATIC pixels into shared voxels (one set per target view, "
                              "that view excluded so leave-one-out stays exact) and keep DYNAMIC "
@@ -1618,6 +1659,7 @@ def main():
         sh_reg_weight=args.sh_reg_weight,
         dynamic_loss_downweight=args.dynamic_loss_downweight,
         train_loo=args.train_loo,
+        unfreeze_depth_head=args.unfreeze_depth_head,
         hybrid_voxelize=args.hybrid_voxelize,
         voxel_size=args.voxel_size,
         scale_mult=args.scale_mult,
@@ -1741,7 +1783,7 @@ def main():
     model = model.to(device)
 
     print("\nFreezing backbone...")
-    model = freeze_backbone(model)
+    model = freeze_backbone(model, unfreeze_depth_head=config.unfreeze_depth_head)
 
     trainable_params = [p for p in model.parameters() if p.requires_grad]
     print(f"Optimizer: {len(trainable_params)} trainable tensors")

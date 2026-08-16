@@ -73,10 +73,21 @@ def load_model(checkpoint_path, config, device):
         # so the backbone always reflects the freshly loaded pretrained weights.
         saved = ckpt["model_state_dict"]
         current = model.state_dict()
+        # Restore exactly the modules the TRAINING run saved. The checkpoint records
+        # them ('saved_prefixes'), so eval can never drift from train -- the old
+        # hardcoded pair silently discarded any other unfrozen module (e.g.
+        # depth_head), leaving pretrained weights in place and producing plausible
+        # but meaningless numbers. Older checkpoints lack the key -> same pair as before.
+        prefixes = ckpt.get("saved_prefixes", ["gaussian_param_head", "gaussian_adapter"])
         head_keys = {k: v for k, v in saved.items()
-                     if "gaussian_param_head" in k or "gaussian_adapter" in k}
+                     if any(pfx in k for pfx in prefixes)}
         current.update(head_keys)
         model.load_state_dict(current)
+        print(f"[ckpt] restored {len(head_keys)} tensors from modules {prefixes}", flush=True)
+        if not head_keys:
+            raise RuntimeError(
+                f"checkpoint contained no tensors matching {prefixes} -- refusing to "
+                "evaluate a silently-pretrained model")
         epoch = ckpt.get("epoch", "?")
         step = ckpt.get("global_step", "?")
         print(f"  -> epoch {epoch}, step {step}, restored {len(head_keys)} gaussian head tensors")
