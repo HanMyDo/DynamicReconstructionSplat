@@ -96,8 +96,13 @@ def load_model(checkpoint_path, config, device):
         print(f"[ckpt] restored {len(head_keys)} tensors; modules={groups}", flush=True)
         if prefixes:
             print(f"[ckpt] training recorded saved_prefixes={prefixes}", flush=True)
+            # Only a real failure if the module HAS parameters in this model but none
+            # of them were restored. gaussian_adapter is parameter-free, so it
+            # legitimately contributes zero tensors -- the first version of this check
+            # raised on it and killed a valid eval.
             missing = [p for p in prefixes
-                       if not any(p in k for k in head_keys)]
+                       if any(p in k for k in current)
+                       and not any(p in k for k in head_keys)]
             if missing:
                 raise RuntimeError(
                     f"checkpoint says it trained {missing} but no such tensors were "
