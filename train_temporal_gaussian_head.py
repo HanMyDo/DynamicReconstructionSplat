@@ -1919,6 +1919,7 @@ def main():
                     'epoch': epoch,
                     'global_step': global_step,
                     'model_state_dict': head_state_dict(model),  # head/adapter only (~tens of MB)
+                    'saved_prefixes': trainable_prefixes(),
                     'optimizer_state_dict': optimizer.state_dict(),
                     'scheduler_state_dict': scheduler.state_dict(),
                     'config': config.__dict__,
@@ -1976,6 +1977,7 @@ def main():
         'epoch': config.num_epochs - 1,
         'global_step': global_step,
         'model_state_dict': head_state_dict(model),  # head/adapter only (~tens of MB)
+        'saved_prefixes': trainable_prefixes(),
         'optimizer_state_dict': optimizer.state_dict(),
         'scheduler_state_dict': scheduler.state_dict(),
         'config': config.__dict__,

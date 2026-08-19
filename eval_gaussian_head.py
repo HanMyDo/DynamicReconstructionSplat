@@ -78,12 +78,30 @@ def load_model(checkpoint_path, config, device):
         # hardcoded pair silently discarded any other unfrozen module (e.g.
         # depth_head), leaving pretrained weights in place and producing plausible
         # but meaningless numbers. Older checkpoints lack the key -> same pair as before.
-        prefixes = ckpt.get("saved_prefixes", ["gaussian_param_head", "gaussian_adapter"])
+        # Restore EVERYTHING the training run saved, except the frozen backbone.
+        # Relying on a name list was fragile: the training script builds THREE separate
+        # checkpoint dicts (periodic, best, final) and only one of them carried
+        # 'saved_prefixes', so a dh checkpoint silently restored just 64 head tensors
+        # and evaluated PRETRAINED geometry. head_state_dict() already filters at save
+        # time, so whatever is in the file is what was trained -- load all of it and
+        # exclude only 'aggregator' (the backbone, which must stay at pretrained
+        # weights and is never saved by the current code anyway).
         head_keys = {k: v for k, v in saved.items()
-                     if any(pfx in k for pfx in prefixes)}
+                     if k in current and "aggregator" not in k}
+        prefixes = ckpt.get("saved_prefixes")
+        groups = sorted({k.split(".")[1] if k.startswith("encoder.") else k.split(".")[0]
+                         for k in head_keys})
         current.update(head_keys)
         model.load_state_dict(current)
-        print(f"[ckpt] restored {len(head_keys)} tensors from modules {prefixes}", flush=True)
+        print(f"[ckpt] restored {len(head_keys)} tensors; modules={groups}", flush=True)
+        if prefixes:
+            print(f"[ckpt] training recorded saved_prefixes={prefixes}", flush=True)
+            missing = [p for p in prefixes
+                       if not any(p in k for k in head_keys)]
+            if missing:
+                raise RuntimeError(
+                    f"checkpoint says it trained {missing} but no such tensors were "
+                    "restored -- refusing to evaluate a partly-pretrained model")
         if not head_keys:
             raise RuntimeError(
                 f"checkpoint contained no tensors matching {prefixes} -- refusing to "
