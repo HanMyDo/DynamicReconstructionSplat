@@ -163,6 +163,13 @@ FRAME_STRIDE=${15:-1}
 #   inter-frame depth disagreement that underlies the PLY ribbons, the hybrid fusion
 #   failure and the LOO shrink incentive. Upstream AnySplat trains it. Needs the
 #   bigger GPU: depth_head grads + Adam state on top of the rasterizer.
+# $17 DEPTH_CONSIS: weight of the UPSTREAM AnySplat depth-consistency loss (their
+#   value: 1.0). Forces the RASTERISED depth to match the depth head's prediction, so
+#   splats cannot shrink away from the surface. THIS IS THE LOSS WE WERE MISSING:
+#   upstream trains [mse 1.0, lpips 0.05, depth_consis 1.0]; we had the first two only.
+#   Measured consequence: pretrained coverage (splat area / scene cross-section) = 5.34,
+#   every fine-tune of ours = ~1.44, i.e. no overlap and visible holes in the PLY.
+DEPTH_CONSIS=${17:-0.0}
 UNFREEZE_DEPTH=${16:-0}
 UNFREEZE_FLAG=""
 [ "${UNFREEZE_DEPTH}" = "1" ] && UNFREEZE_FLAG="--unfreeze_depth_head"
@@ -193,7 +200,8 @@ fi
 [ "${HYBRID_VOX}" = "1" ] && TAG="${TAG}_hyb$(echo ${VOXEL_SIZE} | tr '.' 'p')"
 [ "${SCALE_MULT}" != "1.0" ] && TAG="${TAG}_sm$(echo ${SCALE_MULT} | tr '.' 'p')"
 [ "${FRAME_STRIDE}" != "1" ] && TAG="${TAG}_fs${FRAME_STRIDE}"
-[ "${UNFREEZE_DEPTH}" = "1" ] && TAG="${TAG}_dh"   # own output dir: different objective, don't resume a self-reprojection ckpt
+[ "${UNFREEZE_DEPTH}" = "1" ] && TAG="${TAG}_dh"
+[ "${DEPTH_CONSIS}" != "0.0" ] && TAG="${TAG}_dc$(echo ${DEPTH_CONSIS} | tr '.' 'p')"   # own output dir: different objective, don't resume a self-reprojection ckpt
 OUTPUT_DIR_NAME=output_train_testbed_${TAG}_20260706
 RUN_NAME=train_testbed_${TAG}_20260706_${SLURM_JOB_ID}
 
@@ -345,6 +353,7 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp ${CONTAINER} bash -
     --scale_mult ${SCALE_MULT} \
     --frame_stride ${FRAME_STRIDE} \
     ${UNFREEZE_FLAG} \
+    --depth_consis_weight ${DEPTH_CONSIS} \
     --dynamic_loss_downweight ${STATIC_DW} \
     --no_gt_poses \
     --intrinsics bonn \

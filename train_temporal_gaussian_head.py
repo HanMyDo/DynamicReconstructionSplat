@@ -291,6 +291,19 @@ class TrainingConfig:
     # HYBRID voxelization: fuse static pixels into shared voxels (one set per target
     # view, that view excluded so LOO stays exact), keep dynamic pixels per-pixel.
     # Removes the V-copies-per-surface redundancy that made shrinking free.
+    # UPSTREAM ANYSPLAT LOSS WE WERE MISSING. AnySplat trains with
+    # loss: [mse, lpips, depth_consis] at weights 1.0 / 0.05 / 1.0. We had mse and
+    # lpips but NOT depth_consis -- and it is the term that constrains GEOMETRY:
+    # it forces the RASTERISED depth (alpha-weighted depth of the splats along each
+    # ray) to match the depth head's own prediction. If splats shrink and stop
+    # covering the surface, the rendered depth drifts to whatever partial coverage
+    # or background remains, and this loss charges for it immediately.
+    # That is why the pretrained head has healthy coverage (splat area / scene
+    # cross-section = 5.34) and every fine-tune of ours collapsed to ~1.44: we
+    # removed the only constraint that was holding the representation together.
+    # Under leave-one-out it is even stronger -- rendered depth for view j comes
+    # from the OTHER frames, making it a true multi-view geometric consistency term.
+    depth_consis_weight: float = 0.0
     unfreeze_depth_head: bool = False
     hybrid_voxelize: bool = False
     voxel_size: float = 0.001
@@ -1113,6 +1126,36 @@ def train_epoch(
                           f"requires_grad={alpha.requires_grad} | "
                           f"loss={opacity_loss.item():.5f}", flush=True)
 
+            # Geometric consistency: rasterised depth must match predicted depth
+            # (upstream AnySplat 'depth_consis', weight 1.0). See depth_consis_weight.
+            depth_consis_loss = torch.zeros((), device=images.device)
+            if config.depth_consis_weight > 0.0 and render_out is not None \
+                    and getattr(render_out, "depth", None) is not None:
+                rd = render_out.depth
+                pd = encoder_output.depth_dict.get("depth")
+                if pd is not None:
+                    while pd.dim() > rd.dim():
+                        pd = pd.squeeze(-1)
+                    if pd.shape == rd.shape:
+                        per_px = F.mse_loss(rd, pd, reduction="none")
+                        vm = encoder_output.depth_dict.get("conf_valid_mask")
+                        if vm is not None and vm.shape == rd.shape and vm.any():
+                            depth_consis_loss = per_px[vm].mean()
+                        else:
+                            depth_consis_loss = per_px.mean()
+                        if not getattr(train_epoch, "_dc_logged", False):
+                            train_epoch._dc_logged = True
+                            print(f"[depth_consis] LIVE w={config.depth_consis_weight} | "
+                                  f"rendered{tuple(rd.shape)} vs predicted{tuple(pd.shape)} | "
+                                  f"rendered_mean={rd.mean().item():.4f} "
+                                  f"predicted_mean={pd.mean().item():.4f} | "
+                                  f"requires_grad={rd.requires_grad} | "
+                                  f"loss={depth_consis_loss.item():.6f}", flush=True)
+                    elif not getattr(train_epoch, "_dc_warned", False):
+                        train_epoch._dc_warned = True
+                        print(f"[depth_consis] SHAPE MISMATCH rendered{tuple(rd.shape)} "
+                              f"vs predicted{tuple(pd.shape)} -- term is INERT", flush=True)
+
             # Perceptual term on a random subset of views (see lpips_views).
             lpips_loss = torch.zeros((), device=images.device)
             if config.lpips_weight > 0.0 and render_out is not None:
@@ -1131,6 +1174,7 @@ def train_epoch(
                 config.mse_weight * mse_loss +
                 config.lpips_weight * lpips_loss +
                 config.opacity_weight * opacity_loss +
+                config.depth_consis_weight * depth_consis_loss +
                 config.temporal_consistency_weight * temporal_loss +
                 config.scale_reg_weight * scale_reg +
                 config.sh_reg_weight * sh_reg
@@ -1194,6 +1238,7 @@ def train_epoch(
                 'train/scale_reg': scale_reg.item(),
                 'train/sh_reg': sh_reg.item(),
                 'train/opacity_cov': float(opacity_loss),
+                'train/depth_consis': float(depth_consis_loss),
                 # THE health metric for this run: alpha_mean is the quantity that
                 # collapsed (only 19.7% of Gaussians renderable vs 68.9% frozen).
                 # It must rise/hold, not fall.
@@ -1568,6 +1613,11 @@ def main():
     parser.add_argument("--voxel_size", type=float, default=0.001,
                         help="Fusion voxel edge length (see --hybrid_voxelize). Default 0.001 "
                              "equals the point spacing, so it merges nothing; sweep upward.")
+    parser.add_argument("--depth_consis_weight", type=float, default=0.0,
+                        help="Upstream AnySplat depth-consistency loss (their weight: 1.0). Forces "
+                             "the RASTERISED depth to match the depth head's prediction, so splats "
+                             "cannot shrink away from the surface. This is the loss we were missing: "
+                             "upstream trains [mse 1.0, lpips 0.05, depth_consis 1.0].")
     parser.add_argument("--unfreeze_depth_head", action="store_true",
                         help="Also train depth_head (Gaussian POSITIONS). Targets inter-frame "
                              "depth disagreement, the common root of the PLY ribbons, the fusion "
@@ -1659,6 +1709,7 @@ def main():
         sh_reg_weight=args.sh_reg_weight,
         dynamic_loss_downweight=args.dynamic_loss_downweight,
         train_loo=args.train_loo,
+        depth_consis_weight=args.depth_consis_weight,
         unfreeze_depth_head=args.unfreeze_depth_head,
         hybrid_voxelize=args.hybrid_voxelize,
         voxel_size=args.voxel_size,
