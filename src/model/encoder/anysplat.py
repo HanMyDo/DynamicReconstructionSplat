@@ -873,6 +873,38 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
             image_size=(h, w),
         )
 
+        # ---- TRUST-REGION ANCHOR to the PRETRAINED head -------------------------
+        # The training script may attach `frozen_gaussian_param_head` (a deepcopy of
+        # the pretrained head, eval + requires_grad False). We then run it on the SAME
+        # tokens and measure how far the fine-tuned raw Gaussian parameters (opacity,
+        # scale, rotation, SH) have drifted from the pretrained ones.
+        #
+        # WHY. UnifiedGaussianAdapter maps scale = 0.001 * softplus(raw), which is
+        # bounded above but NOT below and has no geometric anchor, so scales can
+        # collapse to zero at no cost. Measured: pretrained covers the scene 5.34x
+        # (splat area / cross-section); every fine-tune of ours ~1.1-1.4, i.e. holes.
+        # The same drift desaturates colour: f_dc std 0.829 pretrained vs 0.133 ours,
+        # 83% of Gaussians effectively grey.
+        # Unlike sh_reg (which fights divergence by pushing colour toward ZERO = grey)
+        # and scale_reg (which penalises LARGE scales and CAUSED a 26x collapse), this
+        # penalty is SYMMETRIC and points at values we measured to be correct.
+        # Returned as a scalar so we never hold two [B,V,C,H,W] tensors at once.
+        anchor_loss = None
+        _frozen_head = getattr(self, "frozen_gaussian_param_head", None)
+        if _frozen_head is not None:
+            with torch.no_grad():
+                _out_ref = _frozen_head(
+                    aggregated_tokens_list,
+                    pts_all.flatten(0, 1).permute(0, 3, 1, 2),
+                    image,
+                    patch_start_idx=patch_start_idx,
+                    image_size=(h, w),
+                )
+            anchor_loss = F.mse_loss(
+                out[:, :, : self.raw_gs_dim], _out_ref[:, :, : self.raw_gs_dim]
+            )
+            del _out_ref
+
         # --- piecewise-rigid motion of the dynamic content (tracker-driven) -------
         # Must run while the aggregated tokens still exist (the tracker consumes them).
         self._dyn_group_map = None
@@ -1139,6 +1171,7 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
         # = 1 if n sits on a moving object. The decoder uses these to render dynamic
         # Gaussians ONLY into their own frame. Both are None when voxelize=True (the
         # Gaussian->frame mapping does not survive voxel fusion).
+        infos["anchor_loss"] = anchor_loss
         infos["gaussian_frame_idx"] = gaussian_frame_idx
         # HYBRID: which target view a PRE-FUSED static set belongs to (-1 = normal
         # Gaussian). The decoder renders it only into that view and exempts it from

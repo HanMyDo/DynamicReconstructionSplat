@@ -303,6 +303,15 @@ class TrainingConfig:
     # removed the only constraint that was holding the representation together.
     # Under leave-one-out it is even stronger -- rendered depth for view j comes
     # from the OTHER frames, making it a true multi-view geometric consistency term.
+    # TRUST-REGION ANCHOR to the pretrained head's own outputs (opacity/scale/
+    # rotation/SH), computed in the encoder on the SAME tokens. Replaces sh_reg:
+    # sh_reg fights f_dc divergence by pushing colour toward ZERO, which is grey --
+    # measured f_dc std 0.829 pretrained vs 0.133 ours, 83% of Gaussians grey. The
+    # anchor instead pulls toward the PRETRAINED colour, which is both varied and
+    # bounded. It is also symmetric in scale, so unlike scale_reg (which penalises
+    # LARGE scales and caused a 26x collapse) it cannot drive shrinkage: pretrained
+    # coverage is 5.34x the scene cross-section, ours 1.09-1.44.
+    anchor_weight: float = 0.0
     depth_consis_weight: float = 0.0
     unfreeze_depth_head: bool = False
     hybrid_voxelize: bool = False
@@ -1126,6 +1135,21 @@ def train_epoch(
                           f"requires_grad={alpha.requires_grad} | "
                           f"loss={opacity_loss.item():.5f}", flush=True)
 
+            # Trust-region anchor to the pretrained head (see anchor_weight).
+            anchor_loss = torch.zeros((), device=images.device)
+            _al = infos.get('anchor_loss') if isinstance(infos, dict) else None
+            if config.anchor_weight > 0.0 and _al is not None:
+                anchor_loss = _al
+                if not getattr(train_epoch, "_anchor_logged", False):
+                    train_epoch._anchor_logged = True
+                    print(f"[anchor] LIVE w={config.anchor_weight} | "
+                          f"drift-from-pretrained={float(anchor_loss):.6f} | "
+                          f"requires_grad={anchor_loss.requires_grad}", flush=True)
+            elif config.anchor_weight > 0.0 and not getattr(train_epoch, "_anchor_warned", False):
+                train_epoch._anchor_warned = True
+                print("[anchor] INERT -- encoder returned no anchor_loss; is "
+                      "frozen_gaussian_param_head attached?", flush=True)
+
             # Geometric consistency: rasterised depth must match predicted depth
             # (upstream AnySplat 'depth_consis', weight 1.0). See depth_consis_weight.
             depth_consis_loss = torch.zeros((), device=images.device)
@@ -1175,6 +1199,7 @@ def train_epoch(
                 config.lpips_weight * lpips_loss +
                 config.opacity_weight * opacity_loss +
                 config.depth_consis_weight * depth_consis_loss +
+                config.anchor_weight * anchor_loss +
                 config.temporal_consistency_weight * temporal_loss +
                 config.scale_reg_weight * scale_reg +
                 config.sh_reg_weight * sh_reg
@@ -1239,6 +1264,7 @@ def train_epoch(
                 'train/sh_reg': sh_reg.item(),
                 'train/opacity_cov': float(opacity_loss),
                 'train/depth_consis': float(depth_consis_loss),
+                'train/anchor': float(anchor_loss),
                 # THE health metric for this run: alpha_mean is the quantity that
                 # collapsed (only 19.7% of Gaussians renderable vs 68.9% frozen).
                 # It must rise/hold, not fall.
@@ -1451,8 +1477,13 @@ def head_state_dict(model):
     full checkpoints and new head-only ones both load identically.
     """
     prefixes = trainable_prefixes()
+    # 'frozen_gaussian_param_head' is the pretrained snapshot used by the trust-region
+    # anchor. It contains 'gaussian_param_head' as a substring, so without this guard
+    # it would be saved AND would later overwrite the fine-tuned head on load -- i.e.
+    # silently restore the pretrained model. Never save it; it is rebuilt from the
+    # pretrained weights at launch.
     return {k: v for k, v in model.state_dict().items()
-            if any(pfx in k for pfx in prefixes)}
+            if any(pfx in k for pfx in prefixes) and "frozen_gaussian_param_head" not in k}
 
 
 # WHAT THE CHECKPOINT CONTAINS. This list is the SINGLE source of truth: it drives
@@ -1613,6 +1644,12 @@ def main():
     parser.add_argument("--voxel_size", type=float, default=0.001,
                         help="Fusion voxel edge length (see --hybrid_voxelize). Default 0.001 "
                              "equals the point spacing, so it merges nothing; sweep upward.")
+    parser.add_argument("--anchor_weight", type=float, default=0.0,
+                        help="Trust-region anchor: MSE between the fine-tuned and PRETRAINED raw "
+                             "Gaussian params (opacity/scale/rotation/SH) on the same tokens. "
+                             "Replaces --sh_reg_weight, which prevents divergence by pushing "
+                             "colour toward zero (grey). Symmetric, so unlike --scale_reg_weight "
+                             "it cannot drive shrinkage. Try 0.1 / 1.0.")
     parser.add_argument("--depth_consis_weight", type=float, default=0.0,
                         help="Upstream AnySplat depth-consistency loss (their weight: 1.0). Forces "
                              "the RASTERISED depth to match the depth head's prediction, so splats "
@@ -1709,6 +1746,7 @@ def main():
         sh_reg_weight=args.sh_reg_weight,
         dynamic_loss_downweight=args.dynamic_loss_downweight,
         train_loo=args.train_loo,
+        anchor_weight=args.anchor_weight,
         depth_consis_weight=args.depth_consis_weight,
         unfreeze_depth_head=args.unfreeze_depth_head,
         hybrid_voxelize=args.hybrid_voxelize,
@@ -1835,6 +1873,18 @@ def main():
 
     print("\nFreezing backbone...")
     model = freeze_backbone(model, unfreeze_depth_head=config.unfreeze_depth_head)
+
+    # Snapshot the PRETRAINED gaussian head for the trust-region anchor. Must happen
+    # AFTER the pretrained weights are loaded, so the copy is the pretrained solution
+    # (which we measured to be correct: coverage 5.34, f_dc std 0.829).
+    if config.anchor_weight > 0.0:
+        import copy as _copy
+        _ref = _copy.deepcopy(model.encoder.gaussian_param_head).eval()
+        for _p in _ref.parameters():
+            _p.requires_grad_(False)
+        model.encoder.frozen_gaussian_param_head = _ref
+        print(f"[anchor] attached frozen pretrained head "
+              f"({sum(p.numel() for p in _ref.parameters()):,} params, no grad)", flush=True)
 
     trainable_params = [p for p in model.parameters() if p.requires_grad]
     print(f"Optimizer: {len(trainable_params)} trainable tensors")

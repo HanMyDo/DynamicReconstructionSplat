@@ -170,6 +170,13 @@ FRAME_STRIDE=${15:-1}
 #   Measured consequence: pretrained coverage (splat area / scene cross-section) = 5.34,
 #   every fine-tune of ours = ~1.44, i.e. no overlap and visible holes in the PLY.
 DEPTH_CONSIS=${17:-0.0}
+# $18 ANCHOR: trust-region pull toward the PRETRAINED head's own outputs (opacity,
+#   scale, rotation, SH) on the same tokens. Replaces sh_reg ($9), which prevents the
+#   f_dc runaway by pushing colour toward ZERO = grey (measured f_dc std 0.829
+#   pretrained vs 0.133 ours, 83% of gaussians grey). Symmetric in scale, so unlike
+#   scale_reg it cannot drive shrinkage (pretrained coverage 5.34x the scene
+#   cross-section, ours 1.09-1.44). Try 0.1 or 1.0; set $9 (sh_reg) to 0 with it.
+ANCHOR=${18:-0.0}
 UNFREEZE_DEPTH=${16:-0}
 UNFREEZE_FLAG=""
 [ "${UNFREEZE_DEPTH}" = "1" ] && UNFREEZE_FLAG="--unfreeze_depth_head"
@@ -201,7 +208,8 @@ fi
 [ "${SCALE_MULT}" != "1.0" ] && TAG="${TAG}_sm$(echo ${SCALE_MULT} | tr '.' 'p')"
 [ "${FRAME_STRIDE}" != "1" ] && TAG="${TAG}_fs${FRAME_STRIDE}"
 [ "${UNFREEZE_DEPTH}" = "1" ] && TAG="${TAG}_dh"
-[ "${DEPTH_CONSIS}" != "0.0" ] && TAG="${TAG}_dc$(echo ${DEPTH_CONSIS} | tr '.' 'p')"   # own output dir: different objective, don't resume a self-reprojection ckpt
+[ "${DEPTH_CONSIS}" != "0.0" ] && TAG="${TAG}_dc$(echo ${DEPTH_CONSIS} | tr '.' 'p')"
+[ "${ANCHOR}" != "0.0" ] && TAG="${TAG}_anc$(echo ${ANCHOR} | tr '.' 'p')"   # own output dir: different objective, don't resume a self-reprojection ckpt
 OUTPUT_DIR_NAME=output_train_testbed_${TAG}_20260706
 RUN_NAME=train_testbed_${TAG}_20260706_${SLURM_JOB_ID}
 
@@ -354,6 +362,7 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp ${CONTAINER} bash -
     --frame_stride ${FRAME_STRIDE} \
     ${UNFREEZE_FLAG} \
     --depth_consis_weight ${DEPTH_CONSIS} \
+    --anchor_weight ${ANCHOR} \
     --dynamic_loss_downweight ${STATIC_DW} \
     --no_gt_poses \
     --intrinsics bonn \
