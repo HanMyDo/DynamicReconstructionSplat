@@ -316,6 +316,13 @@ class TrainingConfig:
     # timestamp -- positions still come from per-frame depth -- so it is expected to
     # affect APPEARANCE, not motion. That prediction is the point of the experiment.
     use_temporal_attention: bool = False
+    # DENSITY of the temporal fusion. The block is applied to the DPT-fused features at
+    # 1/ds resolution, so ds=4 fuses only a coarse grid. Lowering ds does NOT add
+    # parameters (same projections, ~70k) -- it applies the same fusion to 4x (ds=2) or
+    # 16x (ds=1) more spatial positions, i.e. more of the image actually gets cross-frame
+    # reasoning. num_heads is the capacity knob.
+    temporal_spatial_downsample: int = 4
+    temporal_num_heads: int = 4
     anchor_weight: float = 0.0
     depth_consis_weight: float = 0.0
     unfreeze_depth_head: bool = False
@@ -593,6 +600,8 @@ def create_model(config: TrainingConfig) -> AnySplat:
         # is NAMED after has never actually run. Default stays False so every existing
         # result reproduces bit-identically.
         use_temporal_attention=config.use_temporal_attention,
+        temporal_spatial_downsample=config.temporal_spatial_downsample,
+        temporal_num_heads=config.temporal_num_heads,
     )
 
     decoder_cfg = DecoderSplattingCUDACfg(
@@ -1659,6 +1668,12 @@ def main():
                              "Gaussian head'). Was hardcoded off since the first smoke test. Does "
                              "NOT add a target-timestamp input, so it should change appearance, "
                              "not motion -- testing that is the experiment.")
+    parser.add_argument("--temporal_spatial_downsample", type=int, default=4,
+                        help="Spatial stride of the temporal-attention grid (default 4). Lower = "
+                             "DENSER cross-frame fusion over more pixels; adds no parameters but "
+                             "costs ~4x compute/memory per halving.")
+    parser.add_argument("--temporal_num_heads", type=int, default=4,
+                        help="Attention heads in the temporal block (capacity knob).")
     parser.add_argument("--anchor_weight", type=float, default=0.0,
                         help="Trust-region anchor: MSE between the fine-tuned and PRETRAINED raw "
                              "Gaussian params (opacity/scale/rotation/SH) on the same tokens. "
@@ -1762,6 +1777,8 @@ def main():
         dynamic_loss_downweight=args.dynamic_loss_downweight,
         train_loo=args.train_loo,
         use_temporal_attention=args.use_temporal_attention,
+        temporal_spatial_downsample=args.temporal_spatial_downsample,
+        temporal_num_heads=args.temporal_num_heads,
         anchor_weight=args.anchor_weight,
         depth_consis_weight=args.depth_consis_weight,
         unfreeze_depth_head=args.unfreeze_depth_head,

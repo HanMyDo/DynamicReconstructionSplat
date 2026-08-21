@@ -192,6 +192,13 @@ TA_FLAG=""
 # $20 SMOKE: 1 -> cap each epoch at 20 train / 5 val batches. For validating a code
 #   path that has NEVER executed (e.g. the temporal head) in ~10 min instead of finding
 #   the crash 6 h in. Gets its own _smoke output dir so it cannot pollute a real run.
+# $21 TEMPORAL_DS: spatial stride of the temporal-attention grid (default 4). LOWER =
+#   DENSER fusion: the same ~70k-parameter block is applied to 4x (ds=2) or 16x (ds=1)
+#   more spatial positions, so more of the image actually gets cross-frame reasoning.
+#   Adds no parameters; costs ~4x compute/memory per halving.
+# $22 TEMPORAL_HEADS: attention heads in that block (capacity knob, default 4).
+TEMPORAL_DS=${21:-4}
+TEMPORAL_HEADS=${22:-4}
 SMOKE=${20:-0}
 SMOKE_FLAGS=""
 [ "${SMOKE}" = "1" ] && SMOKE_FLAGS="--max_train_batches 20 --max_val_batches 5"
@@ -229,7 +236,7 @@ fi
 [ "${UNFREEZE_DEPTH}" = "1" ] && TAG="${TAG}_dh"
 [ "${DEPTH_CONSIS}" != "0.0" ] && TAG="${TAG}_dc$(echo ${DEPTH_CONSIS} | tr '.' 'p')"
 [ "${ANCHOR}" != "0.0" ] && TAG="${TAG}_anc$(echo ${ANCHOR} | tr '.' 'p')"
-[ "${TEMPORAL_ATTN}" = "1" ] && TAG="${TAG}_ta"
+[ "${TEMPORAL_ATTN}" = "1" ] && TAG="${TAG}_ta_ds${TEMPORAL_DS}h${TEMPORAL_HEADS}"
 [ "${SMOKE}" = "1" ] && TAG="${TAG}_smoke"   # own output dir: different objective, don't resume a self-reprojection ckpt
 OUTPUT_DIR_NAME=output_train_testbed_${TAG}_20260706
 RUN_NAME=train_testbed_${TAG}_20260706_${SLURM_JOB_ID}
@@ -385,6 +392,8 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp ${CONTAINER} bash -
     --depth_consis_weight ${DEPTH_CONSIS} \
     --anchor_weight ${ANCHOR} \
     ${TA_FLAG} \
+    --temporal_spatial_downsample ${TEMPORAL_DS} \
+    --temporal_num_heads ${TEMPORAL_HEADS} \
     ${SMOKE_FLAGS} \
     --dynamic_loss_downweight ${STATIC_DW} \
     --no_gt_poses \
