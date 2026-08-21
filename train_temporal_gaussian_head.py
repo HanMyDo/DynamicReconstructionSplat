@@ -311,6 +311,11 @@ class TrainingConfig:
     # bounded. It is also symmetric in scale, so unlike scale_reg (which penalises
     # LARGE scales and caused a 26x collapse) it cannot drive shrinkage: pretrained
     # coverage is 5.34x the scene cross-section, ours 1.09-1.44.
+    # Cross-frame attention inside the Gaussian head: frame i's Gaussian parameters
+    # become a function of the OTHER frames' features. NOTE this does NOT add a target
+    # timestamp -- positions still come from per-frame depth -- so it is expected to
+    # affect APPEARANCE, not motion. That prediction is the point of the experiment.
+    use_temporal_attention: bool = False
     anchor_weight: float = 0.0
     depth_consis_weight: float = 0.0
     unfreeze_depth_head: bool = False
@@ -582,7 +587,12 @@ def create_model(config: TrainingConfig) -> AnySplat:
         dynamic_n_clusters=64,
         dyn_motion_groups=config.dyn_motion_groups,
         suppress_dynamic_gaussians=False,  # Bonn task: reconstruct dynamic objects, not suppress them
-        use_temporal_attention=False,
+        # EXPLICIT TEMPORAL ARCHITECTURE arm of the RQ. This was hardcoded False since
+        # the very first smoke test ("--no_temporal_attention for smoke tests; remove for
+        # real training") and never re-enabled, so the temporal head the training script
+        # is NAMED after has never actually run. Default stays False so every existing
+        # result reproduces bit-identically.
+        use_temporal_attention=config.use_temporal_attention,
     )
 
     decoder_cfg = DecoderSplattingCUDACfg(
@@ -1644,6 +1654,11 @@ def main():
     parser.add_argument("--voxel_size", type=float, default=0.001,
                         help="Fusion voxel edge length (see --hybrid_voxelize). Default 0.001 "
                              "equals the point spacing, so it merges nothing; sweep upward.")
+    parser.add_argument("--use_temporal_attention", action="store_true",
+                        help="Enable cross-frame attention in the Gaussian head (the 'temporal "
+                             "Gaussian head'). Was hardcoded off since the first smoke test. Does "
+                             "NOT add a target-timestamp input, so it should change appearance, "
+                             "not motion -- testing that is the experiment.")
     parser.add_argument("--anchor_weight", type=float, default=0.0,
                         help="Trust-region anchor: MSE between the fine-tuned and PRETRAINED raw "
                              "Gaussian params (opacity/scale/rotation/SH) on the same tokens. "
@@ -1746,6 +1761,7 @@ def main():
         sh_reg_weight=args.sh_reg_weight,
         dynamic_loss_downweight=args.dynamic_loss_downweight,
         train_loo=args.train_loo,
+        use_temporal_attention=args.use_temporal_attention,
         anchor_weight=args.anchor_weight,
         depth_consis_weight=args.depth_consis_weight,
         unfreeze_depth_head=args.unfreeze_depth_head,

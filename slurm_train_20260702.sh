@@ -177,6 +177,19 @@ DEPTH_CONSIS=${17:-0.0}
 #   scale_reg it cannot drive shrinkage (pretrained coverage 5.34x the scene
 #   cross-section, ours 1.09-1.44). Try 0.1 or 1.0; set $9 (sh_reg) to 0 with it.
 ANCHOR=${18:-0.0}
+# $19 TEMPORAL_ATTN: 1 -> enable cross-frame attention INSIDE the gaussian head (the
+#   "temporal Gaussian head" this script is named after). It was hardcoded OFF since the
+#   very first smoke test and has NEVER run. This is the EXPLICIT TEMPORAL ARCHITECTURE
+#   arm of the thesis RQ.
+#   PREDICTION: it changes APPEARANCE, not motion. Frame i's gaussian parameters become a
+#   function of the other frames' features, but positions still come from per-frame depth
+#   and no target timestamp enters any head -- so it cannot place a moving object at a
+#   held-out time. A null dynamic result here LOCALISES the failure to the position
+#   parameterisation rather than the appearance model, which is the stronger claim.
+TEMPORAL_ATTN=${19:-0}
+TA_FLAG=""
+[ "${TEMPORAL_ATTN}" = "1" ] && TA_FLAG="--use_temporal_attention"
+
 UNFREEZE_DEPTH=${16:-0}
 UNFREEZE_FLAG=""
 [ "${UNFREEZE_DEPTH}" = "1" ] && UNFREEZE_FLAG="--unfreeze_depth_head"
@@ -209,7 +222,8 @@ fi
 [ "${FRAME_STRIDE}" != "1" ] && TAG="${TAG}_fs${FRAME_STRIDE}"
 [ "${UNFREEZE_DEPTH}" = "1" ] && TAG="${TAG}_dh"
 [ "${DEPTH_CONSIS}" != "0.0" ] && TAG="${TAG}_dc$(echo ${DEPTH_CONSIS} | tr '.' 'p')"
-[ "${ANCHOR}" != "0.0" ] && TAG="${TAG}_anc$(echo ${ANCHOR} | tr '.' 'p')"   # own output dir: different objective, don't resume a self-reprojection ckpt
+[ "${ANCHOR}" != "0.0" ] && TAG="${TAG}_anc$(echo ${ANCHOR} | tr '.' 'p')"
+[ "${TEMPORAL_ATTN}" = "1" ] && TAG="${TAG}_ta"   # own output dir: different objective, don't resume a self-reprojection ckpt
 OUTPUT_DIR_NAME=output_train_testbed_${TAG}_20260706
 RUN_NAME=train_testbed_${TAG}_20260706_${SLURM_JOB_ID}
 
@@ -363,6 +377,7 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp ${CONTAINER} bash -
     ${UNFREEZE_FLAG} \
     --depth_consis_weight ${DEPTH_CONSIS} \
     --anchor_weight ${ANCHOR} \
+    ${TA_FLAG} \
     --dynamic_loss_downweight ${STATIC_DW} \
     --no_gt_poses \
     --intrinsics bonn \
