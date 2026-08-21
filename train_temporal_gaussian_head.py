@@ -1663,6 +1663,12 @@ def main():
     parser.add_argument("--voxel_size", type=float, default=0.001,
                         help="Fusion voxel edge length (see --hybrid_voxelize). Default 0.001 "
                              "equals the point spacing, so it merges nothing; sweep upward.")
+    parser.add_argument("--no_vggt4d", action="store_true",
+                        help="Train on the VANILLA VGGT backbone instead of VGGT4D. Needed for the "
+                             "CLEAN backbone ablation: comparing frozen-vanilla vs frozen-VGGT4D is "
+                             "confounded, because the pretrained AnySplat head was trained on VGGT "
+                             "features and may fail to exploit VGGT4D features regardless of their "
+                             "quality. Training the SAME recipe on both backbones removes that.")
     parser.add_argument("--use_temporal_attention", action="store_true",
                         help="Enable cross-frame attention in the Gaussian head (the 'temporal "
                              "Gaussian head'). Was hardcoded off since the first smoke test. Does "
@@ -1776,6 +1782,7 @@ def main():
         sh_reg_weight=args.sh_reg_weight,
         dynamic_loss_downweight=args.dynamic_loss_downweight,
         train_loo=args.train_loo,
+        use_vggt4d=not args.no_vggt4d,
         use_temporal_attention=args.use_temporal_attention,
         temporal_spatial_downsample=args.temporal_spatial_downsample,
         temporal_num_heads=args.temporal_num_heads,

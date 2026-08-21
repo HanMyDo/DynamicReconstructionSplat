@@ -197,6 +197,15 @@ TA_FLAG=""
 #   more spatial positions, so more of the image actually gets cross-frame reasoning.
 #   Adds no parameters; costs ~4x compute/memory per halving.
 # $22 TEMPORAL_HEADS: attention heads in that block (capacity knob, default 4).
+# $23 VANILLA: 1 -> train on the VANILLA VGGT backbone (no VGGT4D, no mask-driven token
+#   suppression). This is the CLEAN backbone ablation for the thesis RQ: the frozen-head
+#   comparison (frozen-vanilla vs frozen-VGGT4D, measured +0.06 dB) is CONFOUNDED, since
+#   the pretrained AnySplat head was trained on VGGT features and may not exploit VGGT4D
+#   features whatever their quality. Training the same recipe on both backbones isolates
+#   the backbone properly.
+VANILLA=${23:-0}
+VAN_FLAG=""
+[ "${VANILLA}" = "1" ] && VAN_FLAG="--no_vggt4d"
 TEMPORAL_DS=${21:-4}
 TEMPORAL_HEADS=${22:-4}
 SMOKE=${20:-0}
@@ -237,6 +246,7 @@ fi
 [ "${DEPTH_CONSIS}" != "0.0" ] && TAG="${TAG}_dc$(echo ${DEPTH_CONSIS} | tr '.' 'p')"
 [ "${ANCHOR}" != "0.0" ] && TAG="${TAG}_anc$(echo ${ANCHOR} | tr '.' 'p')"
 [ "${TEMPORAL_ATTN}" = "1" ] && TAG="${TAG}_ta_ds${TEMPORAL_DS}h${TEMPORAL_HEADS}"
+[ "${VANILLA}" = "1" ] && TAG="${TAG}_van"
 [ "${SMOKE}" = "1" ] && TAG="${TAG}_smoke"   # own output dir: different objective, don't resume a self-reprojection ckpt
 OUTPUT_DIR_NAME=output_train_testbed_${TAG}_20260706
 RUN_NAME=train_testbed_${TAG}_20260706_${SLURM_JOB_ID}
@@ -391,6 +401,7 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp ${CONTAINER} bash -
     ${UNFREEZE_FLAG} \
     --depth_consis_weight ${DEPTH_CONSIS} \
     --anchor_weight ${ANCHOR} \
+    ${VAN_FLAG} \
     ${TA_FLAG} \
     --temporal_spatial_downsample ${TEMPORAL_DS} \
     --temporal_num_heads ${TEMPORAL_HEADS} \
