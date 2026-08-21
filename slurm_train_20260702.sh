@@ -189,6 +189,12 @@ ANCHOR=${18:-0.0}
 TEMPORAL_ATTN=${19:-0}
 TA_FLAG=""
 [ "${TEMPORAL_ATTN}" = "1" ] && TA_FLAG="--use_temporal_attention"
+# $20 SMOKE: 1 -> cap each epoch at 20 train / 5 val batches. For validating a code
+#   path that has NEVER executed (e.g. the temporal head) in ~10 min instead of finding
+#   the crash 6 h in. Gets its own _smoke output dir so it cannot pollute a real run.
+SMOKE=${20:-0}
+SMOKE_FLAGS=""
+[ "${SMOKE}" = "1" ] && SMOKE_FLAGS="--max_train_batches 20 --max_val_batches 5"
 
 UNFREEZE_DEPTH=${16:-0}
 UNFREEZE_FLAG=""
@@ -223,7 +229,8 @@ fi
 [ "${UNFREEZE_DEPTH}" = "1" ] && TAG="${TAG}_dh"
 [ "${DEPTH_CONSIS}" != "0.0" ] && TAG="${TAG}_dc$(echo ${DEPTH_CONSIS} | tr '.' 'p')"
 [ "${ANCHOR}" != "0.0" ] && TAG="${TAG}_anc$(echo ${ANCHOR} | tr '.' 'p')"
-[ "${TEMPORAL_ATTN}" = "1" ] && TAG="${TAG}_ta"   # own output dir: different objective, don't resume a self-reprojection ckpt
+[ "${TEMPORAL_ATTN}" = "1" ] && TAG="${TAG}_ta"
+[ "${SMOKE}" = "1" ] && TAG="${TAG}_smoke"   # own output dir: different objective, don't resume a self-reprojection ckpt
 OUTPUT_DIR_NAME=output_train_testbed_${TAG}_20260706
 RUN_NAME=train_testbed_${TAG}_20260706_${SLURM_JOB_ID}
 
@@ -378,6 +385,7 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp ${CONTAINER} bash -
     --depth_consis_weight ${DEPTH_CONSIS} \
     --anchor_weight ${ANCHOR} \
     ${TA_FLAG} \
+    ${SMOKE_FLAGS} \
     --dynamic_loss_downweight ${STATIC_DW} \
     --no_gt_poses \
     --intrinsics bonn \
