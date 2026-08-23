@@ -112,21 +112,29 @@ class TemporalAttentionBlock(nn.Module):
         # Apply cross-frame attention (each spatial location attends across all frames)
         attn_out, _ = self.attn(x_normed, x_normed, x_normed)
 
-        # Residual connection with learnable scaling (starts at 0, so initially identity)
-        x_down = x_down + self.output_scale.tanh() * attn_out
+        # ONLY the attention DELTA leaves this block -- never the pooled features.
+        # BUG FIXED (Aug 2026): the previous version added the residual in DOWNSAMPLED
+        # space and then returned upsample(x_down), discarding the full-resolution input
+        # entirely. That made the block return upsample(avgpool(x)) even at
+        # output_scale == 0, i.e. it LOW-PASS FILTERED the DPT features by the
+        # downsample factor unconditionally -- the opposite of the "initially identity"
+        # the comment claimed. Measured cost: -0.54 psnr / -0.59 static / -0.28 dyn and
+        # a suspiciously scene-independent LPIPS penalty (+0.0260/+0.0274/+0.0264 on
+        # three different sequences), which is the signature of a fixed blur rather than
+        # of attention.
+        delta = self.output_scale.tanh() * attn_out          # [B*H'*W', S, C]
 
-        # Reshape back: [B*H'*W', S, C] -> [B, H', W', S, C] -> [B, S, C, H', W']
-        x_down = x_down.reshape(B, H_down, W_down, S, C)
-        x_down = x_down.permute(0, 3, 4, 1, 2)  # [B, S, C, H', W']
-        x_down = x_down.reshape(B * S, C, H_down, W_down)  # [B*S, C, H', W']
+        # Reshape back: [B*H'*W', S, C] -> [B, H', W', S, C] -> [B*S, C, H', W']
+        delta = delta.reshape(B, H_down, W_down, S, C)
+        delta = delta.permute(0, 3, 4, 1, 2)                 # [B, S, C, H', W']
+        delta = delta.reshape(B * S, C, H_down, W_down)
 
-        # Upsample back to original resolution
+        # Upsample ONLY the delta, then add to the untouched full-res input, so the
+        # block is a true identity at initialisation and preserves high-frequency detail.
         if self.spatial_downsample > 1:
-            x_out = F.interpolate(x_down, size=(H, W), mode='bilinear', align_corners=True)
-        else:
-            x_out = x_down
+            delta = F.interpolate(delta, size=(H, W), mode='bilinear', align_corners=True)
 
-        return x_out
+        return x + delta
 
 
     # def __init__(self,
