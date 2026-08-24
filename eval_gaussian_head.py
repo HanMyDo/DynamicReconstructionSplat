@@ -62,13 +62,56 @@ from src.misc.image_io import save_interpolated_video, save_image
 from src.model.ply_export import export_ply
 
 
+# Config fields that change the MODEL ARCHITECTURE, not just its behaviour. The eval
+# model must be built with the same values the checkpoint was trained with, or the
+# corresponding weights have nowhere to load and are silently dropped.
+# This bit us: eval never set use_temporal_attention, so a temporally-trained checkpoint
+# was evaluated on a model with NO temporal block -- its 8 tensors were skipped by the
+# `k in current` filter, and the head weights (trained alongside that block) were loaded
+# into an architecture missing it. Both temporal evals were therefore meaningless.
+# Only fields that OWN SAVED PARAMETERS belong here. use_vggt4d / hybrid_voxelize /
+# voxel_size change behaviour but add no weights, and use_vggt4d in particular is set
+# explicitly on the CLI (--no_vggt4d) for the backbone ablation -- the checkpoint must
+# not silently override that. Anything else that mismatches is caught by the orphan
+# guard below rather than being second-guessed here.
+_ARCH_FIELDS = (
+    "use_temporal_attention",
+    "temporal_spatial_downsample",
+    "temporal_num_heads",
+    "temporal_use_pe",
+)
+
+
+def _apply_checkpoint_arch(config, ckpt, override_keys=()):
+    """Copy architecture-affecting fields from the checkpoint's stored config."""
+    saved_cfg = ckpt.get("config") or {}
+    if not saved_cfg:
+        print("[arch] checkpoint has no stored config -- using CLI/default architecture",
+              flush=True)
+        return config
+    changed = []
+    for f in _ARCH_FIELDS:
+        if f in override_keys or f not in saved_cfg:
+            continue
+        want = saved_cfg[f]
+        if hasattr(config, f) and getattr(config, f) != want:
+            changed.append(f"{f}: {getattr(config, f)} -> {want}")
+            setattr(config, f, want)
+    print(f"[arch] from checkpoint: {changed if changed else 'no changes needed'}", flush=True)
+    return config
+
+
 def load_model(checkpoint_path, config, device):
+    ckpt = None
+    if checkpoint_path is not None:
+        print(f"Loading checkpoint: {checkpoint_path}")
+        ckpt = torch.load(checkpoint_path, map_location="cpu")
+        config = _apply_checkpoint_arch(config, ckpt)
+
     model = create_model(config)
     model = model.to(device)
 
     if checkpoint_path is not None:
-        print(f"Loading checkpoint: {checkpoint_path}")
-        ckpt = torch.load(checkpoint_path, map_location="cpu")
         # Only restore gaussian head weights — never the frozen VGGT4D backbone —
         # so the backbone always reflects the freshly loaded pretrained weights.
         saved = ckpt["model_state_dict"]
@@ -88,6 +131,16 @@ def load_model(checkpoint_path, config, device):
         # weights and is never saved by the current code anyway).
         head_keys = {k: v for k, v in saved.items()
                      if k in current and "aggregator" not in k}
+        # Any saved tensor with NO matching key in the model means the eval architecture
+        # differs from the trained one. Previously these were dropped in silence, which
+        # is how a temporally-trained checkpoint got evaluated without its temporal block.
+        orphans = [k for k in saved
+                   if k not in current and "aggregator" not in k]
+        if orphans:
+            raise RuntimeError(
+                f"{len(orphans)} saved tensors have no matching module in the eval model "
+                f"(e.g. {orphans[:4]}). The evaluation architecture does not match the "
+                "trained one -- refusing to evaluate a different model than was trained.")
         prefixes = ckpt.get("saved_prefixes")
         groups = sorted({k.split(".")[1] if k.startswith("encoder.") else k.split(".")[0]
                          for k in head_keys})
