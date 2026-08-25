@@ -23,8 +23,10 @@ MASKS=output_dyn_masks_precomputed_cs16_r518_st3_fs0
 TAG=20260825fig
 COMMON="--eval_loo --frame_stride 8 --gain_correct --dyn_mask_dir ${MASKS} --max_image_batches 1"
 
-if [ ! -f "${CKPT}" ]; then
-  echo "ERROR: checkpoint not found: ${CKPT}"; exit 1
+if [ ${DRY} -eq 0 ] && [ ! -f "${CKPT}" ]; then
+  echo "ERROR: checkpoint not found: ${CKPT}"
+  echo "(run this ON THE CLUSTER; --dry works anywhere)"
+  exit 1
 fi
 
 # sequence : window : why that window
