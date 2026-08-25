@@ -11,7 +11,11 @@
 # The .ply always comes from the LAST processed window, so --max_image_batches 1
 # at --image_batch_start N makes the export exactly window N.
 #
-# USAGE:  sh make_ply_figures.sh          (submits everything, waits, prints scp)
+# USAGE:  nohup sh make_ply_figures.sh > ply_figs.log 2>&1 &   <-- survives a dropped
+#           connection; plain `sh make_ply_figures.sh` dies with the shell (the already
+#           submitted slurm job keeps running, but the loop stops). Re-running is safe:
+#           finished outputs are skipped.
+#         sh make_ply_figures.sh          (submits everything, waits, prints scp)
 #         sh make_ply_figures.sh --dry    (print what it would do)
 # =============================================================================
 
@@ -44,7 +48,19 @@ submit_and_wait() {
     _ck="${CKPT}";  _extra=""
   fi
   _flags="${_extra} ${COMMON} --image_batch_start ${_win}"
+  if [ "${_mode}" = "vanilla" ]; then
+    _out="output_eval_frozen_vggt_loo_s8_gc_pcm_nf6_${_seq}_${TAG}"
+  else
+    _out="output_eval_ft_loo_s8_gc_pcm_nf6_${_seq}_${TAG}"
+  fi
   echo ">>> ${_mode} / ${_seq} @ window ${_win}"
+  # IDEMPOTENT: a finished job leaves gaussians.ply. Re-running the script after an
+  # interruption (dropped VPN kills the foreground loop, though not the slurm jobs)
+  # then only does the work that is actually missing.
+  if [ -f "${_out}/gaussians.ply" ]; then
+    echo "    already done -> ${_out}/gaussians.ply (skipping)"
+    return
+  fi
   if [ ${DRY} -eq 1 ]; then
     echo "    EVAL_DATE=${TAG} sbatch slurm_eval_compositing_20260711.sh \"${_ck}\" \"${_flags}\" rgbd_bonn_${_seq} 6"
     return
