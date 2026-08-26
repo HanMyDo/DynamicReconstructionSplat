@@ -43,6 +43,10 @@ CHUNK_SIZE=${2:-16}
 DET_RES=${3:-518}
 STAGES=${4:-3}
 STRIDE=${5:-0}
+# $6 THREADS: BLAS/OMP thread cap inside the container (default 32). MUST stay well below
+# the node's core count on H200 (120 cores) or OpenBLAS segfaults in Stage 1 -- see the
+# comment at the container invocation below.
+THREADS=${6:-32}
 
 TUM_ZIP="/mnt/datasets/tum-rgbd/${SEQUENCE}.zip"
 REPO="/mnt/home/hanmydo/DynamicReconstructionSplat"
@@ -97,6 +101,18 @@ enroot create --name ${CONTAINER} ~/anysplat.sqsh
 enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp ${CONTAINER} bash -c "
   cd ${REPO}
   export CUDA_VISIBLE_DEVICES=0
+  # THREAD CAP -- required on the H200 nodes (120 cores). The container's OpenBLAS was
+  # compiled for fewer threads, so on a high-core node it warns
+  #   'precompiled NUM_THREADS exceeded, adding auxiliary array for thread metadata'
+  # and then SEGFAULTS (exit 139) inside Stage 1's clustering/Otsu, which is
+  # numpy/sklearn and therefore OpenBLAS-heavy. It never happened on the 24g nodes
+  # because they have far fewer cores. Not a memory problem: the crash came at
+  # 'Extracting dynamic maps', before Stage 3/open3d runs at all.
+  export OPENBLAS_NUM_THREADS=${THREADS:-32}
+  export OMP_NUM_THREADS=${THREADS:-32}
+  export MKL_NUM_THREADS=${THREADS:-32}
+  export NUMEXPR_NUM_THREADS=${THREADS:-32}
+  echo \"thread caps: OPENBLAS/OMP/MKL = \${OPENBLAS_NUM_THREADS}\"
   nvidia-smi
   pip install open3d --quiet
 
