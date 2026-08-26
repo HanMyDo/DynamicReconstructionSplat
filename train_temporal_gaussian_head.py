@@ -81,9 +81,19 @@ TUM_FR1_INTRINSICS = {
     "width": 640, "height": 480,
 }
 
+# TUM RGB-D fr2 sequences (e.g. desk_with_person). Added Aug 2026 -- it was missing,
+# so an fr2 sequence would silently have run with fr3 intrinsics (fx 535.4 vs 520.9,
+# a ~3% focal error) and quietly distorted the reconstruction.
+TUM_FR2_INTRINSICS = {
+    "fx": 520.9, "fy": 521.0,
+    "cx": 325.1, "cy": 249.7,
+    "width": 640, "height": 480,
+}
+
 INTRINSICS_PRESETS = {
     "bonn": BONN_INTRINSICS,
     "tum_fr1": TUM_FR1_INTRINSICS,
+    "tum_fr2": TUM_FR2_INTRINSICS,
     "tum_fr3": TUM_FR3_INTRINSICS,
 }
 

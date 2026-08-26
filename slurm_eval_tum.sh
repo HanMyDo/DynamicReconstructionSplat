@@ -35,6 +35,16 @@ EXTRA_FLAGS=${2:-}
 EVAL_SEQ=${3:-rgbd_dataset_freiburg3_walking_xyz}
 NUM_FRAMES=${4:-6}
 
+# INTRINSICS FROM THE SEQUENCE NAME. TUM's three camera generations have different
+# calibrations (fr1 517.3 / fr2 520.9 / fr3 535.4), and picking the wrong one silently
+# distorts the reconstruction rather than erroring -- so derive it instead of hardcoding.
+case "${EVAL_SEQ}" in
+  *freiburg1*) INTR=tum_fr1 ;;
+  *freiburg2*) INTR=tum_fr2 ;;
+  *freiburg3*) INTR=tum_fr3 ;;
+  *) echo "ERROR: cannot infer intrinsics from sequence name '${EVAL_SEQ}'"; exit 1 ;;
+esac
+
 TUM_ZIP="/mnt/datasets/tum-rgbd/${EVAL_SEQ}.zip"
 REPO="/mnt/home/hanmydo/DynamicReconstructionSplat"
 VGGT4D_CKPT="${REPO}/ckpts/vggt4d_model_tracker_fixed_e20.pt"
@@ -73,6 +83,7 @@ echo "=============================================="
 echo "TUM eval — ${EVAL_SEQ}   (ZERO-SHOT: trained on Bonn only)"
 echo "  mode       : ${MODE_TAG}   (${CKPT_ARG})"
 echo "  extra flags: ${EXTRA_FLAGS}"
+echo "  intrinsics : ${INTR}"
 echo "  output dir : ${OUT_DIR}"
 echo "  node: $(hostname)   time: $(date)"
 echo "=============================================="
@@ -105,7 +116,7 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp ${CONTAINER} bash -
   python eval_gaussian_head.py \
     --data_dir ${TUM_DATA} \
     --dataset_name ${EVAL_SEQ} \
-    --intrinsics tum_fr3 \
+    --intrinsics ${INTR} \
     --num_frames ${NUM_FRAMES} \
     --split all \
     --vggt4d_weights_path ${VGGT4D_CKPT} \
