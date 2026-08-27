@@ -268,6 +268,15 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
     last_dyn_mask = None
 
     for batch_idx, batch in enumerate(dataloader):
+        # SUBSAMPLE THE WINDOWS. Metrics are averaged over every processed window, and
+        # the windows are heavily overlapping sliding windows, so evaluating every Nth
+        # one still spans the whole sequence at a fraction of the cost.
+        # Needed for long sequences: TUM fr2/desk_with_person has 3670 windows (22020
+        # frames) vs ~950 for a Bonn sequence, so a full pass runs >2h and the 24g
+        # watchdog cancels it for low GPU-memory utilisation (41.7% < 50% threshold --
+        # an nf6 eval only uses ~10GB of a 24GB card).
+        if batch_stride > 1 and (batch_idx % batch_stride) != 0:
+            continue
         images = batch["images"].to(device)
         if images.dim() == 4:
             images = images.unsqueeze(0)
@@ -517,6 +526,7 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
         "psnr_dynamic": total_psnr_dyn / n_dyn_frames if n_dyn_frames > 0 else None,
         "psnr_static": total_psnr_static / n_static_frames if n_static_frames > 0 else None,
         "avg_dyn_pixel_fraction": avg_dyn_pixel_frac,
+        "batch_stride": batch_stride,
         "n_frames": n_frames,
         "n_dynamic_frames": n_dyn_frames,
         "n_static_frames": n_static_frames,
@@ -583,6 +593,11 @@ def main():
                         help="Render dynamic Gaussians ONLY into the frame they were unprojected from "
                              "(static ones still render into every frame). Removes the multi-frame ghosting "
                              "of moving objects. Requires VGGT4D dynamic detection. Off = original behaviour.")
+    parser.add_argument("--batch_stride", type=int, default=1,
+                        help="Evaluate only every Nth window. Windows are heavily overlapping, so "
+                             "this still spans the whole sequence for 1/N the runtime. Needed on long "
+                             "sequences (TUM fr2 has 3670 windows) where a full pass exceeds 2h and "
+                             "the 24g watchdog cancels it for low GPU-memory utilisation.")
     parser.add_argument("--image_save_every", type=int, default=1,
                         help="Save a comparison image every Nth evaluated batch. The evaluated "
                              "batches are CONSECUTIVE sliding windows (400,401,...), so they are "
@@ -690,6 +705,7 @@ def main():
     evaluate(model, dataloader, config, args.output_dir, device,
              scale_mult=args.scale_mult,
              image_save_every=args.image_save_every,
+             batch_stride=args.batch_stride,
              max_image_batches=args.max_image_batches,
              image_batch_start=args.image_batch_start,
              per_frame_dynamic=args.per_frame_dynamic,
