@@ -234,7 +234,7 @@ def umeyama_ate(pred_xyz, gt_xyz):
 def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50, image_batch_start=0,
              per_frame_dynamic=False, leave_one_out=False, precomputed_mask_dir=None,
              track_dynamic=False, gain_correct=False, scale_mult=1.0,
-             image_save_every=1):
+             image_save_every=1, batch_stride=1):
     os.makedirs(output_dir, exist_ok=True)
     images_dir = os.path.join(output_dir, "images")
     dyn_mask_dir = os.path.join(output_dir, "dyn_mask")
