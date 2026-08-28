@@ -234,7 +234,7 @@ def umeyama_ate(pred_xyz, gt_xyz):
 def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50, image_batch_start=0,
              per_frame_dynamic=False, leave_one_out=False, precomputed_mask_dir=None,
              track_dynamic=False, gain_correct=False, scale_mult=1.0,
-             image_save_every=1, batch_stride=1):
+             image_save_every=1, batch_stride=1, images_only=False):
     os.makedirs(output_dir, exist_ok=True)
     images_dir = os.path.join(output_dir, "images")
     dyn_mask_dir = os.path.join(output_dir, "dyn_mask")
@@ -277,6 +277,17 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
         # watchdog cancels it for low GPU-memory utilisation (41.7% < 50% threshold --
         # an nf6 eval only uses ~10GB of a 24GB card).
         if batch_stride > 1 and (batch_idx % batch_stride) != 0:
+            continue
+        # FIGURES-ONLY FAST PATH. Saving images is gated to a batch window, but the
+        # encoder still ran on all ~920 windows, so re-rendering one region for a figure
+        # cost a full ~25 min eval. With --images_only every batch outside the window is
+        # skipped BEFORE the forward pass, turning figure iteration into ~1 min.
+        # The metrics that come out are then computed over the saved window ONLY and are
+        # NOT comparable to a full run -- metrics.json records this as images_only.
+        if images_only and not (image_batch_start <= batch_idx
+                                < image_batch_start + max_image_batches):
+            if batch_idx >= image_batch_start + max_image_batches:
+                break                                   # window passed; nothing left to save
             continue
         images = batch["images"].to(device)
         if images.dim() == 4:
@@ -534,6 +545,8 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
         "psnr_static": total_psnr_static / n_static_frames if n_static_frames > 0 else None,
         "avg_dyn_pixel_fraction": avg_dyn_pixel_frac,
         "batch_stride": batch_stride,
+        # true = metrics cover only the saved image window, NOT the sequence
+        "images_only": images_only,
         "n_frames": n_frames,
         "n_dynamic_frames": n_dyn_frames,
         "n_static_frames": n_static_frames,
@@ -609,6 +622,13 @@ def main():
                              "this still spans the whole sequence for 1/N the runtime. Needed on long "
                              "sequences (TUM fr2 has 3670 windows) where a full pass exceeds 2h and "
                              "the 24g watchdog cancels it for low GPU-memory utilisation.")
+    parser.add_argument("--images_only", action="store_true",
+                        help="FIGURES ONLY: skip every batch outside the --image_batch_start / "
+                             "--max_image_batches window before the forward pass, so rendering a "
+                             "chosen region takes ~1 min instead of a full ~25 min eval. The "
+                             "resulting metrics cover ONLY that window and are NOT comparable to a "
+                             "full run (metrics.json records images_only=true). Use a separate "
+                             "output dir (EVAL_DATE=...) so it cannot overwrite a real result.")
     parser.add_argument("--image_save_every", type=int, default=1,
                         help="Save a comparison image every Nth evaluated batch. The evaluated "
                              "batches are CONSECUTIVE sliding windows (400,401,...), so they are "
@@ -759,6 +779,7 @@ def main():
              scale_mult=args.scale_mult,
              image_save_every=args.image_save_every,
              batch_stride=args.batch_stride,
+             images_only=args.images_only,
              max_image_batches=args.max_image_batches,
              image_batch_start=args.image_batch_start,
              per_frame_dynamic=args.per_frame_dynamic,
