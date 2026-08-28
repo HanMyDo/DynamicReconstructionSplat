@@ -61,6 +61,8 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
         dyn_group_pred: Tensor | None = None,
         dyn_group_valid: Tensor | None = None,
         gaussian_group_idx: Tensor | None = None,
+        gaussian_disp: Tensor | None = None,
+        gaussian_disp_valid: Tensor | None = None,
         per_frame_compositing: bool = False,
     ) -> DecoderOutput:
         B, V, _, _  = intrinsics.shape
@@ -160,7 +162,20 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
                 # predict_centroid_leave_one_out), so this never reads frame j and
                 # stays valid under leave-one-out. Static Gaussians are untouched.
                 xyz_ij = xyz_i
-                if (dyn_group_centroid is not None and dyn_group_pred is not None
+                if (gaussian_disp is not None and gaussian_frame_idx is not None
+                        and gaussian_dyn_flag is not None):
+                    # SCENE FLOW (takes precedence): per-Gaussian displacement toward
+                    # target frame j, interpolated from the tracks' OBSERVED positions
+                    # at j (direct correspondence — see dyn_motion.py "UPGRADE").
+                    # gaussian_disp[i][:, j] is already zero where invalid/own-frame;
+                    # the gates below only make that explicit.
+                    fidx = gaussian_frame_idx[i].to(xyz_i.device).long().clamp_min(0)
+                    dynf = gaussian_dyn_flag[i].to(xyz_i.device).float()
+                    move = dynf * (1.0 - (fidx == j).float())
+                    if gaussian_disp_valid is not None:
+                        move = move * gaussian_disp_valid[i].to(xyz_i.device)[:, j].float()
+                    xyz_ij = xyz_i + move.unsqueeze(-1) * gaussian_disp[i].to(xyz_i.device)[:, j].float()
+                elif (dyn_group_centroid is not None and dyn_group_pred is not None
                         and gaussian_group_idx is not None and gaussian_frame_idx is not None
                         and gaussian_dyn_flag is not None):
                     # PIECEWISE-RIGID: each Gaussian follows the group (moving object)
@@ -243,6 +258,8 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
         dyn_group_pred: Tensor | None = None,
         dyn_group_valid: Tensor | None = None,
         gaussian_group_idx: Tensor | None = None,
+        gaussian_disp: Tensor | None = None,
+        gaussian_disp_valid: Tensor | None = None,
         per_frame_compositing: bool = False,
     ) -> DecoderOutput:
 
@@ -252,5 +269,6 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
                                  dyn_centroid_valid=dyn_centroid_valid,
                                  dyn_group_centroid=dyn_group_centroid, dyn_group_pred=dyn_group_pred,
                                  dyn_group_valid=dyn_group_valid, gaussian_group_idx=gaussian_group_idx,
+                                 gaussian_disp=gaussian_disp, gaussian_disp_valid=gaussian_disp_valid,
                                  per_frame_compositing=per_frame_compositing)
 

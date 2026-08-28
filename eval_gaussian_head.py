@@ -244,6 +244,7 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
               f"(overrides live detection for the dyn/static split)")
     n_precomp_hits = 0
     n_group_motion = 0   # batches where the tracker-driven motion model was available
+    n_knn_motion = 0     # batches where the scene-flow displacement field was available
     total_gain = 0.0; n_gain = 0            # mean applied exposure gain (diagnostic)
     total_ate = 0.0;  n_ate = 0             # per-window Sim(3)-aligned ATE
 
@@ -364,9 +365,15 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
             dyn_group_pred=(infos.get("dyn_group_pred") if track_dynamic else None),
             dyn_group_valid=(infos.get("dyn_group_valid") if track_dynamic else None),
             gaussian_group_idx=(infos.get("gaussian_group_idx") if track_dynamic else None),
+            # Scene-flow displacement field (dyn_motion_knn > 0). Present in infos only
+            # when the encoder ran phase A+B, so no extra config gate needed here.
+            gaussian_disp=(infos.get("gaussian_disp") if track_dynamic else None),
+            gaussian_disp_valid=(infos.get("gaussian_disp_valid") if track_dynamic else None),
         )
         if infos.get("dyn_group_pred") is not None:
             n_group_motion += 1
+        if infos.get("gaussian_disp") is not None:
+            n_knn_motion += 1
         pred_rgb = decoder_out.color  # [B, V, 3, H, W] in [0, 1]
 
         # --- per-window camera-trajectory error (Sim3-aligned ATE) -------------
@@ -537,6 +544,8 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
         "track_dynamic": track_dynamic,
         "dyn_motion_groups": config.dyn_motion_groups,
         "n_batches_with_group_motion": n_group_motion,
+        "dyn_motion_knn": getattr(config, "dyn_motion_knn", 0),
+        "n_batches_with_knn_motion": n_knn_motion,
         "mask_source": ("precomputed" if precomputed_mask_dir is not None else "live_detection"),
         "precomputed_mask_dir": precomputed_mask_dir,
         "n_batches_with_precomputed_mask": n_precomp_hits,
@@ -629,6 +638,22 @@ def main():
                              "(tracker-driven piecewise-rigid motion). 1 = one rigid motion for all "
                              "dynamic content (the crude version that failed); 3-4 lets e.g. a person "
                              "and a box move differently. Needs VGGT4D (uses its point tracker).")
+    parser.add_argument("--dyn_motion_knn", type=int, default=0,
+                        help="With --track_dynamic: >0 enables TRACK-CORRESPONDENCE SCENE FLOW and "
+                             "sets K (nearest tracks per Gaussian). Each dynamic Gaussian is displaced "
+                             "toward target frame j by the inverse-distance-weighted OBSERVED flow of "
+                             "its K nearest tracks (non-rigid, no extrapolation). Takes precedence "
+                             "over --dyn_motion_groups. PROTOCOL: uses frame j's pixels for motion "
+                             "geometry ('motion fitted on full video, appearance held out') — the "
+                             "strict no-look variant is the groups mode; report both.")
+    parser.add_argument("--dyn_motion_n_query", type=int, default=1024,
+                        help="Scene-flow mode: total tracker query budget, split across query frames.")
+    parser.add_argument("--dyn_motion_gate_mult", type=float, default=3.0,
+                        help="Scene-flow mode: trust radius = mult x median track NN spacing; "
+                             "Gaussians farther than this from every track do not move.")
+    parser.add_argument("--dyn_motion_query_first_only", action="store_true",
+                        help="Scene-flow mode: sample tracker queries only from frame 0's dynamic "
+                             "pixels (legacy behaviour) instead of from every frame.")
     parser.add_argument("--gain_correct", action="store_true",
                         help="CONTROL: rescale each rendered frame by its optimal least-squares "
                              "scalar before computing metrics (pure exposure fix, no structural "
@@ -665,7 +690,12 @@ def main():
         hybrid_voxelize=args.hybrid_voxelize,
         voxel_size=args.voxel_size,
         vggt4d_weights_path=args.vggt4d_weights_path,
-        dyn_motion_groups=(args.dyn_motion_groups if args.track_dynamic else 0),
+        dyn_motion_groups=(args.dyn_motion_groups
+                           if (args.track_dynamic and args.dyn_motion_knn == 0) else 0),
+        dyn_motion_knn=(args.dyn_motion_knn if args.track_dynamic else 0),
+        dyn_motion_n_query=args.dyn_motion_n_query,
+        dyn_motion_query_all=not args.dyn_motion_query_first_only,
+        dyn_motion_gate_mult=args.dyn_motion_gate_mult,
     )
 
     print(f"\nLoading {args.split} dataset...")
@@ -698,6 +728,11 @@ def main():
             "mode": "finetuned" if args.checkpoint else "baseline",
             "per_frame_dynamic": args.per_frame_dynamic,
             "leave_one_out": args.eval_loo,
+            "track_dynamic": args.track_dynamic,
+            "dyn_motion_knn": args.dyn_motion_knn if args.track_dynamic else 0,
+            "dyn_motion_n_query": args.dyn_motion_n_query,
+            "dyn_motion_gate_mult": args.dyn_motion_gate_mult,
+            "dyn_motion_query_all": not args.dyn_motion_query_first_only,
         }, f, indent=2)
 
     print(f"\nRunning evaluation on {args.split} split ({len(dataset)} batches)...")

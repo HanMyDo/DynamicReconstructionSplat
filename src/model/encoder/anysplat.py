@@ -50,7 +50,11 @@ from src.model.encoder.vggt.layers.mlp import Mlp
 from src.model.encoder.vggt.models.vggt import VGGT
 from src.model.encoder.vggt4d.models.vggt4d import VGGTFor4D
 from src.model.encoder.vggt4d.utils import organize_qk_dict
-from src.model.encoder.dyn_motion import compute_dyn_group_motion
+from src.model.encoder.dyn_motion import (
+    compute_dyn_group_motion,
+    collect_dyn_tracks,
+    knn_flow_displacement,
+)
 from src.model.encoder.vggt4d.masks import (
     extract_dyn_map,
     cluster_attention_maps,
@@ -139,6 +143,15 @@ class EncoderAnySplatCfg:
     enable_dynamic_detection: bool = False
     dynamic_mask_threshold: Optional[float] = None  # None = use adaptive threshold
     dyn_motion_groups: int = 0   # >0 enables tracker-driven piecewise-rigid motion (K groups)
+    # TRACK-CORRESPONDENCE SCENE FLOW (dyn_motion.py "UPGRADE"): per-Gaussian
+    # displacement interpolated from the K nearest tracks' OBSERVED positions at the
+    # target frame (non-rigid, no extrapolation). >0 = K neighbours; takes precedence
+    # over dyn_motion_groups. Uses frame-j geometry for motion ("motion fitted on the
+    # full video, appearance held out") — the strict no-look variant is the groups mode.
+    dyn_motion_knn: int = 0
+    dyn_motion_n_query: int = 1024   # total tracker query budget (split across query frames)
+    dyn_motion_query_all: bool = True  # queries from every frame's dynamic pixels (not just frame 0)
+    dyn_motion_gate_mult: float = 3.0  # trust radius = mult x median track NN spacing
     dynamic_n_clusters: int = 64  # Number of clusters for KMeans refinement
     suppress_dynamic_gaussians: bool = False
     # Temporal attention options for Gaussian head (Fix 2 for dynamic handling)
@@ -905,11 +918,38 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
             )
             del _out_ref
 
-        # --- piecewise-rigid motion of the dynamic content (tracker-driven) -------
+        # --- motion of the dynamic content (tracker-driven) -----------------------
         # Must run while the aggregated tokens still exist (the tracker consumes them).
         self._dyn_group_map = None
         self._dyn_group_motion = None
-        if (dyn_mask is not None and self.cfg.enable_dynamic_detection
+        self._dyn_tracks = None
+        _knn_k = getattr(self.cfg, "dyn_motion_knn", 0)
+        # The scene-flow mode needs a mask BEFORE the tokens are freed. On the
+        # vanilla-VGGT path the override is normally applied only later (Gaussian-grid
+        # alignment below); pull it forward here so tracking works there too.
+        _dm_motion = dyn_mask
+        if _dm_motion is None and dyn_mask_override is not None and _knn_k > 0:
+            _ov = dyn_mask_override.to(image.device).float()
+            if _ov.dim() == 3:
+                _ov = _ov.unsqueeze(0)
+            if _ov.shape[-2:] != (h, w):
+                _bo, _vo = _ov.shape[0], _ov.shape[1]
+                _ov = F.interpolate(
+                    _ov.reshape(_bo * _vo, 1, _ov.shape[-2], _ov.shape[-1]),
+                    size=(h, w), mode="nearest",
+                ).reshape(_bo, _vo, h, w)
+            _dm_motion = (_ov > 0.5).float()
+        if (_dm_motion is not None and _knn_k > 0
+                and getattr(self, "track_head", None) is not None):
+            # SCENE-FLOW mode (phase A): build the track scaffold. Displacements are
+            # computed per Gaussian AFTER the Gaussian list exists (phase B below).
+            self._dyn_tracks = collect_dyn_tracks(
+                self.track_head, aggregated_tokens_list, image, patch_start_idx,
+                pts_all, _dm_motion, conf_valid_mask,
+                n_query=getattr(self.cfg, "dyn_motion_n_query", 1024),
+                query_all_frames=getattr(self.cfg, "dyn_motion_query_all", True),
+            )
+        elif (dyn_mask is not None and self.cfg.enable_dynamic_detection
                 and getattr(self, "track_head", None) is not None
                 and getattr(self.cfg, "dyn_motion_groups", 0) > 0):
             _m = compute_dyn_group_motion(
@@ -955,6 +995,7 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
         # points from different frames into one anchor, destroying the 1:1
         # Gaussian -> (frame, pixel) correspondence this relies on.
         frame_idx_list, dyn_flag_list, group_idx_list = [], [], []
+        disp_list, disp_valid_list = [], []
         track_frame_idx = not self.cfg.voxelize
         only_view_list = []
         use_hybrid = (self.cfg.hybrid_voxelize and not self.cfg.voxelize
@@ -1036,6 +1077,27 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
                     )
                 if self._dyn_group_map is not None:
                     group_idx_list.append(self._dyn_group_map[b_i][conf_valid_mask[b_i]])
+                # SCENE-FLOW mode (phase B): per-Gaussian displacement toward every
+                # target frame, interpolated from the phase-A track scaffold. Uses the
+                # POST-OVERRIDE dyn flag just built, so good masks decide who moves.
+                if self._dyn_tracks is not None and dyn_flag_list:
+                    _tr = self._dyn_tracks[b_i]
+                    _n_b = neural_pts_list[-1].shape[0]
+                    if _tr is not None:
+                        _d, _dv = knn_flow_displacement(
+                            _tr[0], _tr[1],
+                            neural_pts_list[-1], frame_idx_list[-1],
+                            dyn_flag_list[-1] > 0.5, v,
+                            k=getattr(self.cfg, "dyn_motion_knn", 8),
+                            gate_mult=getattr(self.cfg, "dyn_motion_gate_mult", 3.0),
+                        )
+                    else:
+                        _d = torch.zeros(_n_b, v, 3, device=pts_all.device,
+                                         dtype=pts_all.dtype)
+                        _dv = torch.zeros(_n_b, v, device=pts_all.device,
+                                          dtype=pts_all.dtype)
+                    disp_list.append(_d)
+                    disp_valid_list.append(_dv)
 
         max_voxels = max(f.shape[0] for f in neural_feats_list)
         neural_feats = self.pad_tensor_list(
@@ -1067,6 +1129,18 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
         gaussian_dyn_flag = (
             self.pad_tensor_list(dyn_flag_list, (max_voxels,), 0.0)
             if (track_frame_idx and dyn_flag_list)
+            else None
+        )
+        # Scene-flow displacements, padded like the Gaussians (padded slots: zero
+        # displacement, zero validity -> the decoder never moves them).
+        gaussian_disp = (
+            self.pad_tensor_list(disp_list, (max_voxels,), 0.0)
+            if (track_frame_idx and disp_list)
+            else None
+        )
+        gaussian_disp_valid = (
+            self.pad_tensor_list(disp_valid_list, (max_voxels,), 0.0)
+            if (track_frame_idx and disp_valid_list)
             else None
         )
 
@@ -1135,6 +1209,13 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
                 gaussian_group_idx = (
                     gaussian_group_idx[gaussian_usage].view(b, -1).contiguous()
                 )
+            if gaussian_disp is not None:
+                gaussian_disp = (
+                    gaussian_disp[gaussian_usage].view(b, -1, v, 3).contiguous()
+                )
+                gaussian_disp_valid = (
+                    gaussian_disp_valid[gaussian_usage].view(b, -1, v).contiguous()
+                )
 
             print(
                 f"finally pruned {gaussian_usage.shape[1] - neural_pts.shape[1]} gaussians out of {gaussian_usage.shape[1]}"
@@ -1184,6 +1265,11 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
             infos["dyn_group_pred"] = gp          # [B,V,K,3] leave-one-out prediction
             infos["dyn_group_valid"] = gv         # [B,V,K]
             infos["gaussian_group_idx"] = gaussian_group_idx
+        if gaussian_disp is not None:
+            # Scene-flow motion: per-Gaussian displacement toward each target frame,
+            # from direct track correspondence (dyn_motion.py "UPGRADE").
+            infos["gaussian_disp"] = gaussian_disp            # [B,N,V,3]
+            infos["gaussian_disp_valid"] = gaussian_disp_valid  # [B,N,V]
 
         # --- First-order MOTION MODEL for the dynamic content ------------------
         # Gaussian positions come from the FROZEN depth/pose heads, so a moving object

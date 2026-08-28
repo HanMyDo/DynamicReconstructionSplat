@@ -353,6 +353,12 @@ class TrainingConfig:
     train_loo: bool = False
     # >0 = tracker-driven piecewise-rigid motion for dynamic Gaussians (K groups).
     dyn_motion_groups: int = 0
+    # Track-correspondence scene flow (dyn_motion.py "UPGRADE"): >0 = K nearest
+    # tracks per Gaussian; takes precedence over dyn_motion_groups.
+    dyn_motion_knn: int = 0
+    dyn_motion_n_query: int = 1024
+    dyn_motion_query_all: bool = True
+    dyn_motion_gate_mult: float = 3.0
     dyn_mask_dir: Optional[str] = None  # If set, load PRECOMPUTED dynamic masks (by frame stem) and override the live per-window detection for BOTH the downweight loss and the temporal loss. Use the validated 518+full-span masks so fine-tuning is shaped by correct masks.
 
     # Static-first curriculum (schedule on the dynamic-pixel MSE downweight).
@@ -603,6 +609,10 @@ def create_model(config: TrainingConfig) -> AnySplat:
         dynamic_mask_threshold=None,
         dynamic_n_clusters=64,
         dyn_motion_groups=config.dyn_motion_groups,
+        dyn_motion_knn=config.dyn_motion_knn,
+        dyn_motion_n_query=config.dyn_motion_n_query,
+        dyn_motion_query_all=config.dyn_motion_query_all,
+        dyn_motion_gate_mult=config.dyn_motion_gate_mult,
         suppress_dynamic_gaussians=False,  # Bonn task: reconstruct dynamic objects, not suppress them
         # EXPLICIT TEMPORAL ARCHITECTURE arm of the RQ. This was hardcoded False since
         # the very first smoke test ("--no_temporal_attention for smoke tests; remove for
@@ -740,6 +750,8 @@ def compute_rendering_loss(
     dyn_group_pred: Optional[torch.Tensor] = None,
     dyn_group_valid: Optional[torch.Tensor] = None,
     gaussian_group_idx: Optional[torch.Tensor] = None,
+    gaussian_disp: Optional[torch.Tensor] = None,
+    gaussian_disp_valid: Optional[torch.Tensor] = None,
     per_frame_compositing: bool = False,
 ) -> tuple:
     """
@@ -794,6 +806,8 @@ def compute_rendering_loss(
         dyn_group_pred=dyn_group_pred,
         dyn_group_valid=dyn_group_valid,
         gaussian_group_idx=gaussian_group_idx,
+        gaussian_disp=gaussian_disp,
+        gaussian_disp_valid=gaussian_disp_valid,
         per_frame_compositing=per_frame_compositing,
     )
 

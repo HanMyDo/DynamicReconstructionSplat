@@ -83,11 +83,17 @@ esac
 # precomputed-mask runs get their own tag so they don't share an output dir with the
 # live-detection run (the A/B: same rendering, dyn/static split from good vs live masks)
 case "${EXTRA_FLAGS}" in *track_dynamic*)
-  # group count belongs in the tag: K=1 and K=4 are DIFFERENT mechanisms and must not
-  # share (or overwrite) an output dir — and neither may clobber the earlier
-  # single-centroid _trk result.
-  GRP=$(echo "${EXTRA_FLAGS}" | sed -n 's/.*--dyn_motion_groups[= ]*\([0-9][0-9]*\).*/\1/p')
-  FLAG_TAG="${FLAG_TAG}_trk${GRP:-1}" ;;
+  # Mechanism + its cardinal parameter belong in the tag: scene-flow (KNN), K=1 and
+  # K=4 groups are DIFFERENT mechanisms and must not share (or overwrite) an output
+  # dir — and none may clobber the earlier single-centroid _trk result.
+  KNN=$(echo "${EXTRA_FLAGS}" | sed -n 's/.*--dyn_motion_knn[= ]*\([0-9][0-9]*\).*/\1/p')
+  if [ -n "${KNN}" ] && [ "${KNN}" != "0" ]; then
+    FLAG_TAG="${FLAG_TAG}_flow${KNN}"
+    case "${EXTRA_FLAGS}" in *dyn_motion_query_first_only*) FLAG_TAG="${FLAG_TAG}q0" ;; esac
+  else
+    GRP=$(echo "${EXTRA_FLAGS}" | sed -n 's/.*--dyn_motion_groups[= ]*\([0-9][0-9]*\).*/\1/p')
+    FLAG_TAG="${FLAG_TAG}_trk${GRP:-1}"
+  fi ;;
 esac
 # hybrid fusion: voxel size AND scale multiplier must both be in the tag — they are
 # different operating points and must never share (or clobber) an output dir.
