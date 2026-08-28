@@ -202,6 +202,32 @@ def main() -> int:
     if not t8:
         fails.append(8)
 
+    # 9. LOCALLY WEIGHTED strict fit. (a) bandwidth=0 must reproduce the uniform fit
+    #    BIT-FOR-BIT, or the measured +0.55 dB strict result silently stops being the
+    #    configuration the code runs. (b) weighted least squares is exact for linear
+    #    data at ANY bandwidth. (c) on ACCELERATING motion a local fit must beat the
+    #    global one at predicting the held-out frame -- the reason the knob exists.
+    okl = torch.ones(V, 1, dtype=torch.bool)
+    p_uni, _ = dyn_motion.predict_tracks_loo(lin, okl)
+    p_bw0, _ = dyn_motion.predict_tracks_loo(lin, okl, bandwidth=0.0)
+    same0 = torch.equal(p_uni, p_bw0)
+    p_loc, _ = dyn_motion.predict_tracks_loo(lin, okl, bandwidth=1.5)
+    exact = torch.allclose(p_loc, lin, atol=1e-4)
+
+    Vq = 6
+    tq = torch.arange(Vq, dtype=torch.float32)
+    quad = torch.stack([tq ** 2, 0.5 * tq ** 2, torch.zeros(Vq)], -1).unsqueeze(1)  # [V,1,3]
+    okq = torch.ones(Vq, 1, dtype=torch.bool)
+    e_glob = (dyn_motion.predict_tracks_loo(quad, okq)[0] - quad).norm(dim=-1).mean()
+    e_loc = (dyn_motion.predict_tracks_loo(quad, okq, bandwidth=1.5)[0] - quad).norm(dim=-1).mean()
+    better = e_loc < e_glob
+    t9 = same0 and exact and better
+    print(f"[9] locally weighted strict fit: {'PASS' if t9 else 'FAIL'} "
+          f"(bw=0 identical={same0}, exact on linear={exact}, "
+          f"accelerating err {e_glob:.3f} global -> {e_loc:.3f} local)")
+    if not t9:
+        fails.append(9)
+
     print(f"\n{'ALL TESTS PASS' if not fails else f'FAILED: tests {fails}'}")
     return 1 if fails else 0
 

@@ -409,7 +409,8 @@ def collect_dyn_tracks(
 
 
 @torch.no_grad()
-def predict_tracks_loo(traj: torch.Tensor, ok: torch.Tensor, min_pts: int = 2
+def predict_tracks_loo(traj: torch.Tensor, ok: torch.Tensor, min_pts: int = 2,
+                       bandwidth: float = 0.0
                        ) -> Tuple[torch.Tensor, torch.Tensor]:
     """LEAVE-ONE-OUT prediction of every track's position at every frame.
 
@@ -420,6 +421,14 @@ def predict_tracks_loo(traj: torch.Tensor, ok: torch.Tensor, min_pts: int = 2
     velocity) over the OTHER frames only, so nothing about j is read. Comparing
     the two isolates what the non-rigid per-Gaussian interpolation contributes
     from what OBSERVING j contributes.
+
+    `bandwidth` > 0 makes it a LOCALLY weighted fit: support frames are weighted
+    exp(-0.5*((f-j)/bandwidth)^2), so the velocity is estimated from the frames
+    NEAREST the target instead of the whole window. Measured motivation: strict
+    prediction recovered +0.55 dB dynamic where observing frame j gave +1.34, and
+    a single global constant-velocity fit spans ~1.3 s at stride 8 -- far longer
+    than a walking person stays linear. bandwidth=0 keeps the uniform global fit
+    (the measured configuration), so existing results reproduce exactly.
 
     Vectorised over tracks (the per-group version above loops, which is fine for
     K~4 groups but not for ~1k tracks x V frames x 920 batches).
@@ -436,13 +445,17 @@ def predict_tracks_loo(traj: torch.Tensor, ok: torch.Tensor, min_pts: int = 2
     for j in range(V):
         m = okf.clone()
         m[j] = 0.0                                   # exclude the target frame
-        n = m.sum(0)                                 # [Nt] usable frames
+        n = m.sum(0)                                 # [Nt] usable frames (unweighted)
+        if bandwidth > 0:
+            kern = torch.exp(-0.5 * ((t - t[j]) / bandwidth) ** 2)
+            m = m * kern.unsqueeze(-1)               # locally weighted least squares
+        s = m.sum(0)                                 # [Nt] weight mass
         w = m.unsqueeze(-1)
-        cm = (c * w).sum(0) / n.clamp_min(1).unsqueeze(-1)        # [Nt,3] mean position
-        tm = (t.unsqueeze(-1) * m).sum(0) / n.clamp_min(1)        # [Nt]   mean time
-        dt = (t.view(V, 1) - tm.view(1, Nt)) * m                  # [V,Nt] 0 where unused
-        den = (dt * dt).sum(0)                                    # [Nt]
-        num = (dt.unsqueeze(-1) * (c - cm.unsqueeze(0)) * w).sum(0)  # [Nt,3]
+        cm = (c * w).sum(0) / s.clamp_min(1e-8).unsqueeze(-1)     # [Nt,3] weighted mean pos
+        tm = (t.unsqueeze(-1) * m).sum(0) / s.clamp_min(1e-8)     # [Nt]   weighted mean time
+        dt = t.view(V, 1) - tm.view(1, Nt)                        # [V,Nt]
+        den = (m * dt * dt).sum(0)                                # [Nt]
+        num = (w * dt.unsqueeze(-1) * (c - cm.unsqueeze(0))).sum(0)  # [Nt,3]
         slope = num / den.clamp_min(1e-8).unsqueeze(-1)
         # 2 points already determine a velocity, and velocity IS the model here. Falling
         # back to the mean sooner would predict a moving object as stationary, i.e. it
@@ -465,6 +478,7 @@ def knn_flow_displacement(
     gate_mult: float = 3.0,
     min_frame_tracks: int = 4,
     strict: bool = False,
+    pred_bandwidth: float = 0.0,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Phase B: per-Gaussian displacement toward every target frame, by direct
     track correspondence (NOT extrapolation).
@@ -489,7 +503,8 @@ def knn_flow_displacement(
     dev = gauss_pts.device
     disp = torch.zeros(N, num_views, 3, device=dev, dtype=gauss_pts.dtype)
     valid = torch.zeros(N, num_views, device=dev, dtype=gauss_pts.dtype)
-    traj_t, ok_t = predict_tracks_loo(traj, ok) if strict else (traj, ok)
+    traj_t, ok_t = (predict_tracks_loo(traj, ok, bandwidth=pred_bandwidth)
+                    if strict else (traj, ok))
 
     for i in range(num_views):
         sel = gauss_dyn & (gauss_fidx == i)

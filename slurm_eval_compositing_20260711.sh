@@ -120,7 +120,13 @@ case "${EXTRA_FLAGS}" in *track_dynamic*)
   KNN=$(echo "${EXTRA_FLAGS}" | sed -n 's/.*--dyn_motion_knn[= ]*\([0-9][0-9]*\).*/\1/p')
   if [ -n "${KNN}" ] && [ "${KNN}" != "0" ]; then
     FLAG_TAG="${FLAG_TAG}_flow${KNN}"
-    case "${EXTRA_FLAGS}" in *dyn_motion_strict*) FLAG_TAG="${FLAG_TAG}s" ;; esac
+    case "${EXTRA_FLAGS}" in *dyn_motion_strict*)
+      FLAG_TAG="${FLAG_TAG}s"
+      # bandwidth changes the strict PREDICTOR -> a different mechanism, own dir
+      BW=$(echo "${EXTRA_FLAGS}" | sed -n 's/.*--dyn_motion_pred_bandwidth[= ]*\([0-9.]*\).*/\1/p')
+      [ -n "${BW}" ] && [ "${BW}" != "0" ] && [ "${BW}" != "0.0" ] \
+        && FLAG_TAG="${FLAG_TAG}b$(echo ${BW} | tr '.' 'p')" ;;
+    esac
     case "${EXTRA_FLAGS}" in *dyn_motion_query_first_only*) FLAG_TAG="${FLAG_TAG}q0" ;; esac
   else
     GRP=$(echo "${EXTRA_FLAGS}" | sed -n 's/.*--dyn_motion_groups[= ]*\([0-9][0-9]*\).*/\1/p')

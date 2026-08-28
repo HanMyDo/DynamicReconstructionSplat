@@ -546,6 +546,7 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
         "n_batches_with_group_motion": n_group_motion,
         "dyn_motion_knn": getattr(config, "dyn_motion_knn", 0),
         "dyn_motion_strict": getattr(config, "dyn_motion_strict", False),
+        "dyn_motion_pred_bandwidth": getattr(config, "dyn_motion_pred_bandwidth", 0.0),
         "n_batches_with_knn_motion": n_knn_motion,
         "mask_source": ("precomputed" if precomputed_mask_dir is not None else "live_detection"),
         "precomputed_mask_dir": precomputed_mask_dir,
@@ -658,6 +659,12 @@ def main():
                              "observing it, so frame j is never read. Isolates what the non-rigid "
                              "per-Gaussian interpolation contributes from what OBSERVING j "
                              "contributes. Report alongside the non-strict number.")
+    parser.add_argument("--dyn_motion_pred_bandwidth", type=float, default=0.0,
+                        help="With --dyn_motion_strict: >0 estimates each track's velocity from a "
+                             "LOCALLY weighted fit (frames nearest the target count most, sigma in "
+                             "frames) instead of one fit over the whole window. At stride 8 a "
+                             "6-frame window spans ~1.3 s, longer than a person stays linear. "
+                             "0 = the uniform global fit that produced the measured +0.55 dB.")
     parser.add_argument("--dyn_motion_query_first_only", action="store_true",
                         help="Scene-flow mode: sample tracker queries only from frame 0's dynamic "
                              "pixels (legacy behaviour) instead of from every frame.")
@@ -704,6 +711,7 @@ def main():
         dyn_motion_query_all=not args.dyn_motion_query_first_only,
         dyn_motion_gate_mult=args.dyn_motion_gate_mult,
         dyn_motion_strict=args.dyn_motion_strict,
+        dyn_motion_pred_bandwidth=args.dyn_motion_pred_bandwidth,
     )
 
     print(f"\nLoading {args.split} dataset...")
@@ -742,6 +750,7 @@ def main():
             "dyn_motion_gate_mult": args.dyn_motion_gate_mult,
             "dyn_motion_query_all": not args.dyn_motion_query_first_only,
             "dyn_motion_strict": args.dyn_motion_strict,
+            "dyn_motion_pred_bandwidth": args.dyn_motion_pred_bandwidth,
         }, f, indent=2)
 
     print(f"\nRunning evaluation on {args.split} split ({len(dataset)} batches)...")

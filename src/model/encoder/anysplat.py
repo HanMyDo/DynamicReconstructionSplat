@@ -155,6 +155,9 @@ class EncoderAnySplatCfg:
     # STRICT control: predict each track's target-frame position from the OTHER frames
     # instead of observing it, so frame j is never read (see predict_tracks_loo).
     dyn_motion_strict: bool = False
+    # >0 = locally weighted strict fit (velocity from the frames NEAREST the target);
+    # 0 = uniform fit over the whole window (the measured configuration).
+    dyn_motion_pred_bandwidth: float = 0.0
     dynamic_n_clusters: int = 64  # Number of clusters for KMeans refinement
     suppress_dynamic_gaussians: bool = False
     # Temporal attention options for Gaussian head (Fix 2 for dynamic handling)
@@ -1094,6 +1097,7 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
                             k=getattr(self.cfg, "dyn_motion_knn", 8),
                             gate_mult=getattr(self.cfg, "dyn_motion_gate_mult", 3.0),
                             strict=getattr(self.cfg, "dyn_motion_strict", False),
+                            pred_bandwidth=getattr(self.cfg, "dyn_motion_pred_bandwidth", 0.0),
                         )
                     else:
                         _d = torch.zeros(_n_b, v, 3, device=pts_all.device,
