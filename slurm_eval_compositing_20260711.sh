@@ -70,16 +70,8 @@ case "${EXTRA_FLAGS}" in *"<"*|*">"*)
   echo "       Replace the placeholder with a real path: ${EXTRA_FLAGS}"
   exit 1 ;;
 esac
-# A mask dir that does not exist is WORSE than a crash: load_precomputed_masks()
-# returns None when no mask file is found and eval SILENTLY falls back to the weak
-# live detection, producing a plausible-looking but protocol-violating number.
+# (the --dyn_mask_dir check needs EVAL_SEQ and lives just below it)
 MASK_DIR=$(echo "${EXTRA_FLAGS}" | sed -n 's/.*--dyn_mask_dir[= ]*\([^ ]*\).*/\1/p')
-if [ -n "${MASK_DIR}" ] && [ ! -d "${MASK_DIR}" ]; then
-  echo "ERROR: --dyn_mask_dir does not exist: ${MASK_DIR}"
-  echo "       (a wrong path does NOT fail — eval falls back to live detection and"
-  echo "        reports a number computed with the wrong masks)"
-  exit 1
-fi
 # --dyn_motion_knn only takes effect together with --track_dynamic; silently ignoring
 # it would produce a 'scene flow does not help' null for a purely trivial reason.
 case "${EXTRA_FLAGS}" in
@@ -157,6 +149,27 @@ case "${EXTRA_FLAGS}" in *dyn_mask_dir*) FLAG_TAG="${FLAG_TAG}_pcm" ;; esac
 # — all are training sequences or the same scene family (leakage).
 EVAL_SEQ=${3:-rgbd_bonn_synchronous2}
 SEQ_TAG=$(echo ${EVAL_SEQ} | sed 's/rgbd_bonn_//')
+
+# Missing masks for THIS sequence are worse than a crash: load_precomputed_masks()
+# returns None when no mask file is found, and eval SILENTLY falls back to the weak
+# live detection — reporting a plausible-looking number computed under the wrong
+# protocol. The base dir existing is not enough; masks are precomputed PER SEQUENCE,
+# so check the layout _resolve_mask_path actually reads.
+if [ -n "${MASK_DIR}" ]; then
+  if [ -d "${MASK_DIR}/${EVAL_SEQ}/masks" ]; then
+    N_MASKS=$(ls "${MASK_DIR}/${EVAL_SEQ}/masks"/*.png 2>/dev/null | wc -l)
+  else
+    N_MASKS=$(ls "${MASK_DIR}"/*.png 2>/dev/null | wc -l)   # FLAT layout (points at .../masks)
+  fi
+  if [ "${N_MASKS}" -eq 0 ]; then
+    echo "ERROR: no precomputed masks for ${EVAL_SEQ} under --dyn_mask_dir ${MASK_DIR}"
+    echo "       looked for ${MASK_DIR}/${EVAL_SEQ}/masks/*.png and ${MASK_DIR}/*.png"
+    echo "       (eval would NOT fail — it falls back to live detection and reports a"
+    echo "        number computed with the wrong masks; precompute this sequence first)"
+    exit 1
+  fi
+  echo "  masks      : ${N_MASKS} precomputed for ${EVAL_SEQ}"
+fi
 REPO="/mnt/home/hanmydo/DynamicReconstructionSplat"
 VGGT4D_CKPT="${REPO}/ckpts/vggt4d_model_tracker_fixed_e20.pt"
 # Date suffix = TODAY by default, so a rerun on a different day can never overwrite an
