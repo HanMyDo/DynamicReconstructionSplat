@@ -45,10 +45,49 @@
 #
 #   # 4. Sanity: reproduce the stored baseline exactly (expect ~20.96 / 20.58):
 #   sbatch slurm_eval_compositing_20260711.sh baseline ""
+#
+#   # 5. TRACK-CORRESPONDENCE SCENE FLOW (branch dyn_handling) vs its own control.
+#   #    MASKS is a real path -- a "<MASKS>" placeholder is a shell redirect and the
+#   #    job dies in 10s (job 20991). Both runs must be the SAME except the motion:
+#   M=output_dyn_masks_precomputed_cs16_r518_st3_fs0
+#   B="--eval_loo --frame_stride 8 --dyn_mask_dir $M"
+#   sbatch slurm_eval_compositing_20260711.sh baseline "$B" rgbd_bonn_removing_obstructing_box 6
+#   sbatch slurm_eval_compositing_20260711.sh baseline "$B --track_dynamic --dyn_motion_knn 8" \
+#          rgbd_bonn_removing_obstructing_box 6
+#   # -> compare psnr_dynamic; headroom is the +3.26 dB static-dynamic gap at this point.
 # =============================================================================
 
 CKPT_ARG=${1:-baseline}
 EXTRA_FLAGS=${2:-}
+
+# --- FAIL FAST on flag mistakes that otherwise cost a whole run -----------------
+# EXTRA_FLAGS is expanded UNQUOTED into the container's bash -c, so a stray < or >
+# (e.g. a copy-pasted "<MASKS>" placeholder) becomes a shell REDIRECT: the python
+# command dies before printing anything and the job "completes" in ~10s with no
+# metrics.json. Happened on job 20991.
+case "${EXTRA_FLAGS}" in *"<"*|*">"*)
+  echo "ERROR: EXTRA_FLAGS contains < or >, which the shell would treat as a redirect."
+  echo "       Replace the placeholder with a real path: ${EXTRA_FLAGS}"
+  exit 1 ;;
+esac
+# A mask dir that does not exist is WORSE than a crash: load_precomputed_masks()
+# returns None when no mask file is found and eval SILENTLY falls back to the weak
+# live detection, producing a plausible-looking but protocol-violating number.
+MASK_DIR=$(echo "${EXTRA_FLAGS}" | sed -n 's/.*--dyn_mask_dir[= ]*\([^ ]*\).*/\1/p')
+if [ -n "${MASK_DIR}" ] && [ ! -d "${MASK_DIR}" ]; then
+  echo "ERROR: --dyn_mask_dir does not exist: ${MASK_DIR}"
+  echo "       (a wrong path does NOT fail — eval falls back to live detection and"
+  echo "        reports a number computed with the wrong masks)"
+  exit 1
+fi
+# --dyn_motion_knn only takes effect together with --track_dynamic; silently ignoring
+# it would produce a 'scene flow does not help' null for a purely trivial reason.
+case "${EXTRA_FLAGS}" in
+  *dyn_motion_knn*) case "${EXTRA_FLAGS}" in *track_dynamic*) ;; *)
+    echo "ERROR: --dyn_motion_knn given without --track_dynamic (the flag would be ignored)."
+    exit 1 ;; esac ;;
+esac
+# -------------------------------------------------------------------------------
 # $4 NUM_FRAMES: views per window. 12 = the protocol EVERY stored baseline used -> keep 12
 # for anything you want to compare against them. Use a different value ONLY to match a
 # checkpoint's TRAINING window (e.g. 6): under leave-one-out each pixel is rebuilt from
