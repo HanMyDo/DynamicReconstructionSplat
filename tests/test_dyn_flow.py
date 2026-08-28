@@ -163,6 +163,45 @@ def main() -> int:
     if not t5:
         fails.append(5)
 
+    # 6. STRICT MODE on CONSTANT-VELOCITY motion: the leave-one-out fit reconstructs
+    #    the held-out frame exactly, so strict must match the observed-j result. This
+    #    is what makes the strict/non-strict comparison interpretable: any difference
+    #    it reports on real data is unpredictable motion, not a broken control.
+    disp_s, valid_s = dyn_motion.knn_flow_displacement(
+        traj, ok, gpts, gfidx, gdyn, V, k=4, gate_mult=3.0, strict=True)
+    t6 = torch.allclose(disp_s, disp, atol=1e-4) and torch.allclose(valid_s, valid)
+    print(f"[6] strict == observed on constant-velocity motion: {'PASS' if t6 else 'FAIL'} "
+          f"(max diff {(disp_s - disp).abs().max().item():.2e})")
+    if not t6:
+        fails.append(6)
+
+    # 7. STRICT MODE NEVER READS FRAME j. Corrupting ONLY frame j's track positions
+    #    must leave the strict displacement toward j unchanged, while the non-strict
+    #    one must move. Without this, a "strict" run could silently still be leaking.
+    traj_bad = traj.clone()
+    traj_bad[2] += 5.0                                   # frame 2 tracks -> garbage
+    d_bad_s, _ = dyn_motion.knn_flow_displacement(
+        traj_bad, ok, gpts, gfidx, gdyn, V, k=4, gate_mult=3.0, strict=True)
+    d_bad_o, _ = dyn_motion.knn_flow_displacement(
+        traj_bad, ok, gpts, gfidx, gdyn, V, k=4, gate_mult=3.0, strict=False)
+    sel01 = gdyn & (gfidx != 2)
+    unchanged = torch.allclose(d_bad_s[sel01][:, 2], disp_s[sel01][:, 2], atol=1e-4)
+    leaked = not torch.allclose(d_bad_o[sel01][:, 2], disp[sel01][:, 2], atol=1e-4)
+    t7 = unchanged and leaked
+    print(f"[7] strict ignores corrupted frame-j tracks (and non-strict does not): "
+          f"{'PASS' if t7 else 'FAIL'} (strict unchanged={unchanged}, observed moved={leaked})")
+    if not t7:
+        fails.append(7)
+
+    # 8. predict_tracks_loo recovers a linear trajectory exactly at every frame.
+    lin = torch.stack([torch.tensor([1.0, 2.0, 3.0]) * f for f in range(V)], 0).unsqueeze(1)
+    pred, pok = dyn_motion.predict_tracks_loo(lin, torch.ones(V, 1, dtype=torch.bool))
+    t8 = torch.allclose(pred, lin, atol=1e-4) and bool(pok.all())
+    print(f"[8] LOO fit reproduces a linear trajectory: {'PASS' if t8 else 'FAIL'} "
+          f"(max diff {(pred - lin).abs().max().item():.2e})")
+    if not t8:
+        fails.append(8)
+
     print(f"\n{'ALL TESTS PASS' if not fails else f'FAILED: tests {fails}'}")
     return 1 if fails else 0
 

@@ -545,6 +545,7 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
         "dyn_motion_groups": config.dyn_motion_groups,
         "n_batches_with_group_motion": n_group_motion,
         "dyn_motion_knn": getattr(config, "dyn_motion_knn", 0),
+        "dyn_motion_strict": getattr(config, "dyn_motion_strict", False),
         "n_batches_with_knn_motion": n_knn_motion,
         "mask_source": ("precomputed" if precomputed_mask_dir is not None else "live_detection"),
         "precomputed_mask_dir": precomputed_mask_dir,
@@ -651,6 +652,12 @@ def main():
     parser.add_argument("--dyn_motion_gate_mult", type=float, default=3.0,
                         help="Scene-flow mode: trust radius = mult x median track NN spacing; "
                              "Gaussians farther than this from every track do not move.")
+    parser.add_argument("--dyn_motion_strict", action="store_true",
+                        help="Scene-flow mode, HONEST CONTROL: predict each track's position at the "
+                             "target frame from the OTHER frames (constant velocity) instead of "
+                             "observing it, so frame j is never read. Isolates what the non-rigid "
+                             "per-Gaussian interpolation contributes from what OBSERVING j "
+                             "contributes. Report alongside the non-strict number.")
     parser.add_argument("--dyn_motion_query_first_only", action="store_true",
                         help="Scene-flow mode: sample tracker queries only from frame 0's dynamic "
                              "pixels (legacy behaviour) instead of from every frame.")
@@ -696,6 +703,7 @@ def main():
         dyn_motion_n_query=args.dyn_motion_n_query,
         dyn_motion_query_all=not args.dyn_motion_query_first_only,
         dyn_motion_gate_mult=args.dyn_motion_gate_mult,
+        dyn_motion_strict=args.dyn_motion_strict,
     )
 
     print(f"\nLoading {args.split} dataset...")
@@ -733,6 +741,7 @@ def main():
             "dyn_motion_n_query": args.dyn_motion_n_query,
             "dyn_motion_gate_mult": args.dyn_motion_gate_mult,
             "dyn_motion_query_all": not args.dyn_motion_query_first_only,
+            "dyn_motion_strict": args.dyn_motion_strict,
         }, f, indent=2)
 
     print(f"\nRunning evaluation on {args.split} split ({len(dataset)} batches)...")

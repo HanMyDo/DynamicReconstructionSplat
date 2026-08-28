@@ -409,6 +409,51 @@ def collect_dyn_tracks(
 
 
 @torch.no_grad()
+def predict_tracks_loo(traj: torch.Tensor, ok: torch.Tensor, min_pts: int = 2
+                       ) -> Tuple[torch.Tensor, torch.Tensor]:
+    """LEAVE-ONE-OUT prediction of every track's position at every frame.
+
+    THE HONEST CONTROL for the scene-flow mode. Using a track's OBSERVED position
+    at target frame j reads frame j's pixels, which is standard practice for
+    monocular dynamic NVS but is information the leave-one-out protocol otherwise
+    withholds. Here each track's position at j is instead fitted (constant
+    velocity) over the OTHER frames only, so nothing about j is read. Comparing
+    the two isolates what the non-rigid per-Gaussian interpolation contributes
+    from what OBSERVING j contributes.
+
+    Vectorised over tracks (the per-group version above loops, which is fine for
+    K~4 groups but not for ~1k tracks x V frames x 920 batches).
+
+    traj [V,Nt,3], ok [V,Nt] -> (pred [V,Nt,3], pred_ok [V,Nt])
+    """
+    V, Nt, _ = traj.shape
+    dev = traj.device
+    t = torch.arange(V, device=dev, dtype=torch.float32)
+    c = traj.float()
+    okf = ok.float()
+    pred = torch.zeros_like(c)
+    pred_ok = torch.zeros(V, Nt, device=dev, dtype=torch.bool)
+    for j in range(V):
+        m = okf.clone()
+        m[j] = 0.0                                   # exclude the target frame
+        n = m.sum(0)                                 # [Nt] usable frames
+        w = m.unsqueeze(-1)
+        cm = (c * w).sum(0) / n.clamp_min(1).unsqueeze(-1)        # [Nt,3] mean position
+        tm = (t.unsqueeze(-1) * m).sum(0) / n.clamp_min(1)        # [Nt]   mean time
+        dt = (t.view(V, 1) - tm.view(1, Nt)) * m                  # [V,Nt] 0 where unused
+        den = (dt * dt).sum(0)                                    # [Nt]
+        num = (dt.unsqueeze(-1) * (c - cm.unsqueeze(0)) * w).sum(0)  # [Nt,3]
+        slope = num / den.clamp_min(1e-8).unsqueeze(-1)
+        # 2 points already determine a velocity, and velocity IS the model here. Falling
+        # back to the mean sooner would predict a moving object as stationary, i.e. it
+        # would understate the strict mode and make the control look worse than it is.
+        fit = (n >= min_pts) & (den > 1e-8)
+        pred[j] = torch.where(fit.unsqueeze(-1), cm + slope * (t[j] - tm).unsqueeze(-1), cm)
+        pred_ok[j] = n >= 2
+    return pred, pred_ok
+
+
+@torch.no_grad()
 def knn_flow_displacement(
     traj: torch.Tensor,
     ok: torch.Tensor,
@@ -419,6 +464,7 @@ def knn_flow_displacement(
     k: int = 8,
     gate_mult: float = 3.0,
     min_frame_tracks: int = 4,
+    strict: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Phase B: per-Gaussian displacement toward every target frame, by direct
     track correspondence (NOT extrapolation).
@@ -431,6 +477,10 @@ def knn_flow_displacement(
     moving by a far-away object's flow scatters Gaussians into the background,
     the measured failure of the rigid modes.
 
+    `strict` swaps the OBSERVED target-frame track positions for leave-one-out
+    predictions (see predict_tracks_loo), so frame j is never read. The source
+    frame i is always the observed position — i is not the held-out frame.
+
     traj [V,Nt,3], ok [V,Nt];  gauss_pts [N,3], gauss_fidx [N], gauss_dyn [N] bool.
     -> (disp [N, num_views, 3], valid [N, num_views] float 0/1). disp is 0 where
        invalid or own-frame.
@@ -439,6 +489,7 @@ def knn_flow_displacement(
     dev = gauss_pts.device
     disp = torch.zeros(N, num_views, 3, device=dev, dtype=gauss_pts.dtype)
     valid = torch.zeros(N, num_views, device=dev, dtype=gauss_pts.dtype)
+    traj_t, ok_t = predict_tracks_loo(traj, ok) if strict else (traj, ok)
 
     for i in range(num_views):
         sel = gauss_dyn & (gauss_fidx == i)
@@ -463,18 +514,19 @@ def knn_flow_displacement(
         dist, idx = d_gt.topk(kk, dim=1, largest=False)
         w0 = (dist <= gate_r).float() / (dist + 1e-6)          # [n_i, kk]
 
-        tr_i = traj[:, mi]                           # [V, M, 3]
-        ok_i = ok[:, mi]                             # [V, M]
+        tr_i = traj[:, mi]                           # [V, M, 3] observed
+        tr_t = traj_t[:, mi]                         # [V, M, 3] target lookup (LOO if strict)
+        ok_t_i = ok_t[:, mi]                         # [V, M]
         nb_src = tr_i[i].float()[idx]                # [n_i, kk, 3]
         for j in range(num_views):
             if j == i:
                 continue                             # own frame: already in place
-            w = w0 * ok_i[j].float()[idx]            # drop neighbours unseen at j
+            w = w0 * ok_t_i[j].float()[idx]          # drop neighbours unusable at j
             wsum = w.sum(dim=1, keepdim=True)        # [n_i, 1]
             good = wsum[:, 0] > 0
             if not bool(good.any()):
                 continue
-            nb_disp = tr_i[j].float()[idx] - nb_src  # [n_i, kk, 3] observed flow i->j
+            nb_disp = tr_t[j].float()[idx] - nb_src  # [n_i, kk, 3] flow i->j
             d_ij = (w.unsqueeze(-1) * nb_disp).sum(dim=1) / wsum.clamp_min(1e-8)
             d_ij = d_ij * good.unsqueeze(-1).float()
             row = torch.zeros(N, 3, device=dev, dtype=disp.dtype)
@@ -494,7 +546,7 @@ def knn_flow_displacement(
         mags = disp[gauss_dyn].norm(dim=-1)
         mags = mags[v_off[gauss_dyn] > 0]
         if mags.numel() > 0:
-            print(f"[DynFlow] moved {100.0 * float(cover):.1f}% of dynamic "
+            print(f"[DynFlow{'/strict' if strict else ''}] moved {100.0 * float(cover):.1f}% of dynamic "
                   f"(gaussian, target) pairs | displacement "
                   f"median={mags.median().item():.4f} mean={mags.mean().item():.4f} "
                   f"p90={mags.quantile(0.9).item():.4f} (world units)")
