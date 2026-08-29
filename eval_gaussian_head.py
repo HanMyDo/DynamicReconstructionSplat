@@ -234,7 +234,8 @@ def umeyama_ate(pred_xyz, gt_xyz):
 def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50, image_batch_start=0,
              per_frame_dynamic=False, leave_one_out=False, precomputed_mask_dir=None,
              track_dynamic=False, gain_correct=False, scale_mult=1.0,
-             image_save_every=1, batch_stride=1, images_only=False, image_views=None):
+             image_save_every=1, batch_stride=1, images_only=False, image_views=None,
+             ply_batch=None, ply_per_frame=False):
     os.makedirs(output_dir, exist_ok=True)
     images_dir = os.path.join(output_dir, "images")
     dyn_mask_dir = os.path.join(output_dir, "dyn_mask")
@@ -264,6 +265,7 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
     n_frames = 0
 
     last_gaussians = None
+    last_infos = None
     last_pred_pose = None
     last_h, last_w = None, None
     last_dyn_mask = None
@@ -503,11 +505,14 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
                         os.path.join(dyn_mask_dir, f"b{batch_idx:04d}_v{v_idx:02d}.png")
                     )
 
-        # Keep last batch for video + PLY output
-        last_gaussians = gaussians
-        last_pred_pose = pred_pose
-        last_h, last_w = h, w
-        last_dyn_mask = dyn_mask  # [B, V, H, W] or None
+        # Keep a batch for video + PLY output. --ply_batch picks WHICH window: the
+        # default (last) is batch ~919, which is rarely where the moving object is.
+        if ply_batch is None or batch_idx == ply_batch:
+            last_gaussians = gaussians
+            last_pred_pose = pred_pose
+            last_h, last_w = h, w
+            last_dyn_mask = dyn_mask  # [B, V, H, W] or None
+            last_infos = infos
 
     # --- Video output (interpolated predicted poses, last batch) ---
     if last_gaussians is not None and last_pred_pose is not None:
@@ -541,6 +546,51 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
             dyn_mask_flat=dyn_mask_flat,
             dyn_opacity_scale=0.5,  # dim dynamic Gaussians to 50% rather than near-invisible
         )
+
+    # --- 4D PLY export: one file per timestamp, dynamic Gaussians DISPLACED --------
+    # This is the artifact the scene-flow mechanism actually produces. In the static
+    # PLY above, a moving object appears as V copies strung along its trajectory (the
+    # ghosting). Here, for timestamp j, every dynamic Gaussian is moved by its own
+    # scene-flow displacement toward j -- so those V copies COLLAPSE onto the object's
+    # position at j. Stepping through gaussians_t00..t{V-1}.ply in a viewer shows the
+    # object moving through a static scene, which is the mechanism made visible.
+    # Static Gaussians are untouched, so the background is identical in every file.
+    if ply_per_frame and last_gaussians is not None and last_infos is not None:
+        disp = last_infos.get("gaussian_disp")
+        dynf = last_infos.get("gaussian_dyn_flag")
+        fidx = last_infos.get("gaussian_frame_idx")
+        if disp is None or dynf is None or fidx is None:
+            print("[ply] --ply_per_frame needs --track_dynamic --dyn_motion_knn N "
+                  "(no displacement field in this run); skipping the 4D export")
+        else:
+            dvalid = last_infos.get("gaussian_disp_valid")
+            means = last_gaussians.means[0]
+            dev = means.device
+            dyn_v = dynf[0].to(dev).float()
+            fid_v = fidx[0].to(dev)
+            dyn_flat = (last_dyn_mask[0].cpu().numpy().reshape(-1).astype(np.float32)
+                        if last_dyn_mask is not None else None)
+            n_views = disp.shape[2]
+            print(f"Saving {n_views} per-timestamp PLYs (4D export)...")
+            for j in range(n_views):
+                # own-frame Gaussians are already at their correct place for j
+                move = dyn_v * (fid_v != j).float()
+                if dvalid is not None:
+                    move = move * dvalid[0, :, j].to(dev).float()
+                means_j = means + move.unsqueeze(-1) * disp[0, :, j].to(dev).float()
+                export_ply(
+                    means_j,
+                    last_gaussians.scales[0],
+                    last_gaussians.rotations[0],
+                    last_gaussians.harmonics[0],
+                    last_gaussians.opacities[0],
+                    Path(os.path.join(output_dir, f"gaussians_t{j:02d}.ply")),
+                    save_sh_dc_only=True,
+                    dyn_mask_flat=dyn_flat,
+                    dyn_opacity_scale=0.5,
+                )
+            print(f"  -> {output_dir}/gaussians_t00..t{n_views-1:02d}.ply "
+                  f"({int(dyn_v.sum())} dynamic gaussians move; the rest are identical)")
 
     # --- Metrics summary ---
     avg_dyn_pixel_frac = total_dyn_pixel_fraction / n_frames if n_frames > 0 else None
@@ -630,6 +680,17 @@ def main():
                              "this still spans the whole sequence for 1/N the runtime. Needed on long "
                              "sequences (TUM fr2 has 3670 windows) where a full pass exceeds 2h and "
                              "the 24g watchdog cancels it for low GPU-memory utilisation.")
+    parser.add_argument("--ply_batch", type=int, default=None,
+                        help="Which window's Gaussians to export as PLY. Default = the LAST batch "
+                             "processed (~919), which is rarely where the moving object is. Pair "
+                             "with --images_only for a fast targeted export.")
+    parser.add_argument("--ply_per_frame", action="store_true",
+                        help="4D EXPORT: also write gaussians_t00..tNN.ply, one per timestamp, with "
+                             "each dynamic Gaussian displaced by its scene-flow motion to that "
+                             "timestamp. Without motion a moving object appears as V ghost copies "
+                             "along its path; here they collapse onto its position at t, so "
+                             "stepping through the files shows the object moving. Needs "
+                             "--track_dynamic --dyn_motion_knn N.")
     parser.add_argument("--image_views", type=str, default="all",
                         help="Which views to write images for: 'all' (default) or a comma-separated "
                              "list, e.g. '0'. Use '0' with --image_batch_start 0 --max_image_batches "
@@ -795,6 +856,8 @@ def main():
              image_save_every=args.image_save_every,
              batch_stride=args.batch_stride,
              images_only=args.images_only,
+             ply_batch=args.ply_batch,
+             ply_per_frame=args.ply_per_frame,
              image_views=(None if args.image_views.strip().lower() == "all"
                           else {int(x) for x in args.image_views.split(",") if x.strip() != ""}),
              max_image_batches=args.max_image_batches,
