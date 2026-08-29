@@ -234,7 +234,7 @@ def umeyama_ate(pred_xyz, gt_xyz):
 def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50, image_batch_start=0,
              per_frame_dynamic=False, leave_one_out=False, precomputed_mask_dir=None,
              track_dynamic=False, gain_correct=False, scale_mult=1.0,
-             image_save_every=1, batch_stride=1, images_only=False):
+             image_save_every=1, batch_stride=1, images_only=False, image_views=None):
     os.makedirs(output_dir, exist_ok=True)
     images_dir = os.path.join(output_dir, "images")
     dyn_mask_dir = os.path.join(output_dir, "dyn_mask")
@@ -480,9 +480,17 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
             # NOTE the movement you want to SEE is mostly WITHIN a batch: at
             # --frame_stride 8 the six views v00..v05 of one batch are 8 frames apart,
             # so they span ~48 frames (~1.5 s) — that is where an object visibly moves.
+            # --image_views restricts WHICH views are written. Saving all V views of
+            # every batch over a whole sequence is 5520 near-duplicate stills (~2.4 GB)
+            # and is unwatchable. Saving ONE view per batch instead yields a continuous
+            # video of the sequence: window i starts at frame i, so view 0 of batch i IS
+            # frame i, and consecutive batches step one frame. View 0 is also where the
+            # motion correction is LARGEST (furthest in time from the rest of the
+            # window), so it is the view that shows the mechanism best.
             _save_this = (
                 image_batch_start <= batch_idx < image_batch_start + max_image_batches
                 and ((batch_idx - image_batch_start) % max(image_save_every, 1) == 0)
+                and (image_views is None or v_idx in image_views)
             )
             if _save_this:
                 comparison = torch.cat([gt_frame, pred_frame], dim=2)  # side by side [3, H, 2W]
@@ -622,6 +630,13 @@ def main():
                              "this still spans the whole sequence for 1/N the runtime. Needed on long "
                              "sequences (TUM fr2 has 3670 windows) where a full pass exceeds 2h and "
                              "the 24g watchdog cancels it for low GPU-memory utilisation.")
+    parser.add_argument("--image_views", type=str, default="all",
+                        help="Which views to write images for: 'all' (default) or a comma-separated "
+                             "list, e.g. '0'. Use '0' with --image_batch_start 0 --max_image_batches "
+                             "99999 to render the WHOLE sequence as one frame per batch (view 0 of "
+                             "batch i IS frame i), i.e. a continuous video, instead of V near-"
+                             "duplicate stills per window. View 0 is also where the motion "
+                             "correction is largest.")
     parser.add_argument("--images_only", action="store_true",
                         help="FIGURES ONLY: skip every batch outside the --image_batch_start / "
                              "--max_image_batches window before the forward pass, so rendering a "
@@ -780,6 +795,8 @@ def main():
              image_save_every=args.image_save_every,
              batch_stride=args.batch_stride,
              images_only=args.images_only,
+             image_views=(None if args.image_views.strip().lower() == "all"
+                          else {int(x) for x in args.image_views.split(",") if x.strip() != ""}),
              max_image_batches=args.max_image_batches,
              image_batch_start=args.image_batch_start,
              per_frame_dynamic=args.per_frame_dynamic,
