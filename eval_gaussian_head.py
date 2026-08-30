@@ -235,7 +235,7 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
              per_frame_dynamic=False, leave_one_out=False, precomputed_mask_dir=None,
              track_dynamic=False, gain_correct=False, scale_mult=1.0,
              image_save_every=1, batch_stride=1, images_only=False, image_views=None,
-             ply_batch=None, ply_per_frame=False):
+             ply_batch=None, ply_per_frame=False, ply_dyn_source=-1):
     os.makedirs(output_dir, exist_ok=True)
     images_dir = os.path.join(output_dir, "images")
     dyn_mask_dir = os.path.join(output_dir, "dyn_mask")
@@ -526,6 +526,26 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
             model.decoder,
         )
 
+    # --ply_dyn_source keeps ALL static Gaussians but only ONE source frame's dynamic
+    # ones. WHY: every window holds V copies of a moving object, one per source frame.
+    # Exported together they stack -- in the control as V crisp copies strung along the
+    # path, and under motion as V nearly-coincident copies that merge into one THICK
+    # blurry blob. The blob is closer to the truth yet looks worse than V sharp wrong
+    # answers. Keeping a single source frame removes the stacking from BOTH, so the
+    # comparison shows what actually differs: one person standing still (control) vs
+    # one person moving to where they were at t (flow).
+    def _ply_keep(n_gauss, dev):
+        if ply_dyn_source < 0 or last_infos is None:
+            return None
+        fi = last_infos.get("gaussian_frame_idx")
+        df = last_infos.get("gaussian_dyn_flag")
+        if fi is None or df is None:
+            return None
+        return (df[0].to(dev) <= 0.5) | (fi[0].to(dev) == ply_dyn_source)
+
+    def _sub(t, keep):
+        return t if keep is None else t[keep]
+
     # --- PLY export (last batch) ---
     if last_gaussians is not None:
         print("Saving gaussians.ply...")
@@ -535,12 +555,15 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
         if last_dyn_mask is not None:
             dyn_mask_flat = last_dyn_mask[0].cpu().numpy().reshape(-1).astype(np.float32)
 
+        _k = _ply_keep(last_gaussians.means[0].shape[0], last_gaussians.means.device)
+        if _k is not None and dyn_mask_flat is not None:
+            dyn_mask_flat = dyn_mask_flat[_k.cpu().numpy()]
         export_ply(
-            last_gaussians.means[0],
-            last_gaussians.scales[0],
-            last_gaussians.rotations[0],
-            last_gaussians.harmonics[0],
-            last_gaussians.opacities[0],
+            _sub(last_gaussians.means[0], _k),
+            _sub(last_gaussians.scales[0], _k),
+            _sub(last_gaussians.rotations[0], _k),
+            _sub(last_gaussians.harmonics[0], _k),
+            _sub(last_gaussians.opacities[0], _k),
             Path(ply_path),
             save_sh_dc_only=True,
             dyn_mask_flat=dyn_mask_flat,
@@ -578,15 +601,17 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
                 if dvalid is not None:
                     move = move * dvalid[0, :, j].to(dev).float()
                 means_j = means + move.unsqueeze(-1) * disp[0, :, j].to(dev).float()
+                _k = _ply_keep(means.shape[0], dev)
+                _df = dyn_flat[_k.cpu().numpy()] if (_k is not None and dyn_flat is not None) else dyn_flat
                 export_ply(
-                    means_j,
-                    last_gaussians.scales[0],
-                    last_gaussians.rotations[0],
-                    last_gaussians.harmonics[0],
-                    last_gaussians.opacities[0],
+                    _sub(means_j, _k),
+                    _sub(last_gaussians.scales[0], _k),
+                    _sub(last_gaussians.rotations[0], _k),
+                    _sub(last_gaussians.harmonics[0], _k),
+                    _sub(last_gaussians.opacities[0], _k),
                     Path(os.path.join(output_dir, f"gaussians_t{j:02d}.ply")),
                     save_sh_dc_only=True,
-                    dyn_mask_flat=dyn_flat,
+                    dyn_mask_flat=_df,
                     dyn_opacity_scale=0.5,
                 )
             print(f"  -> {output_dir}/gaussians_t00..t{n_views-1:02d}.ply "
@@ -684,6 +709,14 @@ def main():
                         help="Which window's Gaussians to export as PLY. Default = the LAST batch "
                              "processed (~919), which is rarely where the moving object is. Pair "
                              "with --images_only for a fast targeted export.")
+    parser.add_argument("--ply_dyn_source", type=int, default=-1,
+                        help="Keep ALL static Gaussians but only the dynamic ones from THIS source "
+                             "frame (default -1 = all). A window holds V copies of a moving object, "
+                             "one per source frame; exported together they stack into a thick blob "
+                             "under motion and V crisp copies without it, which makes the correct "
+                             "result look worse. With e.g. 0, the control shows one person frozen at "
+                             "frame 0 and the flow export shows that same person moving to where "
+                             "they were at t -- the actual difference, unobscured.")
     parser.add_argument("--ply_per_frame", action="store_true",
                         help="4D EXPORT: also write gaussians_t00..tNN.ply, one per timestamp, with "
                              "each dynamic Gaussian displaced by its scene-flow motion to that "
@@ -858,6 +891,7 @@ def main():
              images_only=args.images_only,
              ply_batch=args.ply_batch,
              ply_per_frame=args.ply_per_frame,
+             ply_dyn_source=args.ply_dyn_source,
              image_views=(None if args.image_views.strip().lower() == "all"
                           else {int(x) for x in args.image_views.split(",") if x.strip() != ""}),
              max_image_batches=args.max_image_batches,
