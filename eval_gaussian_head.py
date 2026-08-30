@@ -235,7 +235,8 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
              per_frame_dynamic=False, leave_one_out=False, precomputed_mask_dir=None,
              track_dynamic=False, gain_correct=False, scale_mult=1.0,
              image_save_every=1, batch_stride=1, images_only=False, image_views=None,
-             ply_batch=None, ply_per_frame=False, ply_dyn_source=-1):
+             ply_batch=None, ply_per_frame=False, ply_dyn_source=-1,
+             image_error_map=False, image_error_gain=4.0):
     os.makedirs(output_dir, exist_ok=True)
     images_dir = os.path.join(output_dir, "images")
     dyn_mask_dir = os.path.join(output_dir, "dyn_mask")
@@ -495,7 +496,16 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
                 and (image_views is None or v_idx in image_views)
             )
             if _save_this:
-                comparison = torch.cat([gt_frame, pred_frame], dim=2)  # side by side [3, H, 2W]
+                panels = [gt_frame, pred_frame]
+                # ERROR MAP. A sub-decibel PSNR gain concentrated on ~12% of pixels is
+                # invisible in a side-by-side render -- the eye cannot difference two
+                # images. |pred - GT|, amplified, makes it directly visible: the moving
+                # object glows in the control and dims when its Gaussians are displaced
+                # to the right place. Compare the SAME filename across two runs.
+                if image_error_map:
+                    err = (pred_frame - gt_frame).abs().mean(dim=0, keepdim=True)
+                    panels.append((err * image_error_gain).clamp(0, 1).repeat(3, 1, 1))
+                comparison = torch.cat(panels, dim=2)  # [3, H, N*W]
                 save_image(comparison, os.path.join(images_dir, f"b{batch_idx:04d}_v{v_idx:02d}.png"))
 
                 if dyn_mask is not None:
@@ -709,6 +719,14 @@ def main():
                         help="Which window's Gaussians to export as PLY. Default = the LAST batch "
                              "processed (~919), which is rarely where the moving object is. Pair "
                              "with --images_only for a fast targeted export.")
+    parser.add_argument("--image_error_map", action="store_true",
+                        help="Append a per-pixel |pred - GT| panel to each saved image. A "
+                             "sub-decibel gain on ~12%% of pixels cannot be seen by comparing two "
+                             "renders side by side; in the error map the moving object glows in the "
+                             "control and dims under motion compensation. Compare the same filename "
+                             "between a control run and a flow run.")
+    parser.add_argument("--image_error_gain", type=float, default=4.0,
+                        help="Brightness multiplier for --image_error_map (default 4).")
     parser.add_argument("--ply_dyn_source", type=int, default=-1,
                         help="Keep ALL static Gaussians but only the dynamic ones from THIS source "
                              "frame (default -1 = all). A window holds V copies of a moving object, "
@@ -892,6 +910,8 @@ def main():
              ply_batch=args.ply_batch,
              ply_per_frame=args.ply_per_frame,
              ply_dyn_source=args.ply_dyn_source,
+             image_error_map=args.image_error_map,
+             image_error_gain=args.image_error_gain,
              image_views=(None if args.image_views.strip().lower() == "all"
                           else {int(x) for x in args.image_views.split(",") if x.strip() != ""}),
              max_image_batches=args.max_image_batches,
