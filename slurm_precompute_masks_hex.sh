@@ -1,0 +1,81 @@
+#!/bin/bash
+#SBATCH --job-name=precomp_hex
+#SBATCH --partition=gpu
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=16
+#SBATCH --time=12:00:00
+#SBATCH --output=slurm_logs/precomp_hex_%j.out
+#SBATCH --error=slurm_logs/precomp_hex_%j.err
+# =============================================================================
+# Dynamic-mask precompute for the hex-4gpu cluster (conda, no enroot container).
+#
+# WHY THIS EXISTS SEPARATELY. slurm_precompute_masks_20260731.sh targets the old
+# cluster: enroot + squashfs, --partition=24g, --qos=students_normal, fixed node
+# list, and memory tied to GPU count. Here it is plain conda, one partition
+# (gpu), and MaxMemPerNode=UNLIMITED with 377 GB of host RAM.
+#
+# WHY THAT MATTERS. Host RAM was the binding constraint on the old cluster: the
+# detector copies Q/K to CPU and they scale with FRAMES PER PASS, which capped
+# chunk_size at 16 -- and at chunk 16 only 26% of frames get the full
+# [-6,-4,-2,2,4,6] comparison window even with --pass_margin. With ~12x the RAM
+# the chunk can finally be large enough that a margin is cheap, which is the
+# whole reason for moving here.
+#
+# USAGE: sbatch slurm_precompute_masks_hex.sh SEQUENCE [CHUNK] [RES] [STAGES] [STRIDE] [MARGIN]
+#   sbatch slurm_precompute_masks_hex.sh rgbd_bonn_removing_obstructing_box 128 518 3 1 6
+# Find the largest CHUNK that fits by trying 64 -> 128 -> 256 (see README notes).
+# =============================================================================
+set -euo pipefail
+
+SEQUENCE=${1:?"give a sequence, e.g. rgbd_bonn_removing_obstructing_box"}
+CHUNK_SIZE=${2:-64}
+DET_RES=${3:-518}
+STAGES=${4:-3}
+STRIDE=${5:-1}      # 1 = consecutive frames = the paper's ~0.2 s window. Do not use 0.
+MARGIN=${6:-6}      # overlap passes so every emitted frame keeps its full window
+
+REPO="${HOME}/DynamicReconstructionSplat"
+DATA_ROOT="${HOME}/data/bonn/rgbd_bonn_dataset"
+CKPT="${REPO}/ckpts/vggt4d_model_tracker_fixed_e20.pt"
+# Outputs go to /data (14 TB) not home (100 GB quota); symlinked back for convenience.
+OUT_ROOT="${HOME}/data/mask_out"
+OUT_DIR="${OUT_ROOT}/output_dyn_masks_precomputed_cs${CHUNK_SIZE}_r${DET_RES}_st${STAGES}_fs${STRIDE}"
+[ "${MARGIN}" != "0" ] && OUT_DIR="${OUT_DIR}_m${MARGIN}"
+
+mkdir -p "${REPO}/slurm_logs" "${OUT_ROOT}"
+cd "${REPO}"
+
+source /opt/miniforge3/etc/profile.d/conda.sh
+conda activate dynrec
+export PATH=/usr/local/cuda-12.9/bin:${PATH}
+export CUDA_HOME=/usr/local/cuda-12.9
+# Q/K copies are large and numpy/BLAS threads multiply the footprint; 64 cores
+# would otherwise spawn 64 threads per op for no speedup on this workload.
+export OMP_NUM_THREADS=8
+export MKL_NUM_THREADS=8
+
+echo "=============================================="
+echo "Masks: ${SEQUENCE}  chunk ${CHUNK_SIZE}  res ${DET_RES}  stages ${STAGES}  stride ${STRIDE}  margin ${MARGIN}"
+echo "node: $(hostname)   gpu: ${CUDA_VISIBLE_DEVICES:-unset}   $(date)"
+nvidia-smi --query-gpu=index,name,memory.used,memory.total --format=csv
+echo "=============================================="
+
+[ -d "${DATA_ROOT}/${SEQUENCE}/rgb" ] || { echo "ERROR: no rgb/ under ${DATA_ROOT}/${SEQUENCE}"; exit 1; }
+[ -f "${CKPT}" ] || { echo "ERROR: checkpoint missing: ${CKPT}"; exit 1; }
+
+python precompute_dyn_masks.py \
+    --data_dir "${DATA_ROOT}" \
+    --dataset_name "${SEQUENCE}" \
+    --output_dir "${OUT_DIR}" \
+    --vggt4d_weights_path "${CKPT}" \
+    --chunk_size "${CHUNK_SIZE}" \
+    --det_resolution "${DET_RES}" \
+    --stages "${STAGES}" \
+    --frame_stride "${STRIDE}" \
+    --pass_margin "${MARGIN}" \
+    --save_overlays
+
+echo "=============================================="
+echo "Masks -> ${OUT_DIR}/${SEQUENCE}/{masks,overlays}"
+echo "LOOK at the overlays: is the moving object covered and the background clean?"
+echo "Job finished at: $(date)"
