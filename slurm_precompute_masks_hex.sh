@@ -1,11 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=precomp_hex
 #SBATCH --partition=gpu
-# Two GPUs, deliberately: another user's process can be resident on one of the
-# cards slurm hands out (it does not always account for non-slurm processes), and
-# that is an instant OOM at startup regardless of chunk size. We use exactly ONE
-# -- the emptier of the two, chosen below -- and hold the other only as insurance.
-#SBATCH --gres=gpu:2
+#SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=16
 #SBATCH --time=12:00:00
 #SBATCH --output=slurm_logs/precomp_hex_%j.out
@@ -59,20 +55,19 @@ export OMP_NUM_THREADS=8
 export MKL_NUM_THREADS=8
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True   # large activations fragment badly
 
-# Pick the emptiest of the GPUs slurm allocated to THIS job. Inside the job nvidia-smi
-# only lists our own devices, so these indices are job-local and selecting among them
-# never touches a card we were not given.
-PICK=$(nvidia-smi --query-gpu=index,memory.free --format=csv,noheader,nounits \
-       | sort -t, -k2 -nr | head -1 | cut -d, -f1 | tr -d ' ')
-FREE=$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits | sort -nr | head -1)
-echo "GPU selection: using local index ${PICK} with ${FREE} MiB free"
+# Refuse to start on a card someone else is already occupying. Slurm does not always
+# account for non-slurm processes, so an allocated GPU can arrive with most of its
+# memory gone -- that is an instant OOM on the first pass, and the traceback blames
+# chunk_size for what is really a busy card. Better to exit in seconds with the real
+# reason and requeue when the GPU is free.
+FREE=$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits | head -1 | tr -d ' ')
+echo "GPU free memory: ${FREE} MiB"
 if [ "${FREE}" -lt 20000 ]; then
-  echo "ERROR: emptiest allocated GPU has only ${FREE} MiB free (need >= ~20 GB)."
-  echo "       Another process is resident on the cards slurm gave us; requeue later."
+  echo "ERROR: allocated GPU has only ${FREE} MiB free (need >= ~20 GB)."
+  echo "       Another process is resident on it. Requeue when it frees up."
   nvidia-smi
   exit 1
 fi
-export CUDA_VISIBLE_DEVICES=${PICK}
 
 echo "=============================================="
 echo "Masks: ${SEQUENCE}  chunk ${CHUNK_SIZE}  res ${DET_RES}  stages ${STAGES}  stride ${STRIDE}  margin ${MARGIN}"
