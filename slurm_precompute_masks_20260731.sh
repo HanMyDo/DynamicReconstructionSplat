@@ -46,6 +46,10 @@ CHUNK_SIZE=${2:-32}
 DET_RES=${3:-518}   # detection long-edge; lower (e.g. 378) to fit more frames within fixed RAM
 STAGES=${4:-3}      # 3 = full original VGGT4D (Stage 1->2->3); 1 = coarse only. 3 needs smaller chunks (more memory).
 STRIDE=${5:-1}      # 0 = AUTO full-sequence span (VALIDATED: use with res 518, reproduced original mask quality). 1 = consecutive. >1 = every STRIDE-th frame (spans chunk_size*STRIDE).
+MARGIN=${6:-0}     # overlap passes by N frames each side, emit only the interior, so every
+                   # frame gets its FULL +-2/4/6 detector window (at chunk 16, margin 0
+                   # leaves only 26% of frames with a complete window; margin 6 -> 100%).
+                   # Costs runtime, not memory: ~chunk/(chunk-2*margin)x = 4x at 16/6.
 
 export ENROOT_RUNTIME_PATH=/tmp/$USER/runtime
 export ENROOT_CACHE_PATH=/tmp/$USER/cache
@@ -56,7 +60,8 @@ mkdir -p slurm_logs
 
 REPO="/mnt/home/hanmydo/DynamicReconstructionSplat"
 VGGT4D_CKPT="${REPO}/ckpts/vggt4d_model_tracker_fixed_e20.pt"
-OUT_DIR="output_dyn_masks_precomputed_cs${CHUNK_SIZE}_r${DET_RES}_st${STAGES}_fs${STRIDE}"   # chunk+res+stages+stride in name so runs don't overwrite; matches gitignore output_*/
+OUT_DIR="output_dyn_masks_precomputed_cs${CHUNK_SIZE}_r${DET_RES}_st${STAGES}_fs${STRIDE}"
+[ "${MARGIN}" != "0" ] && OUT_DIR="${OUT_DIR}_m${MARGIN}"   # margin changes the masks -> own dir   # chunk+res+stages+stride in name so runs don't overwrite; matches gitignore output_*/
 
 echo "=============================================="
 echo "Precompute dynamic masks — ${SEQUENCE} (chunk_size ${CHUNK_SIZE})"
@@ -105,6 +110,7 @@ enroot start --root --rw --mount /mnt:/mnt --mount /tmp:/tmp ${CONTAINER} bash -
     --det_resolution ${DET_RES} \
     --stages ${STAGES} \
     --frame_stride ${STRIDE} \
+    --pass_margin ${MARGIN} \
     --save_overlays
 "
 

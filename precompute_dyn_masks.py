@@ -92,8 +92,21 @@ def chunk_ranges(n_frames: int, chunk_size: int, min_frames: int = 6):
     return ranges
 
 
-def build_passes(n_frames: int, chunk_size: int, stride: int = 1, min_frames: int = 6):
+def build_passes(n_frames: int, chunk_size: int, stride: int = 1, min_frames: int = 6,
+                 margin: int = 0):
     """Group frame INDICES into detection passes (each pass = one backbone forward).
+
+    Returns a list of (process_indices, emit_indices). A pass runs the backbone on
+    `process_indices` but only WRITES masks for `emit_indices`.
+
+    WHY `margin`. Every extractor in the original detector compares a reference frame
+    against IN-PASS offsets [-6,-4,-2,2,4,6]. With contiguous, non-overlapping passes
+    the frames near a pass boundary lose half of that window -- at chunk_size 16 only
+    positions 6..9 keep all six neighbours, so 12 of 16 masks are computed from a
+    partial window. `margin` M makes passes OVERLAP by M on each side and emits only
+    the interior, so every emitted frame has its full window. Costs compute, not
+    memory: the pass is still <= chunk_size frames, there are just more of them
+    (emit block = chunk_size - 2M, so runtime scales by chunk_size/(chunk_size-2M)).
 
     stride == 1: contiguous windows via chunk_ranges (original behavior). Each pass is
       chunk_size CONSECUTIVE frames -> spans only ~chunk_size frames of time, so in a
@@ -107,7 +120,15 @@ def build_passes(n_frames: int, chunk_size: int, stride: int = 1, min_frames: in
       so the saved masks still tile the whole sequence with no gaps or overlaps.
     """
     if stride <= 1:
-        return [list(range(s, e)) for s, e in chunk_ranges(n_frames, chunk_size, min_frames)]
+        if margin <= 0:
+            return [(list(range(s, e)), list(range(s, e)))
+                    for s, e in chunk_ranges(n_frames, chunk_size, min_frames)]
+        emit_size = max(1, chunk_size - 2 * margin)
+        out = []
+        for s, e in chunk_ranges(n_frames, emit_size, min_frames=1):
+            ps, pe = max(0, s - margin), min(n_frames, e + margin)
+            out.append((list(range(ps, pe)), list(range(s, e))))
+        return out
     passes = []
     for k in range(stride):
         idxs = list(range(k, n_frames, stride))
@@ -129,7 +150,7 @@ def build_passes(n_frames: int, chunk_size: int, stride: int = 1, min_frames: in
             else:
                 merged.append(p)
         passes = merged
-    return passes
+    return [(p, p) for p in passes]
 
 
 def save_mask_png(mask_hw: np.ndarray, path: Path):
@@ -162,6 +183,15 @@ def main():
                          "context) while every frame still gets a mask. 1 = consecutive windows. >1 = each "
                          "pass takes every STRIDE-th frame, spanning up to chunk_size*STRIDE frames. Use 0 "
                          "with --det_resolution 518; that combo reproduced the original's mask quality.")
+    ap.add_argument("--pass_margin", type=int, default=0,
+                    help="Overlap passes by this many frames on each side and write masks only "
+                         "for the interior. The detector compares each frame against in-pass "
+                         "offsets +-2/4/6, so without a margin the frames at a pass boundary are "
+                         "computed from a truncated window (at chunk_size 16, 12 of 16 frames). "
+                         "6 gives every emitted frame its full window. Costs runtime, not memory: "
+                         "emit block = chunk_size - 2*margin, so runtime scales by "
+                         "chunk_size/(chunk_size-2*margin) -- 4x at chunk 16 margin 6, 2x at "
+                         "margin 4. Only applies to --frame_stride 1.")
     ap.add_argument("--det_resolution", type=int, default=518,
                     help="NATIVE detection long-edge (target_size passed to load_and_preprocess_images). "
                          "518 = original VGGT4D (faithful). Lower (e.g. 448/378) -> fewer tokens -> less "
@@ -193,7 +223,8 @@ def main():
     stride = args.frame_stride
     if stride == 0:
         stride = max(1, (len(frame_paths) + args.chunk_size - 1) // args.chunk_size)
-    passes = build_passes(len(frame_paths), args.chunk_size, stride)
+    passes = build_passes(len(frame_paths), args.chunk_size, stride,
+                          margin=(args.pass_margin if stride <= 1 else 0))
     span_hint = f", span up to ~{args.chunk_size * stride} frames/pass" if stride > 1 else ""
     auto_hint = " (auto full-span)" if args.frame_stride == 0 else ""
     print(f"Sequence: {args.dataset_name}  |  {len(frame_paths)} frames  |  "
@@ -209,7 +240,7 @@ def main():
     encoder = model.encoder
 
     per_frame_fraction = {}
-    for ci, idxs in enumerate(passes):
+    for ci, (idxs, emit_idxs) in enumerate(passes):
         chunk_paths = [frame_paths[i] for i in idxs]
         # Load NATIVELY at the detection long-edge (aspect-preserved crop, /14). Default
         # 518 == the ORIGINAL VGGT4D (our fork's shared default is 448 for reconstruction;
@@ -273,7 +304,10 @@ def main():
 
         dyn_mask = dyn_mask.float().cpu()
 
+        emit_set = set(emit_idxs)
         for i, p in enumerate(chunk_paths):
+            if idxs[i] not in emit_set:
+                continue          # margin frame: context only, its own window is truncated
             m = dyn_mask[0, i].numpy()  # [H, W] in {0,1}
             save_mask_png(m, masks_dir / f"{p.stem}.png")
             if args.save_overlays:
@@ -288,6 +322,7 @@ def main():
         "frame_stride": stride,
         "frame_stride_arg": args.frame_stride,
         "n_passes": len(passes),
+        "pass_margin": args.pass_margin,
         "preprocess_mode": args.preprocess_mode,
         "det_resolution": args.det_resolution,
         "stages": args.stages,
