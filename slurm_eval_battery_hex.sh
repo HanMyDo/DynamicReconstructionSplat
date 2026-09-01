@@ -31,6 +31,10 @@ set -uo pipefail
 
 MASK_DIR=${1:-$HOME/data/mask_out/output_dyn_masks_precomputed_cs64_r518_st3_fs1_m6}
 DATE_TAG=${2:-m6}
+# Minimum free VRAM. An nf6 eval needs ~10 GB (these ran on 24 GB 3090s), far less
+# than the mask precompute -- so do not inherit that script's 20 GB bar, or a card
+# with a partial occupant gets refused when it would have been perfectly usable.
+MIN_FREE=${3:-12000}
 NF=6
 
 REPO="${HOME}/DynamicReconstructionSplat"
@@ -52,7 +56,7 @@ FREE=$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits | sort -
 PICK=$(nvidia-smi --query-gpu=index,memory.free --format=csv,noheader,nounits | sort -t, -k2 -nr | head -1 | cut -d, -f1 | tr -d ' ')
 export CUDA_VISIBLE_DEVICES=${PICK}
 echo "GPU: local index ${PICK}, ${FREE} MiB free"
-[ "${FREE}" -lt 20000 ] && { echo "ERROR: only ${FREE} MiB free; requeue when a card frees."; nvidia-smi; exit 1; }
+[ "${FREE}" -lt "${MIN_FREE}" ] && { echo "ERROR: only ${FREE} MiB free (need ${MIN_FREE}); requeue when a card frees."; nvidia-smi; exit 1; }
 
 # The anchor checkpoint has to be relayed from the old cluster; without it the two
 # fine-tuned configs are skipped rather than failing the whole battery.
