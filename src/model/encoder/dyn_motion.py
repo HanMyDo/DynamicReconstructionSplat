@@ -392,7 +392,19 @@ def collect_dyn_tracks(
             except Exception as e:          # tracker unavailable/OOM -> skip this frame
                 print(f"[DynFlow] tracking from frame {qf} failed ({e})")
                 continue
+            # DIAGNOSTIC: how far do the tracks actually travel, in 2D and in 3D?
+            # These two numbers localise a lost-motion bug immediately. Compare the 2D
+            # figure against the dynamic mask's own centroid displacement over the same
+            # span (measurable straight from the mask PNGs): if the tracks barely move
+            # while the mask does, the TRACKER is failing; if the tracks move but the 3D
+            # trajectory does not, the DEPTH LIFT is flattening it.
+            _d2d = (tracks - tracks[qf:qf + 1]).norm(dim=-1).max(0).values   # [Nq]
             traj, in_b = _lift_tracks_nearest(pts_all[b], tracks)   # [V,Nq,3], [V,Nq]
+            _d3d = (traj - traj[qf:qf + 1]).norm(dim=-1).max(0).values       # [Nq]
+            print(f"[DynTracks] qf={qf} n={tracks.shape[1]} | 2D travel median="
+                  f"{_d2d.median().item():.1f}px p90={_d2d.quantile(0.9).item():.1f}px "
+                  f"| 3D travel median={_d3d.median().item():.4f} "
+                  f"p90={_d3d.quantile(0.9).item():.4f} world", flush=True)
             ok = in_b
             if vis is not None:
                 ok = ok & (vis > 0.5)
