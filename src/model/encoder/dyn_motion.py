@@ -394,6 +394,88 @@ def _chain_track_head(track_head, toks_b: list, image_b1: torch.Tensor,
     return tracks, vis
 
 
+_RAFT_CACHE = {}
+
+
+def _raft_model(device):
+    """Lazily build a pretrained RAFT. Cached: building it per window would dominate."""
+    key = str(device)
+    if key not in _RAFT_CACHE:
+        from torchvision.models.optical_flow import raft_large, Raft_Large_Weights
+        m = raft_large(weights=Raft_Large_Weights.DEFAULT, progress=False).to(device).eval()
+        for prm in m.parameters():
+            prm.requires_grad_(False)
+        _RAFT_CACHE[key] = m
+    return _RAFT_CACHE[key]
+
+
+def _sample_flow(flow: torch.Tensor, pts: torch.Tensor) -> torch.Tensor:
+    """Bilinearly sample a flow field at sub-pixel positions.
+
+    flow: [2, H, W] (dx, dy).  pts: [N, 2] (x, y) -> [N, 2] displacement.
+    """
+    _, H, W = flow.shape
+    g = pts.clone().float()
+    g[:, 0] = (g[:, 0] / max(W - 1, 1)) * 2.0 - 1.0
+    g[:, 1] = (g[:, 1] / max(H - 1, 1)) * 2.0 - 1.0
+    out = F.grid_sample(flow.unsqueeze(0), g.view(1, 1, -1, 2),
+                        mode="bilinear", align_corners=True, padding_mode="border")
+    return out[0, :, 0, :].permute(1, 0)          # [N, 2]
+
+
+@torch.no_grad()
+def track_by_raft(image_b1: torch.Tensor, q: torch.Tensor, query_frame: int,
+                  fb_thresh: float = 3.0) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Track query points across a window by CHAINING dense optical flow.
+
+    WHY THIS EXISTS. VGGT's point tracker recovers only ~20% of the motion here
+    (13.6 px of a 67 px shift), and that is not fixable from our side: more
+    iterations, unsuppressed features, chained one-frame hops and more queries all
+    leave it unchanged, and its weights load correctly. The scene-flow layer that
+    consumes the tracks is verified correct, so the tracks are the ceiling.
+
+    RAFT is a better fit for this regime: it estimates DENSE flow between a single
+    pair of frames, and the per-hop motion here is small (~13 px between adjacent
+    window frames), well inside its range. Integrating flow across hops gives the
+    same [V, Nq, 2] trajectories, so everything downstream is unchanged.
+
+    Visibility comes from a forward-backward consistency check: a point whose
+    round trip lands more than `fb_thresh` px from where it started is occluded or
+    mis-matched, and later hops inherit that failure (a lost track cannot recover).
+
+    image_b1: [1, V, 3, H, W] in [0, 1].  q: [1, Nq, 2] at `query_frame`.
+    -> (tracks [V, Nq, 2], vis [V, Nq])
+    """
+    dev = image_b1.device
+    V = image_b1.shape[1]
+    Nq = q.shape[1]
+    model = _raft_model(dev)
+    imgs = (image_b1[0].float().clamp(0, 1) * 2.0 - 1.0)      # RAFT wants [-1, 1]
+
+    tracks = torch.zeros(V, Nq, 2, device=dev, dtype=torch.float32)
+    vis = torch.ones(V, Nq, device=dev, dtype=torch.float32)
+    tracks[query_frame] = q[0].float()
+
+    for direction in (1, -1):
+        cur = q[0].float()
+        alive = torch.ones(Nq, device=dev, dtype=torch.float32)
+        f = query_frame
+        while 0 <= f + direction < V:
+            nxt = f + direction
+            a, b = imgs[f:f + 1], imgs[nxt:nxt + 1]
+            fwd = model(a, b)[-1][0]                          # [2, H, W]  f -> nxt
+            bwd = model(b, a)[-1][0]                          # [2, H, W]  nxt -> f
+            step = _sample_flow(fwd, cur)
+            nxt_pts = cur + step
+            back = nxt_pts + _sample_flow(bwd, nxt_pts)
+            alive = alive * ((back - cur).norm(dim=-1) < fb_thresh).float()
+            tracks[nxt] = nxt_pts
+            vis[nxt] = alive
+            cur = nxt_pts
+            f = nxt
+    return tracks, vis
+
+
 @torch.no_grad()
 def collect_dyn_tracks(
     track_head,
@@ -408,6 +490,7 @@ def collect_dyn_tracks(
     min_track_pts: int = 8,
     track_iters: Optional[int] = None,
     chain: bool = False,
+    tracker: str = "vggt",
 ) -> Optional[List[Optional[Tuple[torch.Tensor, torch.Tensor]]]]:
     """Phase A of the scene-flow motion model: build a track scaffold.
 
@@ -423,7 +506,7 @@ def collect_dyn_tracks(
     -> per batch item: (traj [V,Nt,3], ok [V,Nt] bool) or None. None overall if
        nothing tracked.
     """
-    if track_head is None:
+    if track_head is None and tracker != "raft":
         return None
     B, V, H, W, _ = pts_all.shape
     dev = pts_all.device
@@ -449,7 +532,9 @@ def collect_dyn_tracks(
                 ys, xs = ys[pick], xs[pick]
             q = torch.stack([xs.float(), ys.float()], dim=-1).unsqueeze(0)  # [1,Nq,2] (x,y)
             try:
-                if chain:
+                if tracker == "raft":
+                    tracks, vis = track_by_raft(img_b, q, qf)
+                elif chain:
                     tracks, vis = _chain_track_head(
                         track_head, toks_b, img_b, patch_start_idx, q, qf,
                         iters=track_iters)

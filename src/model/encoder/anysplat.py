@@ -172,6 +172,11 @@ class EncoderAnySplatCfg:
     # the query frame (see _chain_track_head): each hop stays within the range the
     # tracker handles, so large displacements accumulate instead of stalling.
     dyn_motion_chain: bool = False
+    # Which point tracker feeds the scene flow. "vggt" = the backbone's TrackHead
+    # (recovers ~20% of the motion on Bonn -- the measured ceiling); "raft" = chained
+    # dense optical flow from torchvision's pretrained RAFT, whose per-hop regime
+    # (~13 px between adjacent window frames) is well inside its range.
+    dyn_motion_tracker: str = "vggt"
     dynamic_n_clusters: int = 64  # Number of clusters for KMeans refinement
     suppress_dynamic_gaussians: bool = False
     # Temporal attention options for Gaussian head (Fix 2 for dynamic handling)
@@ -960,7 +965,8 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
                 ).reshape(_bo, _vo, h, w)
             _dm_motion = (_ov > 0.5).float()
         if (_dm_motion is not None and _knn_k > 0
-                and getattr(self, "track_head", None) is not None):
+                and (getattr(self, "track_head", None) is not None
+                     or getattr(self.cfg, "dyn_motion_tracker", "vggt") == "raft")):
             # SCENE-FLOW mode (phase A): build the track scaffold. Displacements are
             # computed per Gaussian AFTER the Gaussian list exists (phase B below).
             # See dyn_motion_clean_tokens: the tracker must not read features whose
@@ -979,6 +985,7 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
                 query_all_frames=getattr(self.cfg, "dyn_motion_query_all", True),
                 track_iters=(getattr(self.cfg, "dyn_motion_track_iters", 0) or None),
                 chain=getattr(self.cfg, "dyn_motion_chain", False),
+                tracker=getattr(self.cfg, "dyn_motion_tracker", "vggt"),
             )
             if _clean and self.use_vggt4d:
                 del _trk_tokens

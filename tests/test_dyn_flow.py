@@ -228,6 +228,42 @@ def main() -> int:
     if not t9:
         fails.append(9)
 
+
+    # 10. RAFT TRACKING PATH: flow sampling and chained integration. The VGGT tracker
+    #     recovers only ~20% of the motion on this data (13.6 px of a 67 px shift) and
+    #     nothing on our side changes that, so the flow-based tracker is the intended
+    #     replacement -- its integration must be exact before it is worth GPU time.
+    Hf = Wf = 32
+    flow = torch.zeros(2, Hf, Wf); flow[0] = 3.0; flow[1] = -2.0
+    sampled = dyn_motion._sample_flow(flow, torch.tensor([[5.0, 7.0], [10.5, 20.25]]))
+    t10a = torch.allclose(sampled, torch.tensor([[3., -2.], [3., -2.]]), atol=1e-4)
+
+    class StubRaft:                       # constant field -> exact expected trajectory
+        def __init__(self, d): self.d = torch.tensor(d)
+        def __call__(self, a, b):
+            sgn = 1.0 if float(b[0, 0, 0, 0]) > float(a[0, 0, 0, 0]) else -1.0
+            f = torch.zeros(1, 2, a.shape[-2], a.shape[-1])
+            f[0, 0] = self.d[0] * sgn; f[0, 1] = self.d[1] * sgn
+            return [f]
+    Vr, dl = 6, (4.0, 3.0)
+    dyn_motion._RAFT_CACHE["cpu"] = StubRaft(dl)
+    imgr = torch.zeros(1, Vr, 3, Hf, Wf)
+    for fr in range(Vr):
+        imgr[0, fr] = fr / 10.0
+    qr = torch.tensor([[[12.0, 14.0], [16.0, 10.0]]])
+    t10b = True
+    for qf in range(Vr):
+        tr, _ = dyn_motion.track_by_raft(imgr, qr, qf)
+        for fr in range(Vr):
+            if not torch.allclose(tr[fr], qr[0] + (fr - qf) * torch.tensor(dl), atol=1e-3):
+                t10b = False
+    dyn_motion._RAFT_CACHE.pop("cpu", None)
+    t10 = t10a and t10b
+    print(f"[10] RAFT flow sampling + chained integration exact: {'PASS' if t10 else 'FAIL'} "
+          f"(sample={t10a}, chain={t10b})")
+    if not t10:
+        fails.append(10)
+
     print(f"\n{'ALL TESTS PASS' if not fails else f'FAILED: tests {fails}'}")
     return 1 if fails else 0
 
