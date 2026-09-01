@@ -35,6 +35,9 @@ DATE_TAG=${2:-m6}
 # than the mask precompute -- so do not inherit that script's 20 GB bar, or a card
 # with a partial occupant gets refused when it would have been perfectly usable.
 MIN_FREE=${3:-12000}
+# Restrict to one arm: "ft" reruns only the fine-tuned configs, so adding those rows
+# later costs two runs instead of redoing seven that are already measured.
+ONLY=${4:-all}
 NF=6
 
 REPO="${HOME}/DynamicReconstructionSplat"
@@ -94,6 +97,7 @@ for R in "${RUNS[@]}"; do
   i=$((i+1))
   SEQ=$(echo "$R" | cut -d'|' -f1); MODE=$(echo "$R" | cut -d'|' -f2)
   XFLAGS=$(echo "$R" | cut -d'|' -f3); FTAG=$(echo "$R" | cut -d'|' -f4)
+  if [ "${ONLY}" != "all" ] && [ "${MODE}" != "${ONLY}" ]; then continue; fi
   if [ "${MODE}" = "ft" ] && [ -z "${CKPT}" ]; then
     echo "[${i}/${#RUNS[@]}] SKIP ${MODE} ${SEQ} (no anchor checkpoint)"; continue
   fi
