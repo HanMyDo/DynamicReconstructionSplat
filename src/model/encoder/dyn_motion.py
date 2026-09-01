@@ -46,6 +46,13 @@ The scene-flow mode fixes all three:
      frame-0 queries, so frames are permuted per call to put each query frame
      first).
 
+ITERATION BUDGET. TrackHead defaults to iters=4: every frame's coordinate starts
+AT the query position and gets four correlation-guided steps to reach the truth.
+Measured on removing_obstructing_box, tracks then travel ~13.6 px over a window
+whose dynamic mask centroid moves ~94 px -- the refinement stops well short. The
+correlation pyramid (7 levels, radius 4) can see that far, so the budget, not the
+receptive field, is the limit. `track_iters` raises it.
+
 PROTOCOL NOTE (thesis): using the track position AT frame j reads frame j's
 pixels for GEOMETRY. This is the standard monocular dynamic-NVS protocol
 ("motion fitted on the full video, appearance held out") — under leave-one-out
@@ -298,7 +305,8 @@ def _lift_tracks_nearest(pts_all_b: torch.Tensor, tracks_b: torch.Tensor
 
 
 def _run_track_head(track_head, toks_b: list, image_b1: torch.Tensor,
-                    patch_start_idx: int, q: torch.Tensor, query_frame: int
+                    patch_start_idx: int, q: torch.Tensor, query_frame: int,
+                    iters: Optional[int] = None
                     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
     """Run the tracker with `query_frame` moved to position 0, outputs restored
     to the ORIGINAL frame order.
@@ -322,6 +330,7 @@ def _run_track_head(track_head, toks_b: list, image_b1: torch.Tensor,
     with torch.amp.autocast("cuda", enabled=False):
         coord_preds, vis, _ = track_head(
             toks_p, images=img_p, patch_start_idx=patch_start_idx, query_points=q,
+            iters=iters,
         )
     inv = torch.empty_like(order)
     inv[order] = torch.arange(S, device=dev)
@@ -346,6 +355,7 @@ def collect_dyn_tracks(
     n_query: int = 1024,
     query_all_frames: bool = True,
     min_track_pts: int = 8,
+    track_iters: Optional[int] = None,
 ) -> Optional[List[Optional[Tuple[torch.Tensor, torch.Tensor]]]]:
     """Phase A of the scene-flow motion model: build a track scaffold.
 
@@ -388,7 +398,8 @@ def collect_dyn_tracks(
             q = torch.stack([xs.float(), ys.float()], dim=-1).unsqueeze(0)  # [1,Nq,2] (x,y)
             try:
                 tracks, vis = _run_track_head(
-                    track_head, toks_b, img_b, patch_start_idx, q, qf)
+                    track_head, toks_b, img_b, patch_start_idx, q, qf,
+                    iters=track_iters)
             except Exception as e:          # tracker unavailable/OOM -> skip this frame
                 print(f"[DynFlow] tracking from frame {qf} failed ({e})")
                 continue

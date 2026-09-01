@@ -165,6 +165,9 @@ class EncoderAnySplatCfg:
     # damped. Costs one extra aggregator forward, used for tracking only; geometry and
     # the Gaussian head keep the suppressed tokens exactly as before.
     dyn_motion_clean_tokens: bool = False
+    # Refinement steps for the point tracker (VGGT default 4). Tracks start at the
+    # query position, so a small budget cannot reach a large displacement.
+    dyn_motion_track_iters: int = 0   # 0 = leave the tracker's own default
     dynamic_n_clusters: int = 64  # Number of clusters for KMeans refinement
     suppress_dynamic_gaussians: bool = False
     # Temporal attention options for Gaussian head (Fix 2 for dynamic handling)
@@ -970,6 +973,7 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
                 pts_all, _dm_motion, conf_valid_mask,
                 n_query=getattr(self.cfg, "dyn_motion_n_query", 1024),
                 query_all_frames=getattr(self.cfg, "dyn_motion_query_all", True),
+                track_iters=(getattr(self.cfg, "dyn_motion_track_iters", 0) or None),
             )
             if _clean and self.use_vggt4d:
                 del _trk_tokens

@@ -38,7 +38,7 @@ class MockTrackHead:
     def __init__(self, delta):
         self.delta = torch.as_tensor(delta, dtype=torch.float32)
 
-    def __call__(self, toks, images, patch_start_idx, query_points):
+    def __call__(self, toks, images, patch_start_idx, query_points, iters=None):
         S = images.shape[1]
         fids = (images[0, :, 0, 0, 0] * 100).round()            # [S] original frame ids
         q = query_points[0]                                      # [Nq, 2] at frame fids[0]
