@@ -653,6 +653,7 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
         "dyn_motion_knn": getattr(config, "dyn_motion_knn", 0),
         "dyn_motion_strict": getattr(config, "dyn_motion_strict", False),
         "dyn_motion_pred_bandwidth": getattr(config, "dyn_motion_pred_bandwidth", 0.0),
+        "dyn_motion_clean_tokens": getattr(config, "dyn_motion_clean_tokens", False),
         "n_batches_with_knn_motion": n_knn_motion,
         "mask_source": ("precomputed" if precomputed_mask_dir is not None else "live_detection"),
         "precomputed_mask_dir": precomputed_mask_dir,
@@ -806,6 +807,12 @@ def main():
                              "observing it, so frame j is never read. Isolates what the non-rigid "
                              "per-Gaussian interpolation contributes from what OBSERVING j "
                              "contributes. Report alongside the non-strict number.")
+    parser.add_argument("--dyn_motion_clean_tokens", action="store_true",
+                        help="Run the point tracker on UNSUPPRESSED features. VGGT4D damps dynamic "
+                             "tokens in layers 0-4 -- that is its mechanism -- and the tracker "
+                             "otherwise reads those same tokens, i.e. it follows the moving object "
+                             "using features where that object was suppressed. Costs one extra "
+                             "aggregator pass (tracking only; geometry is unchanged).")
     parser.add_argument("--dyn_motion_pred_bandwidth", type=float, default=0.0,
                         help="With --dyn_motion_strict: >0 estimates each track's velocity from a "
                              "LOCALLY weighted fit (frames nearest the target count most, sigma in "
@@ -859,6 +866,7 @@ def main():
         dyn_motion_gate_mult=args.dyn_motion_gate_mult,
         dyn_motion_strict=args.dyn_motion_strict,
         dyn_motion_pred_bandwidth=args.dyn_motion_pred_bandwidth,
+        dyn_motion_clean_tokens=args.dyn_motion_clean_tokens,
     )
 
     print(f"\nLoading {args.split} dataset...")
@@ -898,6 +906,7 @@ def main():
             "dyn_motion_query_all": not args.dyn_motion_query_first_only,
             "dyn_motion_strict": args.dyn_motion_strict,
             "dyn_motion_pred_bandwidth": args.dyn_motion_pred_bandwidth,
+            "dyn_motion_clean_tokens": args.dyn_motion_clean_tokens,
         }, f, indent=2)
 
     print(f"\nRunning evaluation on {args.split} split ({len(dataset)} batches)...")

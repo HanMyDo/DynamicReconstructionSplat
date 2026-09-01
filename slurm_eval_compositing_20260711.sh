@@ -128,6 +128,8 @@ case "${EXTRA_FLAGS}" in *track_dynamic*)
         && FLAG_TAG="${FLAG_TAG}b$(echo ${BW} | tr '.' 'p')" ;;
     esac
     case "${EXTRA_FLAGS}" in *dyn_motion_query_first_only*) FLAG_TAG="${FLAG_TAG}q0" ;; esac
+    # clean (unsuppressed) tracking features are a DIFFERENT mechanism -> own dir
+    case "${EXTRA_FLAGS}" in *dyn_motion_clean_tokens*) FLAG_TAG="${FLAG_TAG}ct" ;; esac
   else
     GRP=$(echo "${EXTRA_FLAGS}" | sed -n 's/.*--dyn_motion_groups[= ]*\([0-9][0-9]*\).*/\1/p')
     FLAG_TAG="${FLAG_TAG}_trk${GRP:-1}"

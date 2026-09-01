@@ -158,6 +158,13 @@ class EncoderAnySplatCfg:
     # >0 = locally weighted strict fit (velocity from the frames NEAREST the target);
     # 0 = uniform fit over the whole window (the measured configuration).
     dyn_motion_pred_bandwidth: float = 0.0
+    # Track on UNSUPPRESSED features. VGGT4D's aggregator attenuates dynamic tokens in
+    # layers 0-4 (that IS its mechanism: suppress movers so poses stay robust), and the
+    # fast path feeds those same tokens to the point tracker -- so the tracker follows
+    # the moving object using features in which the moving object was deliberately
+    # damped. Costs one extra aggregator forward, used for tracking only; geometry and
+    # the Gaussian head keep the suppressed tokens exactly as before.
+    dyn_motion_clean_tokens: bool = False
     dynamic_n_clusters: int = 64  # Number of clusters for KMeans refinement
     suppress_dynamic_gaussians: bool = False
     # Temporal attention options for Gaussian head (Fix 2 for dynamic handling)
@@ -949,12 +956,24 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
                 and getattr(self, "track_head", None) is not None):
             # SCENE-FLOW mode (phase A): build the track scaffold. Displacements are
             # computed per Gaussian AFTER the Gaussian list exists (phase B below).
+            # See dyn_motion_clean_tokens: the tracker must not read features whose
+            # dynamic tokens were suppressed, or it is tracking what was removed.
+            _trk_tokens, _trk_psi = aggregated_tokens_list, patch_start_idx
+            _clean = getattr(self.cfg, "dyn_motion_clean_tokens", False)
+            if _clean and self.use_vggt4d:
+                with torch.no_grad():
+                    with torch.amp.autocast("cuda", enabled=True, dtype=_AMP_DTYPE):
+                        _trk_tokens, _trk_psi, _, _ = self.aggregator(
+                            image.to(_AMP_DTYPE), dyn_masks=None, capture_qk=False)
             self._dyn_tracks = collect_dyn_tracks(
-                self.track_head, aggregated_tokens_list, image, patch_start_idx,
+                self.track_head, _trk_tokens, image, _trk_psi,
                 pts_all, _dm_motion, conf_valid_mask,
                 n_query=getattr(self.cfg, "dyn_motion_n_query", 1024),
                 query_all_frames=getattr(self.cfg, "dyn_motion_query_all", True),
             )
+            if _clean and self.use_vggt4d:
+                del _trk_tokens
+                torch.cuda.empty_cache()
         elif (dyn_mask is not None and self.cfg.enable_dynamic_detection
                 and getattr(self, "track_head", None) is not None
                 and getattr(self.cfg, "dyn_motion_groups", 0) > 0):
