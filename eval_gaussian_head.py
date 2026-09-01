@@ -655,6 +655,7 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
         "dyn_motion_pred_bandwidth": getattr(config, "dyn_motion_pred_bandwidth", 0.0),
         "dyn_motion_clean_tokens": getattr(config, "dyn_motion_clean_tokens", False),
         "dyn_motion_track_iters": getattr(config, "dyn_motion_track_iters", 0),
+        "dyn_motion_chain": getattr(config, "dyn_motion_chain", False),
         "n_batches_with_knn_motion": n_knn_motion,
         "mask_source": ("precomputed" if precomputed_mask_dir is not None else "live_detection"),
         "precomputed_mask_dir": precomputed_mask_dir,
@@ -808,6 +809,12 @@ def main():
                              "observing it, so frame j is never read. Isolates what the non-rigid "
                              "per-Gaussian interpolation contributes from what OBSERVING j "
                              "contributes. Report alongside the non-strict number.")
+    parser.add_argument("--dyn_motion_chain", action="store_true",
+                        help="Track by chaining one frame at a time, re-querying at each newly "
+                             "found position, instead of matching every frame against the query "
+                             "frame. The tracker stalls after roughly one frame-step on large "
+                             "motion (13.6 px recovered of a 67 px shift); chaining keeps each hop "
+                             "small. Costs S-1 tracker calls per query frame.")
     parser.add_argument("--dyn_motion_track_iters", type=int, default=0,
                         help="Refinement iterations for the point tracker (0 = its default, 4). "
                              "Tracks initialise at the query position and each iteration takes one "
@@ -875,6 +882,7 @@ def main():
         dyn_motion_pred_bandwidth=args.dyn_motion_pred_bandwidth,
         dyn_motion_clean_tokens=args.dyn_motion_clean_tokens,
         dyn_motion_track_iters=args.dyn_motion_track_iters,
+        dyn_motion_chain=args.dyn_motion_chain,
     )
 
     print(f"\nLoading {args.split} dataset...")
@@ -916,6 +924,7 @@ def main():
             "dyn_motion_pred_bandwidth": args.dyn_motion_pred_bandwidth,
             "dyn_motion_clean_tokens": args.dyn_motion_clean_tokens,
             "dyn_motion_track_iters": args.dyn_motion_track_iters,
+            "dyn_motion_chain": args.dyn_motion_chain,
         }, f, indent=2)
 
     print(f"\nRunning evaluation on {args.split} split ({len(dataset)} batches)...")

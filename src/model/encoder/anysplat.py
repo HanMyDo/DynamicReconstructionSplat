@@ -168,6 +168,10 @@ class EncoderAnySplatCfg:
     # Refinement steps for the point tracker (VGGT default 4). Tracks start at the
     # query position, so a small budget cannot reach a large displacement.
     dyn_motion_track_iters: int = 0   # 0 = leave the tracker's own default
+    # Chain the tracker one frame at a time instead of matching every frame against
+    # the query frame (see _chain_track_head): each hop stays within the range the
+    # tracker handles, so large displacements accumulate instead of stalling.
+    dyn_motion_chain: bool = False
     dynamic_n_clusters: int = 64  # Number of clusters for KMeans refinement
     suppress_dynamic_gaussians: bool = False
     # Temporal attention options for Gaussian head (Fix 2 for dynamic handling)
@@ -974,6 +978,7 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
                 n_query=getattr(self.cfg, "dyn_motion_n_query", 1024),
                 query_all_frames=getattr(self.cfg, "dyn_motion_query_all", True),
                 track_iters=(getattr(self.cfg, "dyn_motion_track_iters", 0) or None),
+                chain=getattr(self.cfg, "dyn_motion_chain", False),
             )
             if _clean and self.use_vggt4d:
                 del _trk_tokens

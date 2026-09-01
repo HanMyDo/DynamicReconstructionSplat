@@ -343,6 +343,57 @@ def _run_track_head(track_head, toks_b: list, image_b1: torch.Tensor,
     return tracks, vis
 
 
+def _chain_track_head(track_head, toks_b: list, image_b1: torch.Tensor,
+                      patch_start_idx: int, q: torch.Tensor, query_frame: int,
+                      iters: Optional[int] = None
+                      ) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Track by CHAINING one frame at a time instead of matching every frame
+    against the query.
+
+    WHY. BaseTrackerPredictor initialises every frame's coordinate at the query
+    position and correlates it against the QUERY frame's feature -- per-frame
+    matching from a fixed reference, not sequential tracking. Once the object has
+    travelled far enough (and its appearance has changed) the correlation stops
+    locking on. Measured on removing_obstructing_box: the mask region shifts
+    67 px across a window (shape-robust best-overlap estimate) while the tracker
+    reports 13.6 px total, which is about ONE frame-step -- it captures the first
+    step and then stalls. Raising the iteration budget does not help (13.6 / 12.9
+    / 13.5 px at 4 / 12 / 24 iters), because the search is not converging slowly,
+    it is looking in the wrong place.
+
+    Chaining re-queries at each frame's newly found position, so every hop is one
+    frame-step -- within the range the tracker demonstrably handles -- and the
+    displacements accumulate. Costs S-1 tracker calls per query frame instead of
+    one; visibility is carried forward, since a track lost mid-chain cannot be
+    recovered by later hops.
+
+    -> (tracks [S, Nq, 2], vis [S, Nq]) in original frame order.
+    """
+    S = image_b1.shape[1]
+    Nq = q.shape[1]
+    dev = q.device
+    tracks = torch.zeros(S, Nq, 2, device=dev, dtype=torch.float32)
+    vis = torch.ones(S, Nq, device=dev, dtype=torch.float32)
+    tracks[query_frame] = q[0]
+
+    for direction in (1, -1):
+        cur = q
+        alive = torch.ones(Nq, device=dev, dtype=torch.float32)
+        f = query_frame
+        while 0 <= f + direction < S:
+            nxt = f + direction
+            tr, vs = _run_track_head(track_head, toks_b, image_b1,
+                                     patch_start_idx, cur, f, iters)
+            tracks[nxt] = tr[nxt]
+            if vs is not None:
+                # a track lost at any hop stays lost: later positions are unreliable
+                alive = alive * (vs[nxt] > 0.5).float()
+            vis[nxt] = alive
+            cur = tr[nxt].unsqueeze(0)
+            f = nxt
+    return tracks, vis
+
+
 @torch.no_grad()
 def collect_dyn_tracks(
     track_head,
@@ -356,6 +407,7 @@ def collect_dyn_tracks(
     query_all_frames: bool = True,
     min_track_pts: int = 8,
     track_iters: Optional[int] = None,
+    chain: bool = False,
 ) -> Optional[List[Optional[Tuple[torch.Tensor, torch.Tensor]]]]:
     """Phase A of the scene-flow motion model: build a track scaffold.
 
@@ -397,9 +449,14 @@ def collect_dyn_tracks(
                 ys, xs = ys[pick], xs[pick]
             q = torch.stack([xs.float(), ys.float()], dim=-1).unsqueeze(0)  # [1,Nq,2] (x,y)
             try:
-                tracks, vis = _run_track_head(
-                    track_head, toks_b, img_b, patch_start_idx, q, qf,
-                    iters=track_iters)
+                if chain:
+                    tracks, vis = _chain_track_head(
+                        track_head, toks_b, img_b, patch_start_idx, q, qf,
+                        iters=track_iters)
+                else:
+                    tracks, vis = _run_track_head(
+                        track_head, toks_b, img_b, patch_start_idx, q, qf,
+                        iters=track_iters)
             except Exception as e:          # tracker unavailable/OOM -> skip this frame
                 print(f"[DynFlow] tracking from frame {qf} failed ({e})")
                 continue
