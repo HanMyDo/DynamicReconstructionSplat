@@ -47,7 +47,10 @@ echo "GPU ${PICK}: ${FREE} MiB free | ckpt [${CKPT:-NONE}] | batch ${BATCH} x ${
 FIG="--images_only --image_batch_start ${BATCH} --max_image_batches ${NWIN} \
 --image_views 0 --ply_batch ${BATCH} --ply_per_frame --ply_dyn_source 0"
 BASE="--eval_loo --frame_stride 8 --dyn_mask_dir ${MASK_DIR}"
-FLOW="--track_dynamic --dyn_motion_knn 8 --dyn_motion_strict --dyn_motion_pred_bandwidth 1.5"
+# RAFT: measured better than the backbone tracker on all three sequences
+# (mean ddyn +0.462 vs +0.285) and it removes the LPIPS penalty, so the figure
+# should show the configuration actually being reported.
+FLOW="--track_dynamic --dyn_motion_knn 8 --dyn_motion_strict --dyn_motion_pred_bandwidth 1.5 --dyn_motion_tracker raft"
 TAG=$(echo ${SEQ} | sed 's/rgbd_bonn_//')
 
 echo "===== vanilla baseline (frozen, vanilla VGGT, no motion)"
