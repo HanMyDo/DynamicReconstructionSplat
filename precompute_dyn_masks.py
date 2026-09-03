@@ -183,6 +183,13 @@ def main():
                          "context) while every frame still gets a mask. 1 = consecutive windows. >1 = each "
                          "pass takes every STRIDE-th frame, spanning up to chunk_size*STRIDE frames. Use 0 "
                          "with --det_resolution 518; that combo reproduced the original's mask quality.")
+    ap.add_argument("--mask_normalize", default="per_frame", choices=["per_frame", "global"],
+                    help="How cluster scores are rescaled before thresholding. 'per_frame' is the "
+                         "original: every frame is stretched to [0,1], so a frame with nothing "
+                         "moving still contributes its brightest patches to a globally-thresholded "
+                         "mask -- a steady false-positive source on sequences that are mostly "
+                         "quiet. 'global' normalises once across the pass, so a quiet frame's "
+                         "scores stay low and can be rejected entirely.")
     ap.add_argument("--pass_margin", type=int, default=0,
                     help="Overlap passes by this many frames on each side and write masks only "
                          "for the interior. The detector compares each frame against in-pass "
@@ -235,6 +242,7 @@ def main():
         use_vggt4d=True,
         enable_dynamic_detection=True,
         vggt4d_weights_path=args.vggt4d_weights_path,
+        dyn_mask_normalize=args.mask_normalize,
     )
     model = create_model(config).to(device).eval()
     encoder = model.encoder
@@ -323,6 +331,7 @@ def main():
         "frame_stride_arg": args.frame_stride,
         "n_passes": len(passes),
         "pass_margin": args.pass_margin,
+        "mask_normalize": args.mask_normalize,
         "preprocess_mode": args.preprocess_mode,
         "det_resolution": args.det_resolution,
         "stages": args.stages,

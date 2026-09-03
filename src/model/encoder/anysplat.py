@@ -178,6 +178,10 @@ class EncoderAnySplatCfg:
     # (~13 px between adjacent window frames) is well inside its range.
     dyn_motion_tracker: str = "vggt"
     dynamic_n_clusters: int = 64  # Number of clusters for KMeans refinement
+    # "per_frame" (original) rescales EVERY frame to [0,1], so a frame with nothing
+    # moving still contributes its brightest patches to a globally-thresholded mask.
+    # "global" normalises once over the pass, letting quiet frames be rejected wholly.
+    dyn_mask_normalize: str = "per_frame"
     suppress_dynamic_gaussians: bool = False
     # Temporal attention options for Gaussian head (Fix 2 for dynamic handling)
     use_temporal_attention: bool = False
@@ -582,7 +586,8 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
         clustered_map, _ = cluster_attention_maps(
             enc_feat_reshaped,
             dyn_maps,
-            n_clusters=self.cfg.dynamic_n_clusters
+            n_clusters=self.cfg.dynamic_n_clusters,
+            normalize=getattr(self.cfg, "dyn_mask_normalize", "per_frame"),
         )
 
         # Upsample the continuous score to full resolution FIRST, then threshold.

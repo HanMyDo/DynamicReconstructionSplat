@@ -268,7 +268,7 @@ def batch_extract_dyn_map(qk_dict: dict, images: torch.Tensor) -> torch.Tensor:
 
 
 @torch.no_grad()
-def cluster_attention_maps(feature, dynamic_map, n_clusters=64):
+def cluster_attention_maps(feature, dynamic_map, n_clusters=64, normalize="per_frame"):
     """Use KMeans to cluster the attention maps using feature.
 
     Args:
@@ -308,10 +308,24 @@ def cluster_attention_maps(feature, dynamic_map, n_clusters=64):
     normalized_map = torch.from_numpy(normalized_map).float()
     cluster_labels = torch.from_numpy(reshaped_labels).long()
 
-    normalized_map_min = normalized_map.min(dim=1, keepdim=True)[
-        0].min(dim=2, keepdim=True)[0]
-    normalized_map_max = normalized_map.max(dim=1, keepdim=True)[
-        0].max(dim=2, keepdim=True)[0]
+    # normalize="per_frame" is the original behaviour: each frame is stretched to
+    # span [0, 1] independently. That destroys cross-frame comparability -- a frame
+    # containing NOTHING moving still gets its highest-attention patch mapped to 1.0,
+    # and since the threshold is then computed over all frames at once, the top slice
+    # of every frame is flagged whether or not anything moved in it. On sequences
+    # where most frames are quiet (Bonn: often <2% truly dynamic) that is a steady
+    # source of false positives.
+    # normalize="global" uses one min/max over the whole pass instead, so a quiet
+    # frame's scores stay low relative to an active one's and the threshold can
+    # legitimately reject the entire frame.
+    if normalize == "global":
+        normalized_map_min = normalized_map.min()
+        normalized_map_max = normalized_map.max()
+    else:
+        normalized_map_min = normalized_map.min(dim=1, keepdim=True)[
+            0].min(dim=2, keepdim=True)[0]
+        normalized_map_max = normalized_map.max(dim=1, keepdim=True)[
+            0].max(dim=2, keepdim=True)[0]
     normalized_map = (normalized_map - normalized_map_min) / \
         (normalized_map_max - normalized_map_min + 1e-6)
 
