@@ -49,6 +49,7 @@ fi
 # Same tag convention as the old cluster, so both machines' outputs compare directly.
 T=""
 case "${EXTRA_FLAGS}" in *no_vggt4d*) T="${T}_vggt" ;; esac
+case "${EXTRA_FLAGS}" in *per_frame_dynamic*) T="${T}_pfd" ;; esac   # else it shares a dir
 case "${EXTRA_FLAGS}" in *eval_loo*)  T="${T}_loo" ;; esac
 case "${EXTRA_FLAGS}" in *frame_stride*)
   T="${T}_s$(echo "${EXTRA_FLAGS}" | sed -n 's/.*--frame_stride[= ]*\([0-9][0-9]*\).*/\1/p')" ;;
