@@ -10,7 +10,7 @@ Outputs per run:
   - images/                 : GT | predicted comparison images for every frame
   - rgb.mp4                 : novel view synthesis video (interpolated predicted poses)
   - depth.mp4               : depth video
-  - gaussians.ply           : 3D Gaussian point cloud (last batch)
+  - gaussians.ply           : 3D Gaussian point cloud (middle window; --ply_batch to choose)
   - dyn_mask/               : dynamic mask overlays (VGGT4D only)
 
 Usage:
@@ -267,6 +267,14 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
 
     last_gaussians = None
     last_infos = None
+    if ply_batch is None:
+        try:
+            ply_batch = len(dataloader) // 2
+            print(f"[ply] no --ply_batch given; exporting the MIDDLE window "
+                  f"({ply_batch} of {len(dataloader)}) rather than the last, where the "
+                  f"moving object has usually left the frame", flush=True)
+        except TypeError:
+            pass          # unsized loader: fall back to keeping the last window
     last_pred_pose = None
     last_h, last_w = None, None
     last_dyn_mask = None
@@ -515,8 +523,11 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
                         os.path.join(dyn_mask_dir, f"b{batch_idx:04d}_v{v_idx:02d}.png")
                     )
 
-        # Keep a batch for video + PLY output. --ply_batch picks WHICH window: the
-        # default (last) is batch ~919, which is rarely where the moving object is.
+        # Keep a batch for video + PLY output. The default is the MIDDLE window, not
+        # the last: the last window sits at the end of the sequence, where the moving
+        # object has usually left the frame, so the exported PLY showed a static scene.
+        # The middle is a better blind default; --ply_batch overrides it, and the
+        # motion ranking computed from the mask PNGs picks a genuinely active window.
         if ply_batch is None or batch_idx == ply_batch:
             last_gaussians = gaussians
             last_pred_pose = pred_pose
@@ -556,7 +567,7 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
     def _sub(t, keep):
         return t if keep is None else t[keep]
 
-    # --- PLY export (last batch) ---
+    # --- PLY export (the window selected above; middle by default) ---
     if last_gaussians is not None:
         print("Saving gaussians.ply...")
         ply_path = os.path.join(output_dir, "gaussians.ply")
@@ -720,9 +731,10 @@ def main():
                              "sequences (TUM fr2 has 3670 windows) where a full pass exceeds 2h and "
                              "the 24g watchdog cancels it for low GPU-memory utilisation.")
     parser.add_argument("--ply_batch", type=int, default=None,
-                        help="Which window's Gaussians to export as PLY. Default = the LAST batch "
-                             "processed (~919), which is rarely where the moving object is. Pair "
-                             "with --images_only for a fast targeted export.")
+                        help="Which window's Gaussians to export as PLY. Default = the MIDDLE "
+                             "window: the last one sits at the end of the sequence, where the "
+                             "moving object has usually left the frame. Pair with --images_only "
+                             "for a fast targeted export of a window you picked by motion.")
     parser.add_argument("--image_error_map", action="store_true",
                         help="Append a per-pixel |pred - GT| panel to each saved image. A "
                              "sub-decibel gain on ~12%% of pixels cannot be seen by comparing two "
