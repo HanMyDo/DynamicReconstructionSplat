@@ -44,8 +44,21 @@ REPO="${HOME}/DynamicReconstructionSplat"; cd ${REPO}; mkdir -p slurm_logs
 DATA_ROOT="${HOME}/data/bonn/rgbd_bonn_dataset"
 MASKS="${HOME}/data/mask_out/output_dyn_masks_precomputed_cs64_r518_st3_fs1_m6"
 VGGT4D_CKPT="${REPO}/ckpts/vggt4d_model_tracker_fixed_e20.pt"
-# family-disjoint from the eval split (synchronous2, removing/placing_obstructing_box)
-DATASETS="rgbd_bonn_crowd3,rgbd_bonn_crowd2,rgbd_bonn_balloon,rgbd_bonn_moving_nonobstructing_box"
+# Family-disjoint from the eval split. With balloon promoted to EVAL, its whole
+# family (balloon2, balloon_tracking*) must leave training too -- the split rule is
+# per scene family, not per sequence, because variants of one scene share geometry
+# and appearance. person_tracking* is excluded on quality grounds: the camera
+# follows the person, so they are static in-image while the background sweeps, and
+# the attention detector flags the background instead.
+# Override with DATASETS=... to change the training set.
+DATASETS=${DATASETS:-"rgbd_bonn_crowd,rgbd_bonn_crowd2,rgbd_bonn_crowd3,\
+rgbd_bonn_kidnapping_box,rgbd_bonn_kidnapping_box2,\
+rgbd_bonn_moving_nonobstructing_box,rgbd_bonn_moving_nonobstructing_box2,\
+rgbd_bonn_moving_obstructing_box,rgbd_bonn_moving_obstructing_box2,\
+rgbd_bonn_placing_nonobstructing_box,rgbd_bonn_placing_nonobstructing_box2,\
+rgbd_bonn_placing_nonobstructing_box3,\
+rgbd_bonn_removing_nonobstructing_box,rgbd_bonn_removing_nonobstructing_box2"}
+DATASETS=$(echo "${DATASETS}" | tr -d ' \\\n')
 OUT="${REPO}/output_train_hex_nf${NUM_FRAMES}_s${FRAME_STRIDE}_loo${LOO_PROB}_pfd${PFD}_$(date +%Y%m%d)"
 
 source /opt/miniforge3/etc/profile.d/conda.sh; conda activate dynrec
@@ -70,6 +83,7 @@ done
 PFD_FLAG=""; [ "${PFD}" = "1" ] && PFD_FLAG="--per_frame_dynamic"
 echo "=============================================="
 echo "nf${NUM_FRAMES} stride${FRAME_STRIDE} loo_prob${LOO_PROB} pfd${PFD} epochs${EPOCHS}"
+echo "train sequences ($(echo ${DATASETS} | tr ',' '\n' | wc -l)): ${DATASETS}"
 echo "-> ${OUT}   $(date)"
 echo "=============================================="
 
