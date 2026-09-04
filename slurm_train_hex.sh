@@ -64,11 +64,18 @@ OUT="${REPO}/output_train_hex_nf${NUM_FRAMES}_s${FRAME_STRIDE}_loo${LOO_PROB}_pf
 source /opt/miniforge3/etc/profile.d/conda.sh; conda activate dynrec
 export PATH=/usr/local/cuda-12.9/bin:${PATH} CUDA_HOME=/usr/local/cuda-12.9
 export OMP_NUM_THREADS=8 MKL_NUM_THREADS=8 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-# wandb has no API key on this cluster and its init raises rather than degrading,
-# which killed the run 6 s in. Offline keeps the full local log (syncable later
-# with `wandb sync`) and needs no account. Set WANDB_MODE=online after `wandb login`
-# if you want live curves.
-export WANDB_MODE=${WANDB_MODE:-offline}
+# Needs `wandb login` once on this machine (key from https://wandb.ai/authorize,
+# stored in ~/.netrc and picked up by every later job). wandb.init RAISES when no
+# key is configured rather than degrading, so a missing login kills the run seconds
+# in -- hence the explicit check below. WANDB_MODE=offline falls back to a local
+# log that `wandb sync` can upload afterwards.
+export WANDB_MODE=${WANDB_MODE:-online}
+if [ "${WANDB_MODE}" = "online" ] && ! grep -q "api.wandb.ai" "${HOME}/.netrc" 2>/dev/null; then
+  echo "ERROR: wandb is not logged in on this machine, and training would die at"
+  echo "       wandb.init a few seconds from now. Run:  wandb login"
+  echo "       (key: https://wandb.ai/authorize)   or rerun with WANDB_MODE=offline"
+  exit 1
+fi
 export WANDB_DIR=${REPO}/wandb
 
 FREE=$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits | sort -nr | head -1 | tr -d ' ')
