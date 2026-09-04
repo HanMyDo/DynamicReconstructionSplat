@@ -64,6 +64,12 @@ OUT="${REPO}/output_train_hex_nf${NUM_FRAMES}_s${FRAME_STRIDE}_loo${LOO_PROB}_pf
 source /opt/miniforge3/etc/profile.d/conda.sh; conda activate dynrec
 export PATH=/usr/local/cuda-12.9/bin:${PATH} CUDA_HOME=/usr/local/cuda-12.9
 export OMP_NUM_THREADS=8 MKL_NUM_THREADS=8 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+# wandb has no API key on this cluster and its init raises rather than degrading,
+# which killed the run 6 s in. Offline keeps the full local log (syncable later
+# with `wandb sync`) and needs no account. Set WANDB_MODE=online after `wandb login`
+# if you want live curves.
+export WANDB_MODE=${WANDB_MODE:-offline}
+export WANDB_DIR=${REPO}/wandb
 
 FREE=$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits | sort -nr | head -1 | tr -d ' ')
 PICK=$(nvidia-smi --query-gpu=index,memory.free --format=csv,noheader,nounits | sort -t, -k2 -nr | head -1 | cut -d, -f1 | tr -d ' ')
