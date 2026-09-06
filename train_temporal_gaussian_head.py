@@ -367,6 +367,9 @@ class TrainingConfig:
     dyn_motion_tracker: str = "vggt"
     dyn_mask_normalize: str = "per_frame"
     dyn_mask_aggregate: str = "mean"
+    # KMeans clusters for the mask refinement. Fewer clusters group a person into
+    # one region, so a p90/max aggregate can recruit all of them from a moving arm.
+    dynamic_n_clusters: int = 64
     dyn_mask_dir: Optional[str] = None  # If set, load PRECOMPUTED dynamic masks (by frame stem) and override the live per-window detection for BOTH the downweight loss and the temporal loss. Use the validated 518+full-span masks so fine-tuning is shaped by correct masks.
 
     # Static-first curriculum (schedule on the dynamic-pixel MSE downweight).
@@ -615,7 +618,7 @@ def create_model(config: TrainingConfig) -> AnySplat:
         # fusion voxel edge: must EXCEED point spacing or nothing merges (see --voxel_size)
         voxel_size=config.voxel_size,
         dynamic_mask_threshold=None,
-        dynamic_n_clusters=64,
+        dynamic_n_clusters=config.dynamic_n_clusters,
         dyn_motion_groups=config.dyn_motion_groups,
         dyn_motion_knn=config.dyn_motion_knn,
         dyn_motion_n_query=config.dyn_motion_n_query,
