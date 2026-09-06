@@ -360,6 +360,48 @@ def main() -> int:
     if not t13:
         fails.append(13)
 
+    # 14. THE FLOW MASK MUST RUN AT THE DETECTION RESOLUTION. Two bugs killed every
+    #     `--mask_method flow/union` job within a minute, and both are invisible at
+    #     eval resolution: (a) torchvision's RAFT asserts H and W are divisible by 8,
+    #     and detection runs at 518 wide (518 % 8 == 6) while eval runs at 448 (== 0);
+    #     (b) `pose_encoding_to_extri_intri` returns extrinsics as [V, 3, 4], and
+    #     inverting a non-square matrix raises. The stub reproduces RAFT's own
+    #     assertion, so this test fails on the unpatched code.
+    Hf3, Wf3 = 30, 22                      # 22 % 8 == 6, exactly like 518
+    Kf3 = torch.tensor([[40., 0., Wf3 / 2], [0., 40., Hf3 / 2], [0., 0., 1.]])
+    ext34 = torch.zeros(2, 3, 4)           # [V,3,4] world2cam, as the pose head emits
+    ext34[:, :3, :3] = torch.eye(3)
+    ext34[1, 0, 3] = -0.1
+    dep3 = torch.full((2, Hf3, Wf3), 2.0)
+    moving = torch.zeros(Hf3, Wf3, dtype=torch.bool); moving[10:20, 6:16] = True
+    seen = {}
+    class _Strict:                          # mimics torchvision RAFT's own contract
+        def __call__(self, a, b):
+            h, w = a.shape[-2:]
+            if h % 8 or w % 8:
+                raise ValueError(f"input image H and W should be divisible by 8, got {h}, {w}")
+            seen["padded"] = (h, w)
+            f = torch.zeros(1, 2, h, w)
+            f[0, 0, :Hf3, :Wf3][moving] = 2.0    # only the patch moves, +2 px in x
+            return [f]
+    _df._RAFT["cpu"] = _Strict()
+    try:
+        r14 = _df.flow_residual_map(torch.rand(2, 3, Hf3, Wf3), dep3, ext34,
+                                    torch.stack([Kf3, Kf3]))
+        t14a = tuple(r14.shape) == (2, Hf3, Wf3)                 # cropped back
+        t14b = seen.get("padded") == (32, 24)                    # padded up to /8
+        t14c = float(r14[0][moving].mean()) > float(r14[0][~moving].mean()) + 1.0
+        err14 = ""
+    except Exception as e:                                       # noqa: BLE001
+        t14a = t14b = t14c = False
+        err14 = f" ({type(e).__name__}: {e})"
+    _df._RAFT.pop("cpu", None)
+    t14 = t14a and t14b and t14c
+    print(f"[14] flow mask runs at detection resolution: {'PASS' if t14 else 'FAIL'} "
+          f"(shape={t14a}, padded-to-/8={t14b}, motion-separated={t14c}){err14}")
+    if not t14:
+        fails.append(14)
+
     print(f"\n{'ALL TESTS PASS' if not fails else f'FAILED: tests {fails}'}")
     return 1 if fails else 0
 

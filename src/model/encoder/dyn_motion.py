@@ -397,6 +397,24 @@ def _chain_track_head(track_head, toks_b: list, image_b1: torch.Tensor,
 _RAFT_CACHE = {}
 
 
+def _raft_flow(model, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """Dense flow a -> b as [2, H, W], at ANY input size.
+
+    torchvision's RAFT asserts H and W are divisible by 8. Eval runs at 448, where
+    that holds, so this path has always worked -- but dynamic detection runs at the
+    original VGGT4D resolution of 518, and 518 % 8 == 6. Replicate-pad up to the
+    next multiple of 8, run, then crop back; a no-op when the size already divides.
+    (Mirrored in dyn_flow_mask.raft_flow; kept local so this module stays loadable
+    on its own, which the tests rely on.)
+    """
+    H, W = a.shape[-2:]
+    ph, pw = (-H) % 8, (-W) % 8
+    if ph or pw:
+        a = F.pad(a, (0, pw, 0, ph), mode="replicate")
+        b = F.pad(b, (0, pw, 0, ph), mode="replicate")
+    return model(a, b)[-1][0][:, :H, :W]
+
+
 def _raft_model(device):
     """Lazily build a pretrained RAFT. Cached: building it per window would dominate."""
     key = str(device)
@@ -463,8 +481,10 @@ def track_by_raft(image_b1: torch.Tensor, q: torch.Tensor, query_frame: int,
         while 0 <= f + direction < V:
             nxt = f + direction
             a, b = imgs[f:f + 1], imgs[nxt:nxt + 1]
-            fwd = model(a, b)[-1][0]                          # [2, H, W]  f -> nxt
-            bwd = model(b, a)[-1][0]                          # [2, H, W]  nxt -> f
+            # via raft_flow: RAFT asserts H, W divisible by 8. Eval runs at 448 so this
+            # has always held, but it does NOT at the 518 used for dynamic detection.
+            fwd = _raft_flow(model, a, b)                     # [2, H, W]  f -> nxt
+            bwd = _raft_flow(model, b, a)                     # [2, H, W]  nxt -> f
             step = _sample_flow(fwd, cur)
             nxt_pts = cur + step
             back = nxt_pts + _sample_flow(bwd, nxt_pts)

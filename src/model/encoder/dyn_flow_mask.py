@@ -38,6 +38,39 @@ def _raft(device):
     return _RAFT[str(device)]
 
 
+def _to44(m: torch.Tensor) -> torch.Tensor:
+    """Accept a [3,4] world2cam -- what VGGT's pose head actually emits -- or a [4,4].
+
+    `pose_encoding_to_extri_intri` returns [B, V, 3, 4]; inverting that directly
+    raises "A must be batches of square matrices". `refine_dynamic_mask` already
+    pads the bottom row, so this path has to as well.
+    """
+    m = m.float()
+    if m.shape[-2] == 3:
+        bottom = torch.zeros(1, 4, device=m.device, dtype=m.dtype)
+        bottom[0, 3] = 1.0
+        m = torch.cat([m, bottom], dim=0)
+    return m
+
+
+def raft_flow(model, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """Dense flow a -> b as [H, W, 2], at ANY input size.
+
+    torchvision's RAFT asserts H and W are divisible by 8. Dynamic detection runs
+    at the original VGGT4D resolution of 518 on the long edge, and 518 % 8 == 6,
+    so every call raises before producing anything -- while the eval-time tracker
+    at 448 has always been fine. Replicate-pad up to the next multiple of 8, run,
+    then crop the flow back, which is a no-op when the size already divides.
+    """
+    H, W = a.shape[-2:]
+    ph, pw = (-H) % 8, (-W) % 8
+    if ph or pw:
+        a = F.pad(a, (0, pw, 0, ph), mode="replicate")
+        b = F.pad(b, (0, pw, 0, ph), mode="replicate")
+    flow = model(a, b)[-1][0]                       # [2, H+ph, W+pw]
+    return flow[:, :H, :W].permute(1, 2, 0)         # [H, W, 2]
+
+
 def _pixel_grid(H: int, W: int, device) -> torch.Tensor:
     """[H, W, 2] of (u, v) pixel centres."""
     v, u = torch.meshgrid(torch.arange(H, device=device, dtype=torch.float32),
@@ -55,6 +88,7 @@ def induced_flow(depth_i: torch.Tensor, K_i: torch.Tensor, K_j: torch.Tensor,
     """
     H, W = depth_i.shape
     dev = depth_i.device
+    w2c_i, w2c_j = _to44(w2c_i), _to44(w2c_j)
     uv = _pixel_grid(H, W, dev)                                   # [H,W,2]
     ones = torch.ones(H, W, 1, device=dev)
     pix = torch.cat([uv, ones], dim=-1).reshape(-1, 3, 1)         # [N,3,1]
@@ -78,7 +112,7 @@ def flow_residual_map(images: torch.Tensor, depth: torch.Tensor,
                       conf_quantile: float = 0.1) -> torch.Tensor:
     """Per-pixel evidence that a pixel moves independently of the camera.
 
-    images [V,3,H,W] in [0,1]; depth [V,H,W]; extrinsic [V,4,4] world2cam;
+    images [V,3,H,W] in [0,1]; depth [V,H,W]; extrinsic [V,3,4] or [V,4,4] world2cam;
     intrinsic [V,3,3] in PIXELS. -> [V,H,W] residual magnitude in pixels.
 
     Each frame is compared with its neighbours on both sides and the results
@@ -96,7 +130,7 @@ def flow_residual_map(images: torch.Tensor, depth: torch.Tensor,
         for j in (i - 1, i + 1):
             if not (0 <= j < V):
                 continue
-            measured = model(imgs[i:i + 1], imgs[j:j + 1])[-1][0].permute(1, 2, 0)  # [H,W,2]
+            measured = raft_flow(model, imgs[i:i + 1], imgs[j:j + 1])   # [H,W,2]
             pred = induced_flow(depth[i], intrinsic[i], intrinsic[j],
                                 extrinsic[i], extrinsic[j])
             res[i] = torch.minimum(res[i], (measured - pred).norm(dim=-1))
