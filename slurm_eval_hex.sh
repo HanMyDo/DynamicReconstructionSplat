@@ -35,6 +35,16 @@ esac
 case "${EXTRA_FLAGS}" in *dyn_motion_knn*) case "${EXTRA_FLAGS}" in *track_dynamic*) ;; *)
   echo "ERROR: --dyn_motion_knn without --track_dynamic (it would be ignored)."; exit 1 ;; esac ;;
 esac
+# --per_frame_dynamic zeroes the opacity of every dynamic Gaussian whose source frame
+# is not the target, which is EXACTLY the set --track_dynamic displaces. Together the
+# flow moves already-invisible Gaussians and the render is bit-identical to pfd alone
+# -- a silent null that looks like "scene flow does not work". They are alternatives:
+# pfd DELETES the off-frame dynamic content, flow RELOCATES it.
+case "${EXTRA_FLAGS}" in *per_frame_dynamic*) case "${EXTRA_FLAGS}" in *track_dynamic*)
+  echo "ERROR: --per_frame_dynamic cancels --track_dynamic (pfd gates opacity to 0 on"
+  echo "       exactly the Gaussians flow moves). Pick one: flow for the reported"
+  echo "       mechanism, pfd only as the delete-instead-of-move ablation."; exit 1 ;;
+esac ;; esac
 
 REPO="${HOME}/DynamicReconstructionSplat"; cd ${REPO}; mkdir -p slurm_logs
 DATA_ROOT="${HOME}/data/bonn/rgbd_bonn_dataset"

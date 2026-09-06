@@ -64,7 +64,7 @@ python make_comparison_figure.py --a "${A}/images" --b "${B}/images" --out "${OU
 
 N=$(ls "${OUT}"/*.png 2>/dev/null | wc -l)
 echo "figure frames: ${N}"
-SEL=$(ls "${OUT}"/*.png 2>/dev/null | awk "NR % ${STRIDE} == 1" | head -40)
+SEL=$(ls "${OUT}"/*.png 2>/dev/null | awk "(NR-1) % ${STRIDE} == 0" | head -40)
 [ -z "${SEL}" ] && { echo "ERROR: no frames matched (are the filenames shared between runs?)"; exit 1; }
 tar czf "${OUT}.tgz" ${SEL}
 echo "wrote ${OUT}.tgz ($(echo "${SEL}" | wc -l) of ${N} frames)"
