@@ -37,6 +37,11 @@ NORM=${7:-per_frame}  # per_frame = original (rescales EVERY frame to [0,1], so 
                       # nothing moving still contributes its brightest patches to a globally
                       # thresholded mask); global = one min/max over the pass, letting quiet
                       # frames be rejected outright.
+AGG=${8:-mean}        # cluster score aggregation: mean (original) | p90 | max. mean dilutes a
+                      # partially-moving object (an arm scores, a torso does not) below threshold.
+NCLUST=${9:-64}       # KMeans clusters; fewer group a person into one region so p90/max reaches
+                      # all of them, more keeps boundaries tight.
+METHOD=${10:-attention}  # attention (VGGT4D's own) | flow (geometric residual) | union
 
 REPO="${HOME}/DynamicReconstructionSplat"
 DATA_ROOT="${HOME}/data/bonn/rgbd_bonn_dataset"
@@ -46,6 +51,9 @@ OUT_ROOT="${HOME}/data/mask_out"
 OUT_DIR="${OUT_ROOT}/output_dyn_masks_precomputed_cs${CHUNK_SIZE}_r${DET_RES}_st${STAGES}_fs${STRIDE}"
 [ "${MARGIN}" != "0" ] && OUT_DIR="${OUT_DIR}_m${MARGIN}"
 [ "${NORM}" != "per_frame" ] && OUT_DIR="${OUT_DIR}_${NORM}"   # different masks -> own dir
+[ "${AGG}" != "mean" ] && OUT_DIR="${OUT_DIR}_${AGG}"
+[ "${NCLUST}" != "64" ] && OUT_DIR="${OUT_DIR}_k${NCLUST}"
+[ "${METHOD}" != "attention" ] && OUT_DIR="${OUT_DIR}_${METHOD}"
 
 mkdir -p "${REPO}/slurm_logs" "${OUT_ROOT}"
 cd "${REPO}"
@@ -82,7 +90,7 @@ if [ "${FREE}" -lt 20000 ]; then
 fi
 
 echo "=============================================="
-echo "Masks: ${SEQUENCE}  chunk ${CHUNK_SIZE}  res ${DET_RES}  stages ${STAGES}  stride ${STRIDE}  margin ${MARGIN}  norm ${NORM}"
+echo "Masks: ${SEQUENCE}  chunk ${CHUNK_SIZE}  res ${DET_RES}  stages ${STAGES}  stride ${STRIDE}  margin ${MARGIN}  norm ${NORM}  agg ${AGG}  k${NCLUST}  method ${METHOD}"
 echo "node: $(hostname)   gpu: ${CUDA_VISIBLE_DEVICES:-unset}   $(date)"
 nvidia-smi --query-gpu=index,name,memory.used,memory.total --format=csv
 echo "=============================================="
@@ -101,6 +109,9 @@ python precompute_dyn_masks.py \
     --frame_stride "${STRIDE}" \
     --pass_margin "${MARGIN}" \
     --mask_normalize "${NORM}" \
+    --mask_aggregate "${AGG}" \
+    --mask_n_clusters "${NCLUST}" \
+    --mask_method "${METHOD}" \
     --save_overlays
 
 echo "=============================================="
