@@ -297,6 +297,42 @@ def main() -> int:
     if not t11:
         fails.append(11)
 
+
+    # 12. GEOMETRIC (FLOW-RESIDUAL) MASK. VGGT4D's detector responds to how FAST a
+    #     pixel moves, so it finds a swinging arm and misses the torso. Flow residual
+    #     asks instead whether a pixel moves DIFFERENTLY from what the camera alone
+    #     would produce -- true of a slow torso as much as a fast arm. The geometry
+    #     must be exact or the residual is meaningless: a static scene has to give
+    #     zero, and a patch moving 1.5 px beyond the camera's own motion has to give
+    #     exactly 1.5.
+    _fp = Path(__file__).resolve().parents[1] / "src/model/encoder/dyn_flow_mask.py"
+    _fs = _il.spec_from_file_location("dyn_flow_mask", _fp)
+    _df = _il.module_from_spec(_fs); _fs.loader.exec_module(_df)
+    Hf2 = Wf2 = 64
+    Kf = torch.tensor([[80., 0., Wf2 / 2], [0., 80., Hf2 / 2], [0., 0., 1.]])
+    w2c = torch.stack([torch.eye(4), torch.eye(4)]); w2c[1, 0, 3] = -0.1
+    dep = torch.full((2, Hf2, Wf2), 2.0)
+    ind = _df.induced_flow(dep[0], Kf, Kf, w2c[0], w2c[1])
+    t12a = (abs(float(ind[..., 0].mean()) - (-80.0 * 0.1 / 2.0)) < 1e-3
+            and float(ind[..., 1].abs().max()) < 1e-3)          # analytic camera translation
+    t12b = float(_df.induced_flow(dep[0], Kf, Kf, w2c[0], w2c[0]).abs().max()) < 1e-4  # identity
+    patch = torch.zeros(Hf2, Wf2, dtype=torch.bool); patch[20:44, 20:44] = True
+    class _Stub:
+        def __call__(self, a, b):
+            f = ind.clone(); f[patch] += torch.tensor([1.5, 0.0])
+            return [f.permute(2, 0, 1).unsqueeze(0)]
+    _df._RAFT["cpu"] = _Stub()
+    resid = _df.flow_residual_map(torch.rand(2, 3, Hf2, Wf2), dep, w2c, torch.stack([Kf, Kf]))
+    t12c = (float(resid[0][~patch].mean()) < 0.05
+            and abs(float(resid[0][patch].mean()) - 1.5) < 0.05)
+    _df._RAFT.pop("cpu", None)
+    t12 = t12a and t12b and t12c
+    print(f"[12] geometric flow-residual mask: {'PASS' if t12 else 'FAIL'} "
+          f"(camera-translation={t12a}, identity={t12b}, "
+          f"static {float(resid[0][~patch].mean()):.3f}px vs moving {float(resid[0][patch].mean()):.3f}px)")
+    if not t12:
+        fails.append(12)
+
     print(f"\n{'ALL TESTS PASS' if not fails else f'FAILED: tests {fails}'}")
     return 1 if fails else 0
 

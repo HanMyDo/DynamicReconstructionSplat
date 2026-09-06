@@ -52,8 +52,10 @@ from PIL import Image
 
 from train_temporal_gaussian_head import create_model, TrainingConfig
 from src.model.encoder.anysplat import _AMP_DTYPE
+from src.model.encoder.vggt4d.masks.dynamic_mask import adaptive_multiotsu_variance
 from src.model.encoder.vggt.utils.load_fn import load_and_preprocess_images
 from src.model.encoder.vggt.utils.pose_enc import pose_encoding_to_extri_intri
+from src.model.encoder.dyn_flow_mask import flow_residual_map
 
 
 def gather_frame_paths(seq_dir: Path):
@@ -183,6 +185,14 @@ def main():
                          "context) while every frame still gets a mask. 1 = consecutive windows. >1 = each "
                          "pass takes every STRIDE-th frame, spanning up to chunk_size*STRIDE frames. Use 0 "
                          "with --det_resolution 518; that combo reproduced the original's mask quality.")
+    ap.add_argument("--mask_method", default="attention", choices=["attention", "flow", "union"],
+                    help="Which signal defines the dynamic mask. 'attention' is VGGT4D's own: "
+                         "attention dissimilarity between a frame and its neighbours, which "
+                         "responds to how FAST a pixel moves and so finds a swinging arm but "
+                         "misses the torso. 'flow' is geometric: predict each pixel's motion from "
+                         "depth and pose, subtract it from measured RAFT flow, and flag the "
+                         "residual -- a slow torso still moves differently from the wall behind "
+                         "it, so whole objects are covered. 'union' takes both.")
     ap.add_argument("--mask_aggregate", default="mean", choices=["mean", "max", "p90"],
                     help="How a feature cluster inherits its dynamic score. 'mean' (original) "
                          "dilutes a partially-moving object: on a walking person only the fast "
@@ -312,6 +322,25 @@ def main():
             if device.type == "cuda":
                 torch.cuda.empty_cache()
 
+            # OPTIONAL: replace/augment the attention mask with a GEOMETRIC one.
+            # The attention detector responds to how FAST a pixel moves, so it finds a
+            # swinging arm and misses the torso. Flow residual instead asks whether a
+            # pixel moves DIFFERENTLY from what the camera alone would produce, which a
+            # slow torso does just as much as a fast arm -- so it covers whole objects.
+            if args.mask_method in ("flow", "union"):
+                res = flow_residual_map(
+                    images[0], depth_s1[0].squeeze(-1), extrinsic_s2[0],
+                    intrinsic_s1[0], depth_conf=None)
+                # Threshold the same way the attention path does, so the two masks are
+                # directly comparable and the multi-Otsu machinery is shared.
+                thr = adaptive_multiotsu_variance(res.cpu().numpy())
+                flow_mask = (res > thr).float().unsqueeze(0)
+                print(f"[FlowMask] residual threshold={thr:.3f}, "
+                      f"dynamic pixels={flow_mask.mean()*100:.1f}% "
+                      f"(attention gave {dyn_mask.mean()*100:.1f}%)", flush=True)
+                dyn_mask = (torch.maximum(dyn_mask, flow_mask) if args.mask_method == "union"
+                            else flow_mask)
+
             # STAGE 3: geometric refinement using Stage-1 depth + Stage-1 intrinsic + Stage-2 poses.
             # refine_dynamic_mask takes EXTRINSIC (world2cam) and inverts it to cam2world
             # internally, matching the original's predictions2["cam2world"].
@@ -346,6 +375,7 @@ def main():
         "pass_margin": args.pass_margin,
         "mask_normalize": args.mask_normalize,
         "mask_aggregate": args.mask_aggregate,
+        "mask_method": args.mask_method,
         "mask_n_clusters": args.mask_n_clusters,
         "preprocess_mode": args.preprocess_mode,
         "det_resolution": args.det_resolution,
