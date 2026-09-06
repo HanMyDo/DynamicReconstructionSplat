@@ -367,6 +367,7 @@ class TrainingConfig:
     dyn_motion_tracker: str = "vggt"
     dyn_mask_normalize: str = "per_frame"
     dyn_mask_aggregate: str = "mean"
+    dyn_mask_otsu_level: int = 1
     # KMeans clusters for the mask refinement. Fewer clusters group a person into
     # one region, so a p90/max aggregate can recruit all of them from a moving arm.
     dynamic_n_clusters: int = 64
@@ -632,6 +633,7 @@ def create_model(config: TrainingConfig) -> AnySplat:
         dyn_motion_tracker=config.dyn_motion_tracker,
         dyn_mask_normalize=config.dyn_mask_normalize,
         dyn_mask_aggregate=config.dyn_mask_aggregate,
+        dyn_mask_otsu_level=config.dyn_mask_otsu_level,
         suppress_dynamic_gaussians=False,  # Bonn task: reconstruct dynamic objects, not suppress them
         # EXPLICIT TEMPORAL ARCHITECTURE arm of the RQ. This was hardcoded False since
         # the very first smoke test ("--no_temporal_attention for smoke tests; remove for

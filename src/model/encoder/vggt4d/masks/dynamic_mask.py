@@ -350,15 +350,20 @@ def cluster_attention_maps(feature, dynamic_map, n_clusters=64, normalize="per_f
     return normalized_map, cluster_labels
 
 
-def adaptive_multiotsu_variance(img, verbose=False):
+def adaptive_multiotsu_variance(img, verbose=False, level=1):
     """Adaptive multi-threshold Otsu algorithm based on inter-class variance maximization.
 
     Args:
         img: input image array
         verbose: whether to print detailed information
+        level: which split to return, counting down from the highest. 1 (original)
+            keeps ONLY the topmost class, which on a partially-moving object is just
+            its fastest part -- a swinging arm, with the torso sitting in the class
+            immediately below and being discarded. 2 keeps the top two classes, so the
+            whole object survives. Clamped to the number of splits available.
 
     Returns:
-        tuple: (best threshold, best number of classes)
+        float: the selected threshold
     """
     max_classes = 4
     best_score = -float('inf')
@@ -378,7 +383,9 @@ def adaptive_multiotsu_variance(img, verbose=False):
 
         if score > best_score:
             best_score = score
-            best_threshold = thresholds[-1]
+            # thresholds is ascending; -1 is the highest split. Counting further down
+            # admits the next class, i.e. the slower-moving parts of the same object.
+            best_threshold = thresholds[-min(max(level, 1), len(thresholds))]
             best_n_classes = n_classes
 
     if verbose:

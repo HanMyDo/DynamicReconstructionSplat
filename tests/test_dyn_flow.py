@@ -333,6 +333,33 @@ def main() -> int:
     if not t12:
         fails.append(12)
 
+
+    # 13. OTSU LEVEL is what controls mask COVERAGE. The scores are rescaled and the
+    #     threshold is adaptive, so changing the cluster aggregation merely moves the
+    #     split with them and the selected FRACTION barely budges (measured: p90 gave
+    #     0.0561 vs mean's 0.0562 on balloon). What decides coverage is which Otsu
+    #     split is used: the original takes the HIGHEST, keeping only a person's
+    #     fastest part while the torso sits in the class immediately below.
+    _tp = Path(__file__).resolve().parents[1] / "src/model/encoder/vggt4d/masks/dynamic_mask.py"
+    _ts = _il.spec_from_file_location("dynamic_mask_lvl", _tp)
+    _tm = _il.module_from_spec(_ts); _ts.loader.exec_module(_tm)
+    import numpy as _np
+    _rng = _np.random.default_rng(0)
+    _bg = _rng.normal(0.05, 0.02, 8000)      # static background
+    _to = _rng.normal(0.45, 0.03, 1200)      # slow torso
+    _ar = _rng.normal(0.90, 0.03, 400)       # fast arm
+    _img = _np.clip(_np.concatenate([_bg, _to, _ar]), 0, 1)
+    _t1 = _tm.adaptive_multiotsu_variance(_img, level=1)
+    _t2 = _tm.adaptive_multiotsu_variance(_img, level=2)
+    t13 = ((_ar > _t1).mean() > 0.99 and (_to > _t1).mean() < 0.05        # lvl1: arm only
+           and (_ar > _t2).mean() > 0.99 and (_to > _t2).mean() > 0.95    # lvl2: whole person
+           and (_bg > _t2).mean() < 0.01)                                # without background
+    print(f"[13] otsu level controls coverage: {'PASS' if t13 else 'FAIL'} "
+          f"(lvl1 keeps torso {100*(_to > _t1).mean():.0f}%, "
+          f"lvl2 keeps torso {100*(_to > _t2).mean():.0f}%, bg {100*(_bg > _t2).mean():.1f}%)")
+    if not t13:
+        fails.append(13)
+
     print(f"\n{'ALL TESTS PASS' if not fails else f'FAILED: tests {fails}'}")
     return 1 if fails else 0
 

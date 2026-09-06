@@ -215,3 +215,23 @@ old_*/
 2604*/
 ckpts/
 RESULT_*/
+
+# Local scratch for figures/renders/PLYs pulled off the cluster with scp. These are
+# regenerable outputs, not source: one of these directories carried 5311 files and
+# 2.16 GiB into a commit, which GitHub then refused with HTTP 500.
+balloon/
+big_ply/
+cmp/
+crowd/
+demo/
+demo_balloon/
+final/
+mask_cmp/
+mask_overlays/
+masks_*/
+new_balloon/
+norm_cmp/
+playback/
+ply_balloon/
+ply_check/
+renders_*/

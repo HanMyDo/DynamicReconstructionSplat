@@ -42,6 +42,10 @@ AGG=${8:-mean}        # cluster score aggregation: mean (original) | p90 | max. 
 NCLUST=${9:-64}       # KMeans clusters; fewer group a person into one region so p90/max reaches
                       # all of them, more keeps boundaries tight.
 METHOD=${10:-attention}  # attention (VGGT4D's own) | flow (geometric residual) | union
+OTSU=${11:-1}         # which multi-Otsu split is "dynamic", counting down from the highest.
+                      # 1 = original (topmost class only -> a person's arm, not their torso).
+                      # 2 = top two classes -> the whole object. THIS is the coverage knob;
+                      # the aggregate is not, because the threshold adapts to the scores.
 
 REPO="${HOME}/DynamicReconstructionSplat"
 DATA_ROOT="${HOME}/data/bonn/rgbd_bonn_dataset"
@@ -54,6 +58,7 @@ OUT_DIR="${OUT_ROOT}/output_dyn_masks_precomputed_cs${CHUNK_SIZE}_r${DET_RES}_st
 [ "${AGG}" != "mean" ] && OUT_DIR="${OUT_DIR}_${AGG}"
 [ "${NCLUST}" != "64" ] && OUT_DIR="${OUT_DIR}_k${NCLUST}"
 [ "${METHOD}" != "attention" ] && OUT_DIR="${OUT_DIR}_${METHOD}"
+[ "${OTSU}" != "1" ] && OUT_DIR="${OUT_DIR}_otsu${OTSU}"
 
 mkdir -p "${REPO}/slurm_logs" "${OUT_ROOT}"
 cd "${REPO}"
@@ -90,7 +95,7 @@ if [ "${FREE}" -lt 20000 ]; then
 fi
 
 echo "=============================================="
-echo "Masks: ${SEQUENCE}  chunk ${CHUNK_SIZE}  res ${DET_RES}  stages ${STAGES}  stride ${STRIDE}  margin ${MARGIN}  norm ${NORM}  agg ${AGG}  k${NCLUST}  method ${METHOD}"
+echo "Masks: ${SEQUENCE}  chunk ${CHUNK_SIZE}  res ${DET_RES}  stages ${STAGES}  stride ${STRIDE}  margin ${MARGIN}  norm ${NORM}  agg ${AGG}  k${NCLUST}  method ${METHOD}  otsu ${OTSU}"
 echo "node: $(hostname)   gpu: ${CUDA_VISIBLE_DEVICES:-unset}   $(date)"
 nvidia-smi --query-gpu=index,name,memory.used,memory.total --format=csv
 echo "=============================================="
@@ -112,6 +117,7 @@ python precompute_dyn_masks.py \
     --mask_aggregate "${AGG}" \
     --mask_n_clusters "${NCLUST}" \
     --mask_method "${METHOD}" \
+    --mask_otsu_level "${OTSU}" \
     --save_overlays
 
 echo "=============================================="

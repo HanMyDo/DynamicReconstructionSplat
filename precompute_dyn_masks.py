@@ -185,6 +185,14 @@ def main():
                          "context) while every frame still gets a mask. 1 = consecutive windows. >1 = each "
                          "pass takes every STRIDE-th frame, spanning up to chunk_size*STRIDE frames. Use 0 "
                          "with --det_resolution 518; that combo reproduced the original's mask quality.")
+    ap.add_argument("--mask_otsu_level", type=int, default=1,
+                    help="Which multi-Otsu split separates dynamic from static, counting down "
+                         "from the highest. 1 (original) keeps ONLY the topmost class, which on a "
+                         "partially-moving object is just its fastest part -- the arm, with the "
+                         "torso in the class immediately below being discarded. 2 keeps the top "
+                         "two classes so the whole object survives. This, not the score "
+                         "aggregation, is what controls coverage: the threshold is adaptive, so "
+                         "rescaling cluster scores merely moves the split with them.")
     ap.add_argument("--mask_method", default="attention", choices=["attention", "flow", "union"],
                     help="Which signal defines the dynamic mask. 'attention' is VGGT4D's own: "
                          "attention dissimilarity between a frame and its neighbours, which "
@@ -265,6 +273,7 @@ def main():
         vggt4d_weights_path=args.vggt4d_weights_path,
         dyn_mask_normalize=args.mask_normalize,
         dyn_mask_aggregate=args.mask_aggregate,
+        dyn_mask_otsu_level=args.mask_otsu_level,
         dynamic_n_clusters=args.mask_n_clusters,
     )
     model = create_model(config).to(device).eval()
@@ -333,7 +342,8 @@ def main():
                     intrinsic_s1[0], depth_conf=None)
                 # Threshold the same way the attention path does, so the two masks are
                 # directly comparable and the multi-Otsu machinery is shared.
-                thr = adaptive_multiotsu_variance(res.cpu().numpy())
+                thr = adaptive_multiotsu_variance(
+                    res.cpu().numpy(), level=args.mask_otsu_level)
                 flow_mask = (res > thr).float().unsqueeze(0)
                 print(f"[FlowMask] residual threshold={thr:.3f}, "
                       f"dynamic pixels={flow_mask.mean()*100:.1f}% "
@@ -376,6 +386,7 @@ def main():
         "mask_normalize": args.mask_normalize,
         "mask_aggregate": args.mask_aggregate,
         "mask_method": args.mask_method,
+        "mask_otsu_level": args.mask_otsu_level,
         "mask_n_clusters": args.mask_n_clusters,
         "preprocess_mode": args.preprocess_mode,
         "det_resolution": args.det_resolution,

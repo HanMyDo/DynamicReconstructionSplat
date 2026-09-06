@@ -187,6 +187,10 @@ class EncoderAnySplatCfg:
     # and the average misses the person. "p90"/"max" spread the moving part's score
     # across its whole cluster, so the mask covers the OBJECT rather than the pixels.
     dyn_mask_aggregate: str = "mean"
+    # Which multi-Otsu split defines "dynamic". 1 (original) keeps only the topmost
+    # class -- on a person that is the fast-moving arm, while the torso falls in the
+    # class just below and is dropped. 2 keeps both, covering the whole object.
+    dyn_mask_otsu_level: int = 1
     suppress_dynamic_gaussians: bool = False
     # Temporal attention options for Gaussian head (Fix 2 for dynamic handling)
     use_temporal_attention: bool = False
@@ -625,7 +629,9 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
         if self.cfg.dynamic_mask_threshold is not None:
             threshold = self.cfg.dynamic_mask_threshold
         else:
-            threshold = adaptive_multiotsu_variance(dyn_score_full.cpu().numpy())
+            threshold = adaptive_multiotsu_variance(
+                dyn_score_full.cpu().numpy(),
+                level=getattr(self.cfg, 'dyn_mask_otsu_level', 1))
 
         dyn_mask_full = (dyn_score_full > threshold).float()
         print(f"[DynMask] threshold={threshold:.3f}, dynamic pixels={dyn_mask_full.mean()*100:.1f}%")
