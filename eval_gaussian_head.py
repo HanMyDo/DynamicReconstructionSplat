@@ -268,13 +268,32 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
     last_gaussians = None
     last_infos = None
     if ply_batch is None:
+        # Pick the middle of the windows this run will ACTUALLY process. Taking the
+        # middle of the whole dataset regardless is a silent no-output bug: with
+        # --images_only every batch outside the image range is skipped, and with
+        # --batch_stride the non-multiples are, so the chosen window may never be
+        # reached and no PLY is written at all.
         try:
-            ply_batch = len(dataloader) // 2
-            print(f"[ply] no --ply_batch given; exporting the MIDDLE window "
-                  f"({ply_batch} of {len(dataloader)}) rather than the last, where the "
-                  f"moving object has usually left the frame", flush=True)
+            n_total = len(dataloader)
         except TypeError:
-            pass          # unsized loader: fall back to keeping the last window
+            n_total = None
+        if n_total is not None:
+            if images_only:
+                lo = min(image_batch_start, max(n_total - 1, 0))
+                hi = min(n_total, image_batch_start + max_image_batches)
+                ply_batch = (lo + hi) // 2 if hi > lo else lo
+            else:
+                ply_batch = n_total // 2
+            if batch_stride > 1:
+                ply_batch -= ply_batch % batch_stride     # snap onto a processed batch
+            print(f"[ply] no --ply_batch given; exporting window {ply_batch} "
+                  f"(middle of the {'image range' if images_only else 'sequence'}, "
+                  f"{n_total} windows) rather than the last, where the moving object "
+                  f"has usually left the frame", flush=True)
+    elif batch_stride > 1 and ply_batch % batch_stride != 0:
+        print(f"[ply] WARNING: --ply_batch {ply_batch} is not a multiple of "
+              f"--batch_stride {batch_stride}, so that window is never processed and "
+              f"no PLY will be written.", flush=True)
     last_pred_pose = None
     last_h, last_w = None, None
     last_dyn_mask = None
@@ -568,6 +587,11 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
         return t if keep is None else t[keep]
 
     # --- PLY export (the window selected above; middle by default) ---
+    if last_gaussians is None:
+        print(f"[ply] WARNING: window {ply_batch} was never processed, so no PLY was "
+              f"written. It is outside this run's batch range "
+              f"(images_only={images_only}, start={image_batch_start}, "
+              f"max={max_image_batches}, stride={batch_stride}).", flush=True)
     if last_gaussians is not None:
         print("Saving gaussians.ply...")
         ply_path = os.path.join(output_dir, "gaussians.ply")
