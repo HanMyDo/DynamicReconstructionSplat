@@ -182,6 +182,11 @@ class EncoderAnySplatCfg:
     # moving still contributes its brightest patches to a globally-thresholded mask.
     # "global" normalises once over the pass, letting quiet frames be rejected wholly.
     dyn_mask_normalize: str = "per_frame"
+    # How a feature cluster inherits its dynamic score. "mean" (original) dilutes a
+    # partially-moving object down below threshold -- an arm scores, a torso does not,
+    # and the average misses the person. "p90"/"max" spread the moving part's score
+    # across its whole cluster, so the mask covers the OBJECT rather than the pixels.
+    dyn_mask_aggregate: str = "mean"
     suppress_dynamic_gaussians: bool = False
     # Temporal attention options for Gaussian head (Fix 2 for dynamic handling)
     use_temporal_attention: bool = False
@@ -588,6 +593,7 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
             dyn_maps,
             n_clusters=self.cfg.dynamic_n_clusters,
             normalize=getattr(self.cfg, "dyn_mask_normalize", "per_frame"),
+            aggregate=getattr(self.cfg, "dyn_mask_aggregate", "mean"),
         )
 
         # Upsample the continuous score to full resolution FIRST, then threshold.

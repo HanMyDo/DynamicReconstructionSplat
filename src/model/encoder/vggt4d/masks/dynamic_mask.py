@@ -268,7 +268,8 @@ def batch_extract_dyn_map(qk_dict: dict, images: torch.Tensor) -> torch.Tensor:
 
 
 @torch.no_grad()
-def cluster_attention_maps(feature, dynamic_map, n_clusters=64, normalize="per_frame"):
+def cluster_attention_maps(feature, dynamic_map, n_clusters=64, normalize="per_frame",
+                           aggregate="mean"):
     """Use KMeans to cluster the attention maps using feature.
 
     Args:
@@ -292,10 +293,27 @@ def cluster_attention_maps(feature, dynamic_map, n_clusters=64, normalize="per_f
     # calculate the average dynamic score for each cluster
     dynamic_map_np = dynamic_map.cpu().numpy()
     flattened_dynamic = dynamic_map_np.reshape(-1)
+    # aggregate="mean" is the original. It DILUTES a partially-moving object: the
+    # detector responds to motion, so on a walking person only the fast parts (a
+    # swinging arm) score highly while the slow torso and head do not. Averaging
+    # those together drops the whole cluster below threshold, so the mask covers an
+    # arm instead of a person -- and per-frame compositing then cannot protect the
+    # rest of them, which ghosts across every view.
+    # "max"/"p90" propagate the moving part's score to the whole feature cluster it
+    # belongs to, turning moving PIXELS into a moving OBJECT. p90 is the safer of the
+    # two: max lets a single noisy pixel recruit an entire cluster.
     cluster_dynamic_scores = np.zeros(n_clusters)
     for i in range(n_clusters):
         cluster_mask = (cluster_labels == i)
-        cluster_dynamic_scores[i] = np.mean(flattened_dynamic[cluster_mask])
+        vals = flattened_dynamic[cluster_mask]
+        if vals.size == 0:
+            continue
+        if aggregate == "max":
+            cluster_dynamic_scores[i] = np.max(vals)
+        elif aggregate == "p90":
+            cluster_dynamic_scores[i] = np.percentile(vals, 90)
+        else:
+            cluster_dynamic_scores[i] = np.mean(vals)
 
     # map the cluster labels to the dynamic score
     cluster_map = cluster_dynamic_scores[cluster_labels]

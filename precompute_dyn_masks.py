@@ -183,6 +183,17 @@ def main():
                          "context) while every frame still gets a mask. 1 = consecutive windows. >1 = each "
                          "pass takes every STRIDE-th frame, spanning up to chunk_size*STRIDE frames. Use 0 "
                          "with --det_resolution 518; that combo reproduced the original's mask quality.")
+    ap.add_argument("--mask_aggregate", default="mean", choices=["mean", "max", "p90"],
+                    help="How a feature cluster inherits its dynamic score. 'mean' (original) "
+                         "dilutes a partially-moving object: on a walking person only the fast "
+                         "parts score, so averaging drops the cluster below threshold and the mask "
+                         "covers an arm rather than a person -- which per-frame compositing then "
+                         "cannot protect, so the rest of them ghosts. 'p90'/'max' propagate the "
+                         "moving part's score across its cluster, masking the OBJECT.")
+    ap.add_argument("--mask_n_clusters", type=int, default=64,
+                    help="KMeans clusters for the refinement. Fewer clusters group a person into "
+                         "one region (so p90/max can recruit all of them); more keeps boundaries "
+                         "tight. 64 is the original.")
     ap.add_argument("--mask_normalize", default="per_frame", choices=["per_frame", "global"],
                     help="How cluster scores are rescaled before thresholding. 'per_frame' is the "
                          "original: every frame is stretched to [0,1], so a frame with nothing "
@@ -243,6 +254,8 @@ def main():
         enable_dynamic_detection=True,
         vggt4d_weights_path=args.vggt4d_weights_path,
         dyn_mask_normalize=args.mask_normalize,
+        dyn_mask_aggregate=args.mask_aggregate,
+        dynamic_n_clusters=args.mask_n_clusters,
     )
     model = create_model(config).to(device).eval()
     encoder = model.encoder
@@ -332,6 +345,8 @@ def main():
         "n_passes": len(passes),
         "pass_margin": args.pass_margin,
         "mask_normalize": args.mask_normalize,
+        "mask_aggregate": args.mask_aggregate,
+        "mask_n_clusters": args.mask_n_clusters,
         "preprocess_mode": args.preprocess_mode,
         "det_resolution": args.det_resolution,
         "stages": args.stages,

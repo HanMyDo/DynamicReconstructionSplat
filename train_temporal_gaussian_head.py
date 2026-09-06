@@ -366,6 +366,7 @@ class TrainingConfig:
     dyn_motion_chain: bool = False
     dyn_motion_tracker: str = "vggt"
     dyn_mask_normalize: str = "per_frame"
+    dyn_mask_aggregate: str = "mean"
     dyn_mask_dir: Optional[str] = None  # If set, load PRECOMPUTED dynamic masks (by frame stem) and override the live per-window detection for BOTH the downweight loss and the temporal loss. Use the validated 518+full-span masks so fine-tuning is shaped by correct masks.
 
     # Static-first curriculum (schedule on the dynamic-pixel MSE downweight).
@@ -627,6 +628,7 @@ def create_model(config: TrainingConfig) -> AnySplat:
         dyn_motion_chain=config.dyn_motion_chain,
         dyn_motion_tracker=config.dyn_motion_tracker,
         dyn_mask_normalize=config.dyn_mask_normalize,
+        dyn_mask_aggregate=config.dyn_mask_aggregate,
         suppress_dynamic_gaussians=False,  # Bonn task: reconstruct dynamic objects, not suppress them
         # EXPLICIT TEMPORAL ARCHITECTURE arm of the RQ. This was hardcoded False since
         # the very first smoke test ("--no_temporal_attention for smoke tests; remove for

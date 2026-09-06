@@ -264,6 +264,39 @@ def main() -> int:
     if not t10:
         fails.append(10)
 
+
+    # 11. MASK CLUSTER AGGREGATION. The detector responds to MOTION, so on a walking
+    #     person only the fast parts score (a swinging arm) while the torso does not.
+    #     Averaging those within a feature cluster drops the person below threshold --
+    #     the observed failure: masks covered an arm, the rest of the person ghosted
+    #     across every view because compositing can only protect masked pixels.
+    #     p90/max must propagate the moving part's score to the whole cluster.
+    import importlib.util as _il
+    _mp = Path(__file__).resolve().parents[1] / "src/model/encoder/vggt4d/masks/dynamic_mask.py"
+    _sp = _il.spec_from_file_location("dynamic_mask", _mp)
+    _dm = _il.module_from_spec(_sp); _sp.loader.exec_module(_dm)
+    Hm = Wm = 24
+    featm = torch.zeros(1, Hm, Wm, 4); featm[0, :, :, 0] = 1.0
+    per = torch.zeros(Hm, Wm, dtype=torch.bool); per[4:16, 4:12] = True
+    oth = torch.zeros(Hm, Wm, dtype=torch.bool); oth[4:16, 16:22] = True
+    for _m, _c in ((per, 1), (oth, 2)):
+        featm[0][_m] = torch.zeros(4); featm[0, :, :, _c][_m] = 1.0
+    dynm = torch.zeros(1, Hm, Wm)
+    dynm[0, 4:7, 4:12] = 1.0        # only the person's "arm" moves
+    dynm[0][oth] = 0.45             # another object moves moderately, all over
+    got = {}
+    for agg in ("mean", "p90", "max"):
+        nm, _ = _dm.cluster_attention_maps(featm, dynm, n_clusters=3, aggregate=agg)
+        got[agg] = (nm[0][per].mean().item(), nm[0][oth].mean().item())
+    t11 = (got["mean"][0] < got["mean"][1]           # mean: person loses to the other object
+           and got["p90"][0] > got["p90"][1]         # p90:  person wins
+           and got["max"][0] > got["max"][1])
+    print(f"[11] cluster aggregation rescues a partially-moving object: "
+          f"{'PASS' if t11 else 'FAIL'} (mean {got['mean'][0]:.2f}v{got['mean'][1]:.2f}, "
+          f"p90 {got['p90'][0]:.2f}v{got['p90'][1]:.2f})")
+    if not t11:
+        fails.append(11)
+
     print(f"\n{'ALL TESTS PASS' if not fails else f'FAILED: tests {fails}'}")
     return 1 if fails else 0
 
