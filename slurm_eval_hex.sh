@@ -41,9 +41,11 @@ esac
 # -- a silent null that looks like "scene flow does not work". They are alternatives:
 # pfd DELETES the off-frame dynamic content, flow RELOCATES it.
 case "${EXTRA_FLAGS}" in *per_frame_dynamic*) case "${EXTRA_FLAGS}" in *track_dynamic*)
-  echo "ERROR: --per_frame_dynamic cancels --track_dynamic (pfd gates opacity to 0 on"
-  echo "       exactly the Gaussians flow moves). Pick one: flow for the reported"
-  echo "       mechanism, pfd only as the delete-instead-of-move ablation."; exit 1 ;;
+  echo "NOTE: --per_frame_dynamic + --track_dynamic = FLOW-GATED COMPOSITING:"
+  echo "      off-frame dynamic Gaussians are RELOCATED where tracks support it and"
+  echo "      DROPPED where they do not. (Before the decoder learned to read"
+  echo "      disp_valid in the gate these two cancelled and rendered identically"
+  echo "      to pfd alone.)" ;;
 esac ;; esac
 
 REPO="${HOME}/DynamicReconstructionSplat"; cd ${REPO}; mkdir -p slurm_logs

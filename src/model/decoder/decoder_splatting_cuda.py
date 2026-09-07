@@ -111,7 +111,24 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
                     #     dynamic Gaussians survive ONLY in their own frame.
                     if gaussian_dyn_flag is not None and per_frame_compositing:
                         dyn_i = gaussian_dyn_flag[i].to(opacity_i.device).float()
-                        gate = gate * (1.0 - dyn_i * (1.0 - own_frame))
+                        # FLOW-GATED COMPOSITING. Plain pfd deletes EVERY off-frame
+                        # dynamic Gaussian, which removes all ghosting but leaves the
+                        # object with one frame's worth of density. Scene flow moves
+                        # every one, but only ~54% have tracks near enough to be
+                        # relocated correctly -- the rest keep their stale position and
+                        # ghost exactly as before. Neither is right on its own, and run
+                        # together they cancel (pfd zeroes what flow moves).
+                        # The displacement layer already knows, per Gaussian and per
+                        # target, whether tracks support the motion. Use it: KEEP a
+                        # Gaussian that can be relocated (it will contribute at the
+                        # right place), DROP one that cannot (it could only ghost).
+                        # Coverage stops being a defect and becomes the relocate/drop
+                        # split. With no flow, disp_valid is None and this is plain pfd.
+                        keep = own_frame
+                        if gaussian_disp_valid is not None:
+                            dv = gaussian_disp_valid[i].to(opacity_i.device)[:, j].float()
+                            keep = (own_frame + dv).clamp(max=1.0)
+                        gate = gate * (1.0 - dyn_i * (1.0 - keep))
 
                     # (2) Leave-one-out: drop view j's OWN Gaussians entirely (static
                     #     AND dynamic), so view j must be reconstructed from the OTHER
