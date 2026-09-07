@@ -80,6 +80,10 @@ case "${EXTRA_FLAGS}" in *track_dynamic*)
     T="${T}_trk$(echo "${EXTRA_FLAGS}" | sed -n 's/.*--dyn_motion_groups[= ]*\([0-9][0-9]*\).*/\1/p')"
   fi ;;
 esac
+case "${EXTRA_FLAGS}" in *dyn_motion_max_disp_mult*)
+  MD=$(echo "${EXTRA_FLAGS}" | sed -n 's/.*--dyn_motion_max_disp_mult[= ]*\([0-9.]*\).*/\1/p')
+  [ -n "${MD}" ] && [ "${MD}" != "0" ] && [ "${MD}" != "0.0" ] && T="${T}_cl$(echo ${MD} | tr '.' 'p')" ;;
+esac
 case "${EXTRA_FLAGS}" in *gain_correct*) T="${T}_gc" ;; esac
 case "${EXTRA_FLAGS}" in *dyn_mask_dir*) T="${T}_pcm" ;; esac
 T="${T}_nf${NUM_FRAMES}"

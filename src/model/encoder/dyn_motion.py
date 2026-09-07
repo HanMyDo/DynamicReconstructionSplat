@@ -662,6 +662,7 @@ def knn_flow_displacement(
     k: int = 8,
     gate_mult: float = 3.0,
     min_frame_tracks: int = 4,
+    max_disp_mult: float = 0.0,
     strict: bool = False,
     pred_bandwidth: float = 0.0,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -728,6 +729,33 @@ def knn_flow_displacement(
                 continue
             nb_disp = tr_t[j].float()[idx] - nb_src  # [n_i, kk, 3] flow i->j
             d_ij = (w.unsqueeze(-1) * nb_disp).sum(dim=1) / wsum.clamp_min(1e-8)
+
+            # ROBUSTNESS CLAMP. A displacement is only as trustworthy as the track
+            # motion it was interpolated from. Under `strict`, predict_tracks_loo
+            # fits a velocity from the frames nearest the target and extrapolates
+            # it with no bound, so ONE bad tracker hop -- a track that latches onto
+            # the wrong texture for a frame -- becomes the velocity and throws the
+            # Gaussian far from the object. Relocated that far it can land near the
+            # camera, where a world-scale Gaussian covers a large part of the screen
+            # in one colour; enough of them wash the frame. Bounding each
+            # displacement by a multiple of the MEDIAN observed track motion for
+            # this frame pair keeps ordinary motion untouched (the median is what
+            # the object actually did) while capping the tail. 0 disables it, so
+            # every previously measured result reproduces exactly.
+            if max_disp_mult > 0:
+                # Reference = what the tracks OBSERVABLY did between i and j (never
+                # the strict prediction, which is the thing being guarded). The
+                # MEDIAN, because the outliers being guarded against are themselves
+                # part of the sample: a p90 reference breaks down once more than 10%
+                # of tracks go bad, which is exactly the regime that produces the
+                # artefact. mult leaves headroom for parts of the object that
+                # genuinely move faster than the median.
+                ref = (tr_i[j].float() - tr_i[i].float()).norm(dim=-1)
+                ref = ref[ok[j, mi] & ok[i, mi]]
+                if ref.numel() > 0:
+                    lim = max_disp_mult * ref.median().clamp_min(1e-6)
+                    nrm = d_ij.norm(dim=-1, keepdim=True)
+                    d_ij = d_ij * (lim / nrm.clamp_min(1e-8)).clamp(max=1.0)
             d_ij = d_ij * good.unsqueeze(-1).float()
             row = torch.zeros(N, 3, device=dev, dtype=disp.dtype)
             row[sel] = d_ij.to(disp.dtype)
@@ -749,7 +777,9 @@ def knn_flow_displacement(
             print(f"[DynFlow{'/strict' if strict else ''}] moved {100.0 * float(cover):.1f}% of dynamic "
                   f"(gaussian, target) pairs | displacement "
                   f"median={mags.median().item():.4f} mean={mags.mean().item():.4f} "
-                  f"p90={mags.quantile(0.9).item():.4f} (world units)")
+                  f"p90={mags.quantile(0.9).item():.4f} "
+                  f"p99={mags.quantile(0.99).item():.4f} max={mags.max().item():.4f} "
+                  f"(world units)")
         else:
             print("[DynFlow] NO usable displacement (gates removed everything)")
     return disp, valid

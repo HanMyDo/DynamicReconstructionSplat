@@ -837,6 +837,13 @@ def main():
                              "strict no-look variant is the groups mode; report both.")
     parser.add_argument("--dyn_motion_n_query", type=int, default=1024,
                         help="Scene-flow mode: total tracker query budget, split across query frames.")
+    parser.add_argument("--dyn_motion_max_disp_mult", type=float, default=0.0,
+                        help="Cap each Gaussian's displacement at this multiple of the MEDIAN "
+                             "observed track motion for the frame pair. Guards the strict "
+                             "predictor, which fits a velocity from the frames nearest the "
+                             "target and extrapolates it unbounded, so one bad tracker hop can "
+                             "throw a Gaussian near the camera where it washes the frame. "
+                             "0 = off (reproduces every measured result); 3.0 is generous.")
     parser.add_argument("--dyn_motion_gate_mult", type=float, default=3.0,
                         help="Scene-flow mode: trust radius = mult x median track NN spacing; "
                              "Gaussians farther than this from every track do not move.")
@@ -922,6 +929,7 @@ def main():
         dyn_motion_n_query=args.dyn_motion_n_query,
         dyn_motion_query_all=not args.dyn_motion_query_first_only,
         dyn_motion_gate_mult=args.dyn_motion_gate_mult,
+        dyn_motion_max_disp_mult=args.dyn_motion_max_disp_mult,
         dyn_motion_strict=args.dyn_motion_strict,
         dyn_motion_pred_bandwidth=args.dyn_motion_pred_bandwidth,
         dyn_motion_clean_tokens=args.dyn_motion_clean_tokens,
@@ -964,6 +972,7 @@ def main():
             "dyn_motion_knn": args.dyn_motion_knn if args.track_dynamic else 0,
             "dyn_motion_n_query": args.dyn_motion_n_query,
             "dyn_motion_gate_mult": args.dyn_motion_gate_mult,
+            "dyn_motion_max_disp_mult": args.dyn_motion_max_disp_mult,
             "dyn_motion_query_all": not args.dyn_motion_query_first_only,
             "dyn_motion_strict": args.dyn_motion_strict,
             "dyn_motion_pred_bandwidth": args.dyn_motion_pred_bandwidth,

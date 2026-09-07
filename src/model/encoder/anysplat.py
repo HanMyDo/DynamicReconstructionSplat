@@ -152,6 +152,7 @@ class EncoderAnySplatCfg:
     dyn_motion_n_query: int = 1024   # total tracker query budget (split across query frames)
     dyn_motion_query_all: bool = True  # queries from every frame's dynamic pixels (not just frame 0)
     dyn_motion_gate_mult: float = 3.0  # trust radius = mult x median track NN spacing
+    dyn_motion_max_disp_mult: float = 0.0  # cap |displacement| at mult x median track motion (0=off)
     # STRICT control: predict each track's target-frame position from the OTHER frames
     # instead of observing it, so frame j is never read (see predict_tracks_loo).
     dyn_motion_strict: bool = False
@@ -1148,6 +1149,7 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
                             dyn_flag_list[-1] > 0.5, v,
                             k=getattr(self.cfg, "dyn_motion_knn", 8),
                             gate_mult=getattr(self.cfg, "dyn_motion_gate_mult", 3.0),
+                            max_disp_mult=getattr(self.cfg, "dyn_motion_max_disp_mult", 0.0),
                             strict=getattr(self.cfg, "dyn_motion_strict", False),
                             pred_bandwidth=getattr(self.cfg, "dyn_motion_pred_bandwidth", 0.0),
                         )

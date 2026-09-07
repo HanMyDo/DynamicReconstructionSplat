@@ -402,6 +402,42 @@ def main() -> int:
     if not t14:
         fails.append(14)
 
+    # 15. THE DISPLACEMENT CLAMP bounds a corrupted track. Test 7's corrupted-frame
+    #     case moves Gaussians ~8.7 world units against a median of 0.022 -- the
+    #     displacement is only as good as the track it came from, and nothing in the
+    #     interpolation bounds it. A Gaussian thrown that far can land near the
+    #     camera, where a world-scale Gaussian covers much of the screen in one
+    #     colour. max_disp_mult caps it at a multiple of the MEDIAN observed track
+    #     motion, which leaves ordinary motion alone. 0 must reproduce exactly.
+    #     Corrupt a MINORITY of tracks: test 7 shifts every track at frame 2, so the
+    #     observed motion really is 5.0 there and a 5.0 displacement is supported by
+    #     the evidence. The failure this guards is a few tracks disagreeing with the
+    #     rest, which is what one bad RAFT hop produces.
+    traj_out = traj.clone()
+    traj_out[2, ::5] += 5.0                              # 20% of tracks go rogue at f=2
+    d_off, _ = dyn_motion.knn_flow_displacement(
+        traj_out, ok, gpts, gfidx, gdyn, V, k=4, gate_mult=3.0, strict=False,
+        max_disp_mult=0.0)
+    d_cl, _ = dyn_motion.knn_flow_displacement(
+        traj_out, ok, gpts, gfidx, gdyn, V, k=4, gate_mult=3.0, strict=False,
+        max_disp_mult=3.0)
+    d_clean, _ = dyn_motion.knn_flow_displacement(
+        traj, ok, gpts, gfidx, gdyn, V, k=4, gate_mult=3.0, strict=False,
+        max_disp_mult=3.0)
+    m_off = d_off[gdyn][:, 2].norm(dim=-1).max().item()
+    m_cl = d_cl[gdyn][:, 2].norm(dim=-1).max().item()
+    d_ref, _ = dyn_motion.knn_flow_displacement(
+        traj_out, ok, gpts, gfidx, gdyn, V, k=4, gate_mult=3.0, strict=False)
+    t15a = torch.allclose(d_off, d_ref, atol=1e-6)            # 0 == exactly off
+    t15b = m_cl < m_off / 2                                    # tail actually bounded
+    t15c = torch.allclose(d_clean, disp, atol=1e-4)            # clean motion untouched
+    t15 = t15a and t15b and t15c
+    print(f"[15] displacement clamp bounds a corrupted track: {'PASS' if t15 else 'FAIL'} "
+          f"(off==baseline={t15a}, corrupted {m_off:.2f}->{m_cl:.2f} world, "
+          f"clean motion untouched={t15c})")
+    if not t15:
+        fails.append(15)
+
     print(f"\n{'ALL TESTS PASS' if not fails else f'FAILED: tests {fails}'}")
     return 1 if fails else 0
 
