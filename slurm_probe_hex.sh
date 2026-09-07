@@ -25,6 +25,7 @@ set -uo pipefail
 CKPT=${1:?usage: sbatch slurm_probe_hex.sh CKPT MASKDIR [SEQ] [NF] [STRIDE] [START] [NWIN]}
 MASKS=${2:?missing MASKDIR}
 SEQ=${3:-rgbd_bonn_balloon}; NF=${4:-6}; STRIDE=${5:-8}; START=${6:-0}; NWIN=${7:-30}
+while [ "$#" -lt 7 ]; do set -- "$@" ""; done   # pad so `shift 7` is always valid
 TAG=${EVAL_DATE:-probe}
 
 REPO="${HOME}/DynamicReconstructionSplat"; cd ${REPO}; mkdir -p slurm_logs
@@ -67,9 +68,19 @@ run () {   # name, extra flags
     --output_dir "${out}" ${BASE} ${WIN} "$@" || echo "FAILED: ${name}"
 }
 
-run ctl
-run flow  ${FLOW}
-run clamp ${FLOW} --dyn_motion_max_disp_mult 3.0
+# Beyond the 7 positional args, each remaining arg is a config spec "NAME=FLAGS"
+# and REPLACES the default trio -- so one allocation can sweep a knob instead of
+# one job per value. With none given, the default control/flow/clamped-flow runs.
+shift 7 2>/dev/null || shift $#
+if [ "$#" -gt 0 ]; then
+  for spec in "$@"; do
+    run "${spec%%=*}" ${spec#*=}
+  done
+else
+  run ctl
+  run flow  ${FLOW}
+  run clamp ${FLOW} --dyn_motion_max_disp_mult 3.0
+fi
 
 echo "done $(date)"
 echo "--- read the diagnostics with:"
