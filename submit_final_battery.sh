@@ -16,8 +16,14 @@
 # The mechanism is training-free (frozen head), so there is no train/test
 # contamination and ANY sequence is a valid eval.
 #
+# SERIAL=1 runs the whole battery on ONE GPU: every job gets a shared name and
+# --dependency=singleton, so slurm starts at most one at a time. Note you CANNOT
+# get this by cancelling jobs -- whenever you are under the QOS cap slurm just
+# promotes the next queued job into the free slot. It has to be set at submit.
+#
 # USAGE:  ./submit_final_battery.sh [SEQ ...]
-#         EVAL_DATE=final ./submit_final_battery.sh          # default 4 sequences
+#         EVAL_DATE=final ./submit_final_battery.sh            # 2 GPUs, ~5-6 h
+#         SERIAL=1 EVAL_DATE=final ./submit_final_battery.sh   # 1 GPU,  ~10-12 h
 # =============================================================================
 set -uo pipefail
 REPO="${HOME}/DynamicReconstructionSplat"; cd "${REPO}"
@@ -26,6 +32,20 @@ F="--track_dynamic --dyn_motion_knn 8 --dyn_motion_strict --dyn_motion_pred_band
 VID="--image_batch_start 0 --max_image_batches 99999 --image_views 0"
 export EVAL_DATE="${EVAL_DATE:-final}"
 
+# One GPU at a time: singleton is per (user, job name), so a shared name serialises
+# everything. Combined with afterok via a comma, which slurm ANDs.
+SERIAL="${SERIAL:-0}"
+NAME=""
+[ "${SERIAL}" = "1" ] && NAME="--job-name=chain"
+mkdep () {   # $1 = job id to wait for, or empty
+  local d=""
+  [ -n "${1:-}" ] && d="afterok:$1"
+  if [ "${SERIAL}" = "1" ]; then
+    if [ -n "${d}" ]; then d="singleton,${d}"; else d="singleton"; fi
+  fi
+  [ -n "${d}" ] && echo "--dependency=${d}"
+}
+
 if [ "$#" -gt 0 ]; then SEQS="$*"; else
   SEQS="rgbd_bonn_balloon rgbd_bonn_synchronous2 rgbd_bonn_removing_obstructing_box rgbd_bonn_placing_obstructing_box"
 fi
@@ -33,18 +53,18 @@ fi
 for SEQ in ${SEQS}; do
   [ -d "${HOME}/data/bonn/rgbd_bonn_dataset/${SEQ}/rgb" ] || { echo "SKIP ${SEQ}: no rgb/"; continue; }
   N=$(ls "${M2}/${SEQ}/masks"/*.png 2>/dev/null | wc -l)
-  DEP=""
+  JID=""
   if [ "${N}" -eq 0 ]; then
-    JID=$(sbatch --parsable slurm_precompute_masks_hex.sh "${SEQ}" 64 518 3 1 6 per_frame mean 64 attention 2)
+    JID=$(sbatch --parsable ${NAME} $(mkdep) slurm_precompute_masks_hex.sh \
+            "${SEQ}" 64 518 3 1 6 per_frame mean 64 attention 2)
     echo "${SEQ}: masks -> job ${JID}"
-    DEP="--dependency=afterok:${JID}"
   else
     echo "${SEQ}: ${N} masks already present"
   fi
 
-  A=$(sbatch --parsable ${DEP} slurm_eval_hex.sh baseline \
+  A=$(sbatch --parsable ${NAME} $(mkdep "${JID}") slurm_eval_hex.sh baseline \
         "--no_vggt4d --frame_stride 4 --dyn_mask_dir ${M2} ${VID}" "${SEQ}" 16)
-  B=$(sbatch --parsable ${DEP} slurm_eval_hex.sh baseline \
+  B=$(sbatch --parsable ${NAME} $(mkdep "${JID}") slurm_eval_hex.sh baseline \
         "--frame_stride 4 --dyn_mask_dir ${M2} --per_frame_dynamic ${F} ${VID} --ply_per_frame" "${SEQ}" 16)
   echo "${SEQ}: vanilla -> job ${A} | ours -> job ${B}"
 done
