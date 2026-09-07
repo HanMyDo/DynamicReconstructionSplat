@@ -689,6 +689,7 @@ def knn_flow_displacement(
     dev = gauss_pts.device
     disp = torch.zeros(N, num_views, 3, device=dev, dtype=gauss_pts.dtype)
     valid = torch.zeros(N, num_views, device=dev, dtype=gauss_pts.dtype)
+    _gate_tot = _gate_radius = _gate_vis = 0
     traj_t, ok_t = (predict_tracks_loo(traj, ok, bandwidth=pred_bandwidth)
                     if strict else (traj, ok))
 
@@ -714,6 +715,15 @@ def knn_flow_displacement(
         d_gt = torch.cdist(G, P)                     # [n_i, M]
         dist, idx = d_gt.topk(kk, dim=1, largest=False)
         w0 = (dist <= gate_r).float() / (dist + 1e-6)          # [n_i, kk]
+        # WHICH gate rejects a pair? Two can, and they need opposite fixes:
+        # the RADIUS (no track near this Gaussian -> raise gate_mult / query more)
+        # and target-frame VISIBILITY (tracks exist but none survives to frame j ->
+        # a tracker problem, untunable from here). Coverage alone cannot tell them
+        # apart, which is why raising density and radius both measured null.
+        spatial_ok = w0.sum(dim=1) > 0                        # [n_i]
+        n_pairs_i = int(sel.sum()) * max(num_views - 1, 1)
+        _gate_tot += n_pairs_i
+        _gate_radius += int((~spatial_ok).sum()) * max(num_views - 1, 1)
 
         tr_i = traj[:, mi]                           # [V, M, 3] observed
         tr_t = traj_t[:, mi]                         # [V, M, 3] target lookup (LOO if strict)
@@ -725,6 +735,7 @@ def knn_flow_displacement(
             w = w0 * ok_t_i[j].float()[idx]          # drop neighbours unusable at j
             wsum = w.sum(dim=1, keepdim=True)        # [n_i, 1]
             good = wsum[:, 0] > 0
+            _gate_vis += int((spatial_ok & ~good).sum())
             if not bool(good.any()):
                 continue
             nb_disp = tr_t[j].float()[idx] - nb_src  # [n_i, kk, 3] flow i->j
@@ -782,4 +793,9 @@ def knn_flow_displacement(
                   f"(world units)")
         else:
             print("[DynFlow] NO usable displacement (gates removed everything)")
+        if _gate_tot > 0:
+            print(f"[DynFlow/gates] of {_gate_tot} (gaussian, target) pairs: "
+                  f"radius rejected {100.0 * _gate_radius / _gate_tot:.1f}%, "
+                  f"target-frame visibility rejected {100.0 * _gate_vis / _gate_tot:.1f}%",
+                  flush=True)
     return disp, valid
