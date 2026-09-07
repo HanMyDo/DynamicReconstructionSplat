@@ -30,7 +30,13 @@ TAG=${EVAL_DATE:-probe}
 REPO="${HOME}/DynamicReconstructionSplat"; cd ${REPO}; mkdir -p slurm_logs
 DATA_ROOT="${HOME}/data/bonn/rgbd_bonn_dataset"
 VGGT4D_CKPT="${REPO}/ckpts/vggt4d_model_tracker_fixed_e20.pt"
-[ -f "${CKPT}" ] || { echo "ERROR: no checkpoint ${CKPT}"; exit 1; }
+# "baseline" = frozen pretrained head, same spelling slurm_eval_hex.sh accepts.
+# Useful for asking whether a defect is in the CHECKPOINT or in the pipeline.
+if [ "${CKPT}" = "baseline" ]; then CKPT_FLAG=""; MODE=frozen
+else
+  [ -f "${CKPT}" ] || { echo "ERROR: no checkpoint ${CKPT}"; exit 1; }
+  CKPT_FLAG="--checkpoint ${CKPT}"; MODE=ft
+fi
 N=$(ls "${MASKS}/${SEQ}/masks"/*.png 2>/dev/null | wc -l)
 [ "${N}" -eq 0 ] && { echo "ERROR: no masks for ${SEQ} under ${MASKS}"; exit 1; }
 echo "masks: ${N}"
@@ -51,13 +57,13 @@ SEQ_TAG=$(echo ${SEQ} | sed 's/rgbd_bonn_//')
 
 run () {   # name, extra flags
   local name=$1; shift
-  local out="output_probe_${name}_${SEQ_TAG}_${TAG}"
+  local out="output_probe_${MODE}_${name}_${SEQ_TAG}_${TAG}"
   echo "===================================================================="
   echo "PROBE ${name} -> ${out}   $(date +%H:%M:%S)"
   echo "===================================================================="
   python eval_gaussian_head.py --data_dir "${DATA_ROOT}" --dataset_name "${SEQ}" \
     --intrinsics bonn --num_frames ${NF} --split all \
-    --vggt4d_weights_path "${VGGT4D_CKPT}" --checkpoint "${CKPT}" \
+    --vggt4d_weights_path "${VGGT4D_CKPT}" ${CKPT_FLAG} \
     --output_dir "${out}" ${BASE} ${WIN} "$@" || echo "FAILED: ${name}"
 }
 
@@ -68,4 +74,4 @@ run clamp ${FLOW} --dyn_motion_max_disp_mult 3.0
 echo "done $(date)"
 echo "--- read the diagnostics with:"
 echo "    grep -E 'PROBE|DynFlow' slurm_logs/probe_${SLURM_JOB_ID}.out"
-ls -d output_probe_*_${SEQ_TAG}_${TAG}
+ls -d output_probe_${MODE}_*_${SEQ_TAG}_${TAG}
