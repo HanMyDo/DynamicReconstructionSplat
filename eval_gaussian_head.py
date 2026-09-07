@@ -235,7 +235,7 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
              per_frame_dynamic=False, leave_one_out=False, precomputed_mask_dir=None,
              track_dynamic=False, gain_correct=False, scale_mult=1.0,
              image_save_every=1, batch_stride=1, images_only=False, image_views=None,
-             ply_batch=None, ply_per_frame=False, ply_dyn_source=-1,
+             ply_batch=None, ply_per_frame=False, ply_dyn_source=-1, ply_dyn_opacity=1.0,
              image_error_map=False, image_error_gain=4.0):
     os.makedirs(output_dir, exist_ok=True)
     images_dir = os.path.join(output_dir, "images")
@@ -646,7 +646,16 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
                 if dvalid is not None:
                     move = move * dvalid[0, :, j].to(dev).float()
                 means_j = means + move.unsqueeze(-1) * disp[0, :, j].to(dev).float()
+                # FLOW-GATED, same rule the renderer uses: an off-frame dynamic
+                # Gaussian that tracking could NOT relocate is DROPPED, because the
+                # only thing it can do here is sit at a stale position and ghost.
+                # Without this the 4D file still shows the copies the render removed,
+                # so the point cloud disagrees with the picture it is supposed to show.
                 _k = _ply_keep(means.shape[0], dev)
+                if dvalid is not None:
+                    _ok = ((dyn_v <= 0.5) | (fid_v == j)
+                           | (dvalid[0, :, j].to(dev) > 0))
+                    _k = _ok if _k is None else (_k & _ok)
                 _df = dyn_flat[_k.cpu().numpy()] if (_k is not None and dyn_flat is not None) else dyn_flat
                 export_ply(
                     _sub(means_j, _k),
@@ -657,7 +666,9 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
                     Path(os.path.join(output_dir, f"gaussians_t{j:02d}.ply")),
                     save_sh_dc_only=True,
                     dyn_mask_flat=_df,
-                    dyn_opacity_scale=0.5,
+                    # 1.0 = no fade. The 4D export exists to SHOW the moving object;
+                    # the old 0.5 halved exactly the Gaussians the viewer came to see.
+                    dyn_opacity_scale=ply_dyn_opacity,
                 )
             print(f"  -> {output_dir}/gaussians_t00..t{n_views-1:02d}.ply "
                   f"({int(dyn_v.sum())} dynamic gaussians move; the rest are identical)")
@@ -775,6 +786,10 @@ def main():
                              "result look worse. With e.g. 0, the control shows one person frozen at "
                              "frame 0 and the flow export shows that same person moving to where "
                              "they were at t -- the actual difference, unobscured.")
+    parser.add_argument("--ply_dyn_opacity", type=float, default=1.0,
+                        help="Opacity multiplier for DYNAMIC gaussians in the 4D export. "
+                             "1.0 = untouched (the moving object is the point of the file). "
+                             "Lower fades it, which is only useful to see through it.")
     parser.add_argument("--ply_per_frame", action="store_true",
                         help="4D EXPORT: also write gaussians_t00..tNN.ply, one per timestamp, with "
                              "each dynamic Gaussian displaced by its scene-flow motion to that "
@@ -992,6 +1007,7 @@ def main():
              ply_batch=args.ply_batch,
              ply_per_frame=args.ply_per_frame,
              ply_dyn_source=args.ply_dyn_source,
+             ply_dyn_opacity=args.ply_dyn_opacity,
              image_error_map=args.image_error_map,
              image_error_gain=args.image_error_gain,
              image_views=(None if args.image_views.strip().lower() == "all"
