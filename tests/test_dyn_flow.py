@@ -438,6 +438,35 @@ def main() -> int:
     if not t15:
         fails.append(15)
 
+    # 16. EVERY TrainingConfig KWARG eval PASSES MUST EXIST AS A FIELD. Adding a
+    #     knob means touching the encoder cfg, TrainingConfig and the argparse
+    #     block; miss the middle one and the failure is a TypeError raised AFTER
+    #     model load, i.e. a job that burns an allocation and dies with no output.
+    #     That has now happened twice (dynamic_n_clusters, dyn_motion_max_disp_mult).
+    #     Pure ast, so it costs nothing and needs no torch.
+    import ast as _ast
+    _root = Path(__file__).resolve().parents[1]
+    _tc = _ast.parse((_root / "train_temporal_gaussian_head.py").read_text())
+    _fields = set()
+    for _n in _ast.walk(_tc):
+        if isinstance(_n, _ast.ClassDef) and _n.name == "TrainingConfig":
+            for _st in _n.body:
+                if isinstance(_st, _ast.AnnAssign) and isinstance(_st.target, _ast.Name):
+                    _fields.add(_st.target.id)
+    _ev = _ast.parse((_root / "eval_gaussian_head.py").read_text())
+    _passed = set()
+    for _n in _ast.walk(_ev):
+        if (isinstance(_n, _ast.Call) and isinstance(_n.func, _ast.Name)
+                and _n.func.id == "TrainingConfig"):
+            _passed |= {k.arg for k in _n.keywords if k.arg}
+    _missing = sorted(_passed - _fields)
+    t16 = bool(_fields) and bool(_passed) and not _missing
+    print(f"[16] eval's TrainingConfig kwargs all exist as fields: "
+          f"{'PASS' if t16 else 'FAIL'} ({len(_passed)} passed, {len(_fields)} fields"
+          + (f", MISSING {_missing}" if _missing else "") + ")")
+    if not t16:
+        fails.append(16)
+
     print(f"\n{'ALL TESTS PASS' if not fails else f'FAILED: tests {fails}'}")
     return 1 if fails else 0
 

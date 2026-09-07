@@ -66,6 +66,6 @@ run flow  ${FLOW}
 run clamp ${FLOW} --dyn_motion_max_disp_mult 3.0
 
 echo "done $(date)"
-echo "--- displacement diagnostics (first window of each) ---"
-grep -m 9 -E "DynFlow" slurm_logs/probe_${SLURM_JOB_ID}.out || true
+echo "--- read the diagnostics with:"
+echo "    grep -E 'PROBE|DynFlow' slurm_logs/probe_${SLURM_JOB_ID}.out"
 ls -d output_probe_*_${SEQ_TAG}_${TAG}
