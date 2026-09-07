@@ -52,14 +52,20 @@ fi
 
 for SEQ in ${SEQS}; do
   [ -d "${HOME}/data/bonn/rgbd_bonn_dataset/${SEQ}/rgb" ] || { echo "SKIP ${SEQ}: no rgb/"; continue; }
+  # PARTIAL masks are worse than none: eval does not fail on a missing frame, it
+  # silently falls back to LIVE detection, so the sequence is scored under a
+  # different protocol than the others and the comparison is quietly invalid.
+  # Require one mask per rgb frame, not merely "some masks exist".
+  NRGB=$(ls "${HOME}/data/bonn/rgbd_bonn_dataset/${SEQ}/rgb"/*.png 2>/dev/null | wc -l)
   N=$(ls "${M2}/${SEQ}/masks"/*.png 2>/dev/null | wc -l)
   JID=""
-  if [ "${N}" -eq 0 ]; then
+  if [ "${N}" -lt "${NRGB}" ]; then
+    [ "${N}" -gt 0 ] && echo "${SEQ}: INCOMPLETE masks (${N}/${NRGB}) -> regenerating"
     JID=$(sbatch --parsable ${NAME} $(mkdep) slurm_precompute_masks_hex.sh \
             "${SEQ}" 64 518 3 1 6 per_frame mean 64 attention 2)
     echo "${SEQ}: masks -> job ${JID}"
   else
-    echo "${SEQ}: ${N} masks already present"
+    echo "${SEQ}: ${N}/${NRGB} masks already present"
   fi
 
   A=$(sbatch --parsable ${NAME} $(mkdep "${JID}") slurm_eval_hex.sh baseline \
