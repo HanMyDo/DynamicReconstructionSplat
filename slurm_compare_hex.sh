@@ -58,9 +58,14 @@ if len(rows) == 2:
     print("      measure different pixels in each run.")
 PY
 
-rm -rf "${OUT}"
-python make_comparison_figure.py --a "${A}/images" --b "${B}/images" --out "${OUT}" \
-  --label_a "${LA}" --label_b "${LB}" || { echo "ERROR: figure build failed"; exit 1; }
+# Build into a temp dir and swap at the end. Deleting ${OUT} up front means a
+# rerun that is cancelled midway leaves a PARTIAL directory where a complete one
+# used to be -- and the frame count looks plausible, so it is only noticed later
+# when the video turns out to be a quarter of the sequence.
+rm -rf "${OUT}.tmp"
+python make_comparison_figure.py --a "${A}/images" --b "${B}/images" --out "${OUT}.tmp" \
+  --label_a "${LA}" --label_b "${LB}" || { echo "ERROR: figure build failed"; rm -rf "${OUT}.tmp"; exit 1; }
+rm -rf "${OUT}" && mv "${OUT}.tmp" "${OUT}"
 
 N=$(ls "${OUT}"/*.png 2>/dev/null | wc -l)
 echo "figure frames: ${N}"
