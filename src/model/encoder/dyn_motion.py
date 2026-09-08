@@ -765,8 +765,15 @@ def knn_flow_displacement(
                 ref = ref[ok[j, mi] & ok[i, mi]]
                 if ref.numel() > 0:
                     lim = max_disp_mult * ref.median().clamp_min(1e-6)
-                    nrm = d_ij.norm(dim=-1, keepdim=True)
-                    d_ij = d_ij * (lim / nrm.clamp_min(1e-8)).clamp(max=1.0)
+                    # REJECT, do not rescale. Shortening a displacement we do not
+                    # trust just puts the Gaussian at a different wrong place, where
+                    # it still renders -- visible as debris scattered around the
+                    # object, and as a semi-transparent layer when it lands near the
+                    # camera. Marking it invalid instead lets flow-gated compositing
+                    # DROP it, which is the whole principle: render what tracking
+                    # supports, remove what it does not.
+                    good = good & (d_ij.norm(dim=-1) <= lim)
+                    d_ij = d_ij * good.unsqueeze(-1).float()
             d_ij = d_ij * good.unsqueeze(-1).float()
             row = torch.zeros(N, 3, device=dev, dtype=disp.dtype)
             row[sel] = d_ij.to(disp.dtype)

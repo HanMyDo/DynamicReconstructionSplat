@@ -430,11 +430,20 @@ def main() -> int:
         traj_out, ok, gpts, gfidx, gdyn, V, k=4, gate_mult=3.0, strict=False)
     t15a = torch.allclose(d_off, d_ref, atol=1e-6)            # 0 == exactly off
     t15b = m_cl < m_off / 2                                    # tail actually bounded
+    # rejected, not rescaled: the over-limit pairs must be marked INVALID so the
+    # flow-gated decoder drops them, not left at a shortened (still wrong) offset.
+    _, v_off_ = dyn_motion.knn_flow_displacement(
+        traj_out, ok, gpts, gfidx, gdyn, V, k=4, gate_mult=3.0, strict=False,
+        max_disp_mult=0.0)
+    _, v_cl_ = dyn_motion.knn_flow_displacement(
+        traj_out, ok, gpts, gfidx, gdyn, V, k=4, gate_mult=3.0, strict=False,
+        max_disp_mult=3.0)
+    t15d = float(v_cl_.sum()) < float(v_off_.sum())
     t15c = torch.allclose(d_clean, disp, atol=1e-4)            # clean motion untouched
-    t15 = t15a and t15b and t15c
+    t15 = t15a and t15b and t15c and t15d
     print(f"[15] displacement clamp bounds a corrupted track: {'PASS' if t15 else 'FAIL'} "
           f"(off==baseline={t15a}, corrupted {m_off:.2f}->{m_cl:.2f} world, "
-          f"clean motion untouched={t15c})")
+          f"clean motion untouched={t15c}, rejected not rescaled={t15d})")
     if not t15:
         fails.append(15)
 
