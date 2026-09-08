@@ -476,6 +476,33 @@ def main() -> int:
     if not t16:
         fails.append(16)
 
+    # 17. NEAR-CAMERA REJECTION. The artefact a magnitude clamp cannot catch: a
+    #     Gaussian already close to the camera, displaced a little TOWARD it, keeps
+    #     its world-space scale and covers the screen. gsplat is called with
+    #     near_plane=1e-10 so nothing culls it. Measured on balloon b0248-b0257:
+    #     frame luminance 138 -> 34 with relocation on, while no-handling (139) and
+    #     pfd (141) were untouched -- so this was the entire artefact.
+    w2c17 = torch.eye(4)                       # camera at origin looking down +z
+    xyz_old17 = torch.tensor([[0.0, 0.0, 5.0],    # scene at 5 m
+                              [0.0, 0.0, 6.0],
+                              [0.0, 0.0, 4.0],
+                              [0.0, 0.0, 0.30]])  # one already-close Gaussian
+    xyz_new17 = xyz_old17.clone()
+    xyz_new17[3, 2] = 0.20                     # nudged 0.1 m nearer -> screen-filling
+    xyz_new17[0, 2] = 5.5                      # an ordinary, legitimate relocation
+    moved17 = torch.tensor([True, False, False, True])
+    bad17 = dyn_motion.near_camera_reject(xyz_old17, xyz_new17, w2c17, moved17)
+    t17a = bool(bad17[3]) and not bool(bad17[0])          # catches it, spares the good one
+    t17b = not bool(bad17[1]) and not bool(bad17[2])      # never touches unmoved Gaussians
+    # a Gaussian that was ALREADY the near content and does not move is not rejected
+    t17c = not bool(dyn_motion.near_camera_reject(
+        xyz_old17, xyz_old17, w2c17, torch.ones(4, dtype=torch.bool)).any())
+    t17 = t17a and t17b and t17c
+    print(f"[17] near-camera relocation rejected: {'PASS' if t17 else 'FAIL'} "
+          f"(catches the near landing={t17a}, spares unmoved={t17b}, no-op on zero motion={t17c})")
+    if not t17:
+        fails.append(17)
+
     print(f"\n{'ALL TESTS PASS' if not fails else f'FAILED: tests {fails}'}")
     return 1 if fails else 0
 

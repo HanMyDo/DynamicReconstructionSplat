@@ -117,6 +117,44 @@ def _predict_loo_linear(traj: torch.Tensor, ok: torch.Tensor, min_pts: int = 3) 
     return pred
 
 
+def near_camera_reject(xyz_old: torch.Tensor, xyz_new: torch.Tensor,
+                       w2c: torch.Tensor, moved: torch.Tensor,
+                       quantile: float = 0.01) -> torch.Tensor:
+    """Which RELOCATED Gaussians landed implausibly close to the camera. -> bool [N]
+
+    WHY. A magnitude clamp cannot prevent this: a Gaussian sitting 0.3 m from the
+    camera displaced 0.1 m toward it ends at 0.2 m, a small motion with a
+    catastrophic result. Its world-space scale is unchanged, so it now covers much
+    of the screen in one colour, and the renderer does not cull it -- gsplat is
+    called with near_plane=1e-10. Measured on balloon b0248-b0257: mean frame
+    luminance 138 -> 34 with relocation on, while no-handling and pfd stayed at
+    139 and 141, so this is the whole artefact.
+
+    The test is on the DESTINATION, not the distance: a relocation that puts a
+    Gaussian in front of everything in the original scene is not a plausible
+    motion, whatever its length. The reference is the original scene's own near
+    content in this view (a low quantile, not the min, so one bad depth cannot
+    move the bar). Static and own-frame Gaussians are never affected.
+
+    xyz_old/xyz_new [N,3] world; w2c [4,4] world-to-camera; moved [N] bool.
+    Fires only on Gaussians that both moved toward the camera AND ended in front of
+    the scene's near content.
+    """
+    if not bool(moved.any()):
+        return torch.zeros_like(moved, dtype=torch.bool)
+    R, t = w2c[:3, :3].float(), w2c[:3, 3].float()
+    z_old = (xyz_old.float() @ R.T + t)[:, 2]
+    z_new = (xyz_new.float() @ R.T + t)[:, 2]
+    front = z_old[z_old > 0]
+    if front.numel() == 0:
+        return torch.zeros_like(moved, dtype=torch.bool)
+    ref = torch.quantile(front, quantile)
+    # Also require that the relocation moved it TOWARD the camera. A Gaussian that
+    # was already the near content and stays put (or moves away) is legitimate --
+    # it is the scene, not an artefact -- and rejecting it would punch a hole.
+    return moved & (z_new < ref) & (z_new < z_old)
+
+
 @torch.no_grad()
 def compute_dyn_group_motion(
     track_head,

@@ -10,6 +10,7 @@ import torchvision
 from ..types import Gaussians
 # from .cuda_splatting import DepthRenderingMode, render_cuda
 from .decoder import Decoder, DecoderOutput
+from src.model.encoder.dyn_motion import near_camera_reject
 from math import sqrt 
 from gsplat import rasterization
 
@@ -233,6 +234,15 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
                     src_c = dyn_centroid[i].to(xyz_i.device)[fidx]                      # [N,3]
                     tgt_c = dyn_centroid_pred[i].to(xyz_i.device)[j].unsqueeze(0)       # [1,3]
                     xyz_ij = xyz_i + move * (tgt_c - src_c)
+                # (4) A relocation that lands in front of the whole original scene is
+                # not a plausible motion, and gsplat is called with near_plane=1e-10
+                # so nothing culls it -- it renders as a screen-filling splat. Drop
+                # those. Only ever touches Gaussians that were actually displaced.
+                if xyz_ij is not xyz_i:
+                    _moved = (xyz_ij != xyz_i).any(dim=-1)
+                    _bad = near_camera_reject(xyz_i, xyz_ij, test_w2c_i[j], _moved)
+                    if bool(_bad.any()):
+                        opacity_ij = opacity_ij * (~_bad).to(opacity_ij.dtype)
                 # ----------------------------------------------------------------
                 rendering, alpha, _ = rasterization(xyz_ij, rotation_i, scale_i, opacity_ij, feature_i,
                                                 test_w2c_i[j:j+1], test_intr_i[j:j+1], W, H, sh_degree=sh_degree, 
