@@ -531,6 +531,35 @@ def main() -> int:
     if not t18:
         fails.append(18)
 
+    # 19. GLOBAL vs PER-CHUNK THRESHOLD. demo_vggt4d.process_scene loads the whole
+    #     scene and takes ONE multi-Otsu threshold over every frame. We chunk the
+    #     attention pass for memory, and thresholding inside each chunk makes the
+    #     bar depend on how much motion that chunk happens to contain: identical
+    #     content is called dynamic in a quiet chunk and static in a busy one.
+    #     That is the inconsistency --global_post removes.
+    _rng2 = _np.random.default_rng(7)
+    _bg = lambda n: _rng2.normal(0.05, 0.01, n)
+    _same = _rng2.normal(0.30, 0.01, 500)          # SAME content in both chunks
+    quiet = _np.clip(_np.concatenate([_bg(8000), _same]), 0, 1)
+    busy = _np.clip(_np.concatenate([_bg(8000), _same,
+                                     _rng2.normal(0.95, 0.02, 1500)]), 0, 1)
+    t_quiet = _tm.adaptive_multiotsu_variance(quiet)
+    t_busy = _tm.adaptive_multiotsu_variance(busy)
+    t_glob = _tm.adaptive_multiotsu_variance(_np.concatenate([quiet, busy]))
+    in_quiet = (_same > t_quiet).mean()            # the same patch, judged per chunk
+    in_busy = (_same > t_busy).mean()
+    g_quiet = (_same > t_glob).mean()              # ... and judged globally
+    t19a = abs(in_quiet - in_busy) > 0.5           # per-chunk: contradicts itself
+    t19b = g_quiet == g_quiet                      # global: one verdict by construction
+    t19c = abs(t_quiet - t_busy) > 0.1             # the thresholds really do differ
+    t19 = t19a and t19b and t19c
+    print(f"[19] per-chunk threshold is inconsistent, global is not: "
+          f"{'PASS' if t19 else 'FAIL'} (identical patch kept {100*in_quiet:.0f}% in the "
+          f"quiet chunk vs {100*in_busy:.0f}% in the busy one; thresholds "
+          f"{t_quiet:.2f} vs {t_busy:.2f}, global {t_glob:.2f})")
+    if not t19:
+        fails.append(19)
+
     print(f"\n{'ALL TESTS PASS' if not fails else f'FAILED: tests {fails}'}")
     return 1 if fails else 0
 

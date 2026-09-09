@@ -48,6 +48,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from PIL import Image
 
 from train_temporal_gaussian_head import create_model, TrainingConfig
@@ -57,6 +58,7 @@ from src.model.encoder.vggt.utils.load_fn import load_and_preprocess_images
 from src.model.encoder.vggt.utils.pose_enc import pose_encoding_to_extri_intri
 from src.model.encoder.dyn_flow_mask import flow_residual_map
 from src.model.encoder.dyn_mask_post import complete_masks
+from src.model.encoder.vggt4d.masks import cluster_attention_maps
 
 
 def gather_frame_paths(seq_dir: Path):
@@ -194,6 +196,16 @@ def main():
                          "two classes so the whole object survives. This, not the score "
                          "aggregation, is what controls coverage: the threshold is adaptive, so "
                          "rescaling cluster scores merely moves the split with them.")
+    ap.add_argument("--global_post", action="store_true",
+                    help="FAITHFUL TO THE ORIGINAL: cluster and threshold over the WHOLE "
+                         "sequence instead of per chunk. demo_vggt4d.process_scene loads "
+                         "every frame at once, so it runs ONE KMeans and ONE multi-Otsu "
+                         "over all frames; chunking gives each chunk its own, so a quiet "
+                         "stretch gets a lower bar than a busy one (background blobs there, "
+                         "a missed person here). This keeps the expensive attention pass "
+                         "chunked -- only the post-processing goes global -- at the cost of "
+                         "running stage 1 twice. Needs host RAM for the encoder features of "
+                         "the whole sequence (~1 GB per 500 frames at 518).")
     ap.add_argument("--mask_close", type=int, default=0,
                     help="Morphological closing radius (px) to BRIDGE the gaps between parts "
                          "of one object -- the detector fires on limbs and outlines and misses "
@@ -294,6 +306,77 @@ def main():
     model = create_model(config).to(device).eval()
     encoder = model.encoder
 
+    # ---------------------------------------------------------------- PASS A
+    # Collect the raw attention maps and encoder features for EVERY frame, then
+    # cluster and threshold once over all of them -- the order and the operations
+    # of demo_vggt4d.process_scene, which never chunks. Only the attention pass
+    # stays chunked, because that is the part that does not fit; nothing about
+    # KMeans or Otsu needs the frames to be resident on the GPU together.
+    coarse_by_pass = None
+    if args.global_post:
+        print(f"[GlobalPost] pass A: collecting attention maps over {len(passes)} chunk(s)")
+        _feats, _dyns, _rows = [], [], []      # _rows: (pass_index, n_frames, emitted mask)
+        for ci, (idxs, emit_idxs) in enumerate(passes):
+            chunk_paths = [frame_paths[i] for i in idxs]
+            images = load_and_preprocess_images(
+                [str(p) for p in chunk_paths], mode=args.preprocess_mode,
+                target_size=args.det_resolution).unsqueeze(0).to(device)
+            with torch.amp.autocast("cuda", enabled=(device.type == "cuda"), dtype=_AMP_DTYPE):
+                _t, _ps, qk_dict, enc_feat = encoder.aggregator(
+                    images.to(_AMP_DTYPE), dyn_masks=None)
+            dyn_maps, feat_map = encoder.attention_dyn_score_parts(images, qk_dict, enc_feat)
+            _feats.append(feat_map.float().cpu())
+            _dyns.append(dyn_maps.float().cpu())
+            H_full, W_full = images.shape[-2], images.shape[-1]
+            _emit = torch.tensor([i in set(emit_idxs) for i in idxs], dtype=torch.bool)
+            _rows.append((ci, len(idxs), _emit))
+            del _t, qk_dict, enc_feat, dyn_maps, feat_map, images
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
+            print(f"  [pass A {ci+1}/{len(passes)}] {len(idxs)} frames collected", flush=True)
+
+        # ONE KMeans over every frame's patches (the original clusters the whole scene).
+        all_feat = torch.cat(_feats, dim=0)
+        all_dyn = torch.cat(_dyns, dim=0)
+        del _feats, _dyns
+        print(f"[GlobalPost] clustering {all_feat.shape[0]} frames "
+              f"({all_feat.shape[0] * all_feat.shape[1] * all_feat.shape[2]} patches, "
+              f"C={all_feat.shape[-1]}) with k={args.mask_n_clusters} -- this is the slow step")
+        norm_map, _ = cluster_attention_maps(
+            all_feat, all_dyn, n_clusters=args.mask_n_clusters,
+            normalize=args.mask_normalize, aggregate=args.mask_aggregate)
+        del all_feat, all_dyn
+
+        # Upsample FIRST, then threshold -- same order as the original, and the same
+        # reason: bilinear smoothing lowers peaks, so a threshold taken on the patch
+        # map is systematically too high for the full-resolution one.
+        _up = []
+        for a in range(0, norm_map.shape[0], 32):        # chunked only to bound peak RAM
+            u = F.interpolate(norm_map[a:a + 32].unsqueeze(1).float(),
+                              size=(H_full, W_full),
+                              mode="bilinear", align_corners=False).squeeze(1)
+            _up.append(u)
+        upsampled = torch.cat(_up, dim=0)
+        del _up, norm_map
+
+        # ONE threshold, from the EMITTED frames only: margin frames appear in two
+        # passes, and letting them vote twice would tilt the split toward whatever
+        # happens to sit at a chunk boundary.
+        emit_flags = torch.cat([e for (_, _, e) in _rows], dim=0)
+        thr = adaptive_multiotsu_variance(
+            upsampled[emit_flags].numpy(), level=args.mask_otsu_level)
+        frac = float((upsampled[emit_flags] > thr).float().mean())
+        print(f"[GlobalPost] ONE threshold for the whole sequence: {thr:.4f} "
+              f"-> dynamic pixels {100 * frac:.1f}%", flush=True)
+
+        coarse_by_pass, _o = [], 0
+        for (_ci, _n, _e) in _rows:
+            coarse_by_pass.append((upsampled[_o:_o + _n] > thr).float().unsqueeze(0))
+            _o += _n
+        del upsampled
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+
     per_frame_fraction = {}
     for ci, (idxs, emit_idxs) in enumerate(passes):
         chunk_paths = [frame_paths[i] for i in idxs]
@@ -315,7 +398,10 @@ def main():
         with torch.amp.autocast("cuda", enabled=(device.type == "cuda"), dtype=_AMP_DTYPE):
             tokens1, patch_start1, qk_dict, enc_feat = encoder.aggregator(
                 images.to(_AMP_DTYPE), dyn_masks=None)
-        dyn_mask, _ = encoder.compute_attention_dynamic_mask(images, qk_dict, enc_feat)  # [1, N, H, W]
+        if coarse_by_pass is not None:
+            dyn_mask = coarse_by_pass[ci].to(images.device)   # global threshold, pass A
+        else:
+            dyn_mask, _ = encoder.compute_attention_dynamic_mask(images, qk_dict, enc_feat)  # [1, N, H, W]
         del qk_dict, enc_feat
         if device.type == "cuda":
             torch.cuda.empty_cache()
@@ -416,6 +502,7 @@ def main():
         "mask_aggregate": args.mask_aggregate,
         "mask_method": args.mask_method,
         "mask_otsu_level": args.mask_otsu_level,
+        "global_post": args.global_post,
         "mask_close": args.mask_close,
         "mask_fill": args.mask_fill,
         "mask_min_area": args.mask_min_area,

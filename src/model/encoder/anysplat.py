@@ -559,6 +559,31 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
         return voxel_pts, voxel_feats
 
     @torch.no_grad()
+    def attention_dyn_score_parts(
+        self,
+        images: torch.Tensor,
+        qk_dict: dict,
+        enc_feat: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """The two inputs the ORIGINAL clusters and thresholds over the WHOLE scene.
+
+        `compute_attention_dynamic_mask` runs extract -> cluster -> upsample ->
+        threshold in one call, so chunking the sequence gives every chunk its own
+        KMeans and its own Otsu split. The original (demo_vggt4d.process_scene)
+        loads every frame at once, so both are computed over the entire sequence:
+        a quiet stretch cannot get a lower bar than a busy one. Returning the parts
+        lets a caller chunk the expensive attention pass and still cluster and
+        threshold globally, which is the only place the deviation mattered.
+
+        -> (dyn_maps [V, h//14, w//14], enc_feat [V, h//14, w//14, C])
+        """
+        b, v, c, h, w = images.shape
+        images_flat = images.view(b * v, c, h, w)
+        organized_qk = organize_qk_dict(qk_dict, n_img=v)
+        dyn_maps = extract_dyn_map(organized_qk, images_flat)
+        patch_h, patch_w = h // 14, w // 14
+        return dyn_maps, enc_feat.view(v, patch_h, patch_w, -1)
+
     def compute_attention_dynamic_mask(
         self,
         images: torch.Tensor,

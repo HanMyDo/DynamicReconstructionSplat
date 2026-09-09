@@ -46,6 +46,8 @@ OTSU=${11:-1}         # which multi-Otsu split is "dynamic", counting down from 
 # Shape completion: the detector returns PARTS of an object, and a partial mask
 # splits the person between the handled and unhandled halves. Defaults are no-ops.
 CLOSE=${12:-0}; FILL=${13:-0}; MINAREA=${14:-0}; DILATE=${15:-0}
+# GLOBAL=1 clusters and thresholds over the WHOLE sequence, as the original does.
+GLOBAL=${16:-0}
                       # 1 = original (topmost class only -> a person's arm, not their torso).
                       # 2 = top two classes -> the whole object. THIS is the coverage knob;
                       # the aggregate is not, because the threshold adapts to the scores.
@@ -66,6 +68,7 @@ OUT_DIR="${OUT_ROOT}/output_dyn_masks_precomputed_cs${CHUNK_SIZE}_r${DET_RES}_st
 [ "${FILL}" != "0" ] && OUT_DIR="${OUT_DIR}_fill"
 [ "${MINAREA}" != "0" ] && OUT_DIR="${OUT_DIR}_a${MINAREA}"
 [ "${DILATE}" != "0" ] && OUT_DIR="${OUT_DIR}_d${DILATE}"
+[ "${GLOBAL}" != "0" ] && OUT_DIR="${OUT_DIR}_glob"
 
 mkdir -p "${REPO}/slurm_logs" "${OUT_ROOT}"
 cd "${REPO}"
@@ -116,6 +119,7 @@ python precompute_dyn_masks.py \
     --output_dir "${OUT_DIR}" \
     --mask_close "${CLOSE}" --mask_min_area "${MINAREA}" --mask_dilate "${DILATE}" \
     $( [ "${FILL}" != "0" ] && echo --mask_fill ) \
+    $( [ "${GLOBAL}" != "0" ] && echo --global_post ) \
     --vggt4d_weights_path "${CKPT}" \
     --chunk_size "${CHUNK_SIZE}" \
     --det_resolution "${DET_RES}" \
