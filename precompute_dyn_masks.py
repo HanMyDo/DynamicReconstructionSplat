@@ -324,13 +324,22 @@ def main():
             with torch.amp.autocast("cuda", enabled=(device.type == "cuda"), dtype=_AMP_DTYPE):
                 _t, _ps, qk_dict, enc_feat = encoder.aggregator(
                     images.to(_AMP_DTYPE), dyn_masks=None)
+            # Pass A only needs Q/K and the encoder features. The aggregated token
+            # list is several GB (one tensor per layer) and is used by stages 2-3,
+            # which run in the MAIN loop, not here -- holding it across the
+            # extraction is what pushed chunk 2 into OOM while chunk 1 fitted.
+            # extract_dyn_map then moves query, key and camera-query to the GPU
+            # together (~9 GB at chunk 96), so this headroom is exactly what it needs.
+            del _t, _ps
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
             dyn_maps, feat_map = encoder.attention_dyn_score_parts(images, qk_dict, enc_feat)
             _feats.append(feat_map.float().cpu())
             _dyns.append(dyn_maps.float().cpu())
             H_full, W_full = images.shape[-2], images.shape[-1]
             _emit = torch.tensor([i in set(emit_idxs) for i in idxs], dtype=torch.bool)
             _rows.append((ci, len(idxs), _emit))
-            del _t, qk_dict, enc_feat, dyn_maps, feat_map, images
+            del qk_dict, enc_feat, dyn_maps, feat_map, images
             if device.type == "cuda":
                 torch.cuda.empty_cache()
             print(f"  [pass A {ci+1}/{len(passes)}] {len(idxs)} frames collected", flush=True)
