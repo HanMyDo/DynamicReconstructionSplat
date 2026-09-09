@@ -56,6 +56,7 @@ from src.model.encoder.vggt4d.masks.dynamic_mask import adaptive_multiotsu_varia
 from src.model.encoder.vggt.utils.load_fn import load_and_preprocess_images
 from src.model.encoder.vggt.utils.pose_enc import pose_encoding_to_extri_intri
 from src.model.encoder.dyn_flow_mask import flow_residual_map
+from src.model.encoder.dyn_mask_post import complete_masks
 
 
 def gather_frame_paths(seq_dir: Path):
@@ -193,6 +194,20 @@ def main():
                          "two classes so the whole object survives. This, not the score "
                          "aggregation, is what controls coverage: the threshold is adaptive, so "
                          "rescaling cluster scores merely moves the split with them.")
+    ap.add_argument("--mask_close", type=int, default=0,
+                    help="Morphological closing radius (px) to BRIDGE the gaps between parts "
+                         "of one object -- the detector fires on limbs and outlines and misses "
+                         "the torso, so the mask arrives as disconnected pieces of one person.")
+    ap.add_argument("--mask_fill", action="store_true",
+                    help="Fill interior holes, turning a ring of moving edges into a solid body. "
+                         "Runs AFTER closing, which has to connect the outline first.")
+    ap.add_argument("--mask_min_area", type=int, default=0,
+                    help="Delete connected components smaller than this many pixels. These specks "
+                         "are the false positives that make per-frame compositing tear real "
+                         "background out of the scene (measured -2.96 dB on one placing cluster).")
+    ap.add_argument("--mask_dilate", type=int, default=0,
+                    help="Final dilation radius (px). A mask edge slightly inside the object "
+                         "leaves a rim of it behind, which then ghosts.")
     ap.add_argument("--mask_method", default="attention", choices=["attention", "flow", "union"],
                     help="Which signal defines the dynamic mask. 'attention' is VGGT4D's own: "
                          "attention dissimilarity between a frame and its neighbours, which "
@@ -364,6 +379,20 @@ def main():
 
         dyn_mask = dyn_mask.float().cpu()
 
+        # The detector returns PARTS of an object (limbs and outlines, not the
+        # torso interior), and every downstream mechanism then splits the person:
+        # masked parts get handled, unmasked parts stay and render from every
+        # frame at once. Completing the shape first is what makes the mask
+        # describe an OBJECT rather than the places motion was easiest to see.
+        if (args.mask_close or args.mask_fill or args.mask_min_area or args.mask_dilate):
+            _m = complete_masks(dyn_mask[0].numpy(), close=args.mask_close,
+                                fill=args.mask_fill, min_area=args.mask_min_area,
+                                dilate=args.mask_dilate)
+            print(f"[MaskPost] dynamic pixels {dyn_mask.mean()*100:.1f}% -> "
+                  f"{_m.mean()*100:.1f}% (close={args.mask_close} fill={args.mask_fill} "
+                  f"min_area={args.mask_min_area} dilate={args.mask_dilate})", flush=True)
+            dyn_mask = torch.from_numpy(_m).unsqueeze(0)
+
         emit_set = set(emit_idxs)
         for i, p in enumerate(chunk_paths):
             if idxs[i] not in emit_set:
@@ -387,6 +416,10 @@ def main():
         "mask_aggregate": args.mask_aggregate,
         "mask_method": args.mask_method,
         "mask_otsu_level": args.mask_otsu_level,
+        "mask_close": args.mask_close,
+        "mask_fill": args.mask_fill,
+        "mask_min_area": args.mask_min_area,
+        "mask_dilate": args.mask_dilate,
         "mask_n_clusters": args.mask_n_clusters,
         "preprocess_mode": args.preprocess_mode,
         "det_resolution": args.det_resolution,

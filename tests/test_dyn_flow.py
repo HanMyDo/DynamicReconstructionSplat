@@ -503,6 +503,34 @@ def main() -> int:
     if not t17:
         fails.append(17)
 
+    # 18. MASK COMPLETION turns PARTS of an object into the object. The detector
+    #     fires on limbs and outlines and misses the torso interior, so one person
+    #     arrives as several components. Every mechanism downstream then splits
+    #     them: masked parts are handled, unmasked parts stay and render from every
+    #     frame at once -- the "chaotic scatter around the person". Raising the
+    #     Otsu level cannot fix this; it only lowers a threshold, and a torso the
+    #     detector never scored has nothing to lower onto. Shape does fix it.
+    _mp = Path(__file__).resolve().parents[1] / "src/model/encoder/dyn_mask_post.py"
+    _ms = _il.spec_from_file_location("dyn_mask_post", _mp)
+    _mm = _il.module_from_spec(_ms); _ms.loader.exec_module(_mm)
+    from scipy import ndimage as _ndi
+    _person = _np.zeros((60, 60), _np.float32)
+    _person[10:20, 25:35] = 1.0        # head
+    _person[26:50, 22:38] = 1.0        # torso, 6 px gap below the head
+    _person[30:40, 26:34] = 0.0        # hollow interior (only the outline moved)
+    _person[5:7, 5:7] = 1.0            # a speck: mask false positive
+    _done = _mm.complete_mask(_person, close=4, fill=True, min_area=50, dilate=1)
+    t18a = _ndi.label(_person > 0.5)[1] == 3 and _ndi.label(_done > 0.5)[1] == 1
+    t18b = _done[5:7, 5:7].sum() == 0                     # speck gone
+    t18c = float(_done[30:40, 26:34].mean()) == 1.0       # interior solid
+    t18d = _np.array_equal(_mm.complete_mask(_person), _person)   # defaults = no-op
+    t18 = t18a and t18b and t18c and t18d
+    print(f"[18] partial mask completed into one object: {'PASS' if t18 else 'FAIL'} "
+          f"(3 components -> 1: {t18a}, speck removed={t18b}, interior filled={t18c}, "
+          f"defaults no-op={t18d}, coverage {100*_person.mean():.1f}% -> {100*_done.mean():.1f}%)")
+    if not t18:
+        fails.append(18)
+
     print(f"\n{'ALL TESTS PASS' if not fails else f'FAILED: tests {fails}'}")
     return 1 if fails else 0
 
