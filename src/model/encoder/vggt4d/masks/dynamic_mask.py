@@ -6,6 +6,46 @@ from sklearn.cluster import KMeans
 from tqdm import tqdm
 
 
+class _LazyFrames:
+    """A CPU tensor that hands out CUDA slices on demand, indexed like the original.
+
+    The extract_* helpers only ever do `g[ref_id]`, `g[src_ids]` and `.shape[0]`, so
+    substituting this for a resident CUDA tensor changes nothing they compute. Slices
+    are cached because all five helpers ask for the SAME frames for a given ref_id
+    (they differ only in which layers they select), so without a cache each frame
+    would be copied across the bus five times.
+    """
+
+    def __init__(self, tensor: torch.Tensor, device: str = "cuda", cache_size: int = 4):
+        self._t = tensor.cpu() if tensor.is_cuda else tensor
+        self._device = device
+        self._cache = {}
+        self._order = []
+        self._cache_size = cache_size
+
+    @property
+    def shape(self):
+        return self._t.shape
+
+    def __len__(self):
+        return self._t.shape[0]
+
+    def to(self, *args, **kwargs):     # already lazy; a .to() must not materialise it
+        return self
+
+    def __getitem__(self, idx):
+        key = ("i", int(idx)) if isinstance(idx, int) else \
+              ("t", tuple(int(v) for v in idx))
+        hit = self._cache.get(key)
+        if hit is None:
+            hit = self._t[idx].to(self._device)
+            self._cache[key] = hit
+            self._order.append(key)
+            while len(self._order) > self._cache_size:
+                self._cache.pop(self._order.pop(0), None)
+        return hit
+
+
 def extract_mean1_map(ref_id, global_q: torch.Tensor, global_k: torch.Tensor, images: torch.Tensor) -> torch.Tensor:
     # mean q_ref_q_src 3-8
     window = torch.tensor([-6, -4, -2, 2, 4, 6])
@@ -187,7 +227,7 @@ def extract_spacial_var3_map(ref_id, global_q: torch.Tensor, global_k: torch.Ten
 
 
 @torch.no_grad()
-def extract_dyn_map(qk_dict: dict, images: torch.Tensor) -> torch.Tensor:
+def extract_dyn_map(qk_dict: dict, images: torch.Tensor, stream: bool = False) -> torch.Tensor:
     """Extract dynamic maps from Q/K attention tensors.
 
     Args:
@@ -200,9 +240,21 @@ def extract_dyn_map(qk_dict: dict, images: torch.Tensor) -> torch.Tensor:
     dyn_maps = []
     n_img = images.shape[0]
     print(f"Extracting dynamic maps for {n_img} images")
-    global_q = qk_dict["global_tok_q"].to("cuda")
-    global_k = qk_dict["global_tok_k"].to("cuda")
-    global_cam_q = qk_dict["global_cam_q"].to("cuda")
+    if stream:
+        # STREAMING. The loop below only ever touches ref_id and its six neighbours,
+        # so residency of all n_img frames is a convenience, not a requirement --
+        # and it is the single largest allocation in the whole precompute: measured
+        # 17.64 GiB for global_tok_k alone at 192 frames, which is what caps chunk
+        # size at ~128 on a 47 GB card. _LazyFrames serves the same slices from host
+        # memory on demand, so this step becomes O(1) in VRAM instead of O(n_img)
+        # while computing bit-identical values. global_cam_q is not moved at all --
+        # it is assigned in the original and never read.
+        global_q = _LazyFrames(qk_dict["global_tok_q"])
+        global_k = _LazyFrames(qk_dict["global_tok_k"])
+    else:
+        global_q = qk_dict["global_tok_q"].to("cuda")
+        global_k = qk_dict["global_tok_k"].to("cuda")
+        global_cam_q = qk_dict["global_cam_q"].to("cuda")
     for ref_id in tqdm(range(n_img)):
         mean1_map = extract_mean1_map(ref_id, global_q, global_k, images)
         mean2_map = extract_mean2_map(ref_id, global_q, global_k, images)

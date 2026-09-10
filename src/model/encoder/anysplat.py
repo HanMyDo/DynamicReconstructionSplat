@@ -564,6 +564,7 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
         images: torch.Tensor,
         qk_dict: dict,
         enc_feat: torch.Tensor,
+        stream_qk: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """The two inputs the ORIGINAL clusters and thresholds over the WHOLE scene.
 
@@ -580,7 +581,7 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
         b, v, c, h, w = images.shape
         images_flat = images.view(b * v, c, h, w)
         organized_qk = organize_qk_dict(qk_dict, n_img=v)
-        dyn_maps = extract_dyn_map(organized_qk, images_flat)
+        dyn_maps = extract_dyn_map(organized_qk, images_flat, stream=stream_qk)
         patch_h, patch_w = h // 14, w // 14
         return dyn_maps, enc_feat.view(v, patch_h, patch_w, -1)
 

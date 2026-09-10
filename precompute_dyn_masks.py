@@ -196,6 +196,13 @@ def main():
                          "two classes so the whole object survives. This, not the score "
                          "aggregation, is what controls coverage: the threshold is adaptive, so "
                          "rescaling cluster scores merely moves the split with them.")
+    ap.add_argument("--no_stream_qk", action="store_true",
+                    help="Keep the whole Q/K capture resident on the GPU during extraction, "
+                         "as the original literally writes it. That is the single largest "
+                         "allocation in the precompute (17.6 GiB for global_tok_k alone at "
+                         "192 frames) and it caps chunk size at ~128 on a 47 GB card, even "
+                         "though the loop only ever touches 7 frames at a time. Streaming "
+                         "is on by default and computes identical values.")
     ap.add_argument("--global_post", action="store_true",
                     help="FAITHFUL TO THE ORIGINAL: cluster and threshold over the WHOLE "
                          "sequence instead of per chunk. demo_vggt4d.process_scene loads "
@@ -333,7 +340,8 @@ def main():
             del _t, _ps
             if device.type == "cuda":
                 torch.cuda.empty_cache()
-            dyn_maps, feat_map = encoder.attention_dyn_score_parts(images, qk_dict, enc_feat)
+            dyn_maps, feat_map = encoder.attention_dyn_score_parts(
+                images, qk_dict, enc_feat, stream_qk=not args.no_stream_qk)
             _feats.append(feat_map.float().cpu())
             _dyns.append(dyn_maps.float().cpu())
             H_full, W_full = images.shape[-2], images.shape[-1]

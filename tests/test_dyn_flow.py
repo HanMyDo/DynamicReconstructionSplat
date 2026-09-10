@@ -560,6 +560,30 @@ def main() -> int:
     if not t19:
         fails.append(19)
 
+    # 20. STREAMED Q/K MUST BE SUBSTITUTABLE. extract_dyn_map moves the ENTIRE Q/K
+    #     capture to the GPU -- 17.64 GiB for global_tok_k alone at 192 frames, the
+    #     single allocation that caps chunk size at ~128 on a 47 GB card -- while its
+    #     loop only ever touches ref_id and six neighbours. _LazyFrames serves those
+    #     slices from host memory instead. The helpers use ONLY g[int], g[tensor] and
+    #     .shape[0], so if the proxy matches a real tensor on those three, every value
+    #     downstream is unchanged by construction. The cache matters because all five
+    #     helpers request the SAME frames for a given ref_id.
+    _t20 = torch.randn(20, 2, 3, 4)
+    _lz = _tm._LazyFrames(_t20, device="cpu", cache_size=2)
+    _idx = torch.tensor([1, 3, 5])
+    t20a = tuple(_lz.shape) == tuple(_t20.shape) and len(_lz) == 20
+    t20b = torch.equal(_lz[7], _t20[7]) and torch.equal(_lz[_idx], _t20[_idx])
+    t20c = _lz.to("cuda") is _lz                       # a .to() must not materialise it
+    # cache_size 2, so this evicts and refills; every read must still be correct
+    t20d = all(torch.equal(_lz[i], _t20[i]) for i in (0, 4, 9, 4, 0, 9))
+    t20e = torch.equal(_lz[_idx], _t20[_idx])          # correct after eviction churn
+    t20 = t20a and t20b and t20c and t20d and t20e
+    print(f"[20] streamed Q/K substitutable for a resident tensor: "
+          f"{'PASS' if t20 else 'FAIL'} (shape={t20a}, int+tensor index={t20b}, "
+          f"lazy .to()={t20c}, cache eviction={t20d and t20e})")
+    if not t20:
+        fails.append(20)
+
     print(f"\n{'ALL TESTS PASS' if not fails else f'FAILED: tests {fails}'}")
     return 1 if fails else 0
 
