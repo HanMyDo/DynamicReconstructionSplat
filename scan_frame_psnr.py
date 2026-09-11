@@ -55,11 +55,16 @@ def main():
     print(f"  B is >1 dB WORSE on {100.0 * (d < -1).mean():.0f}% of frames "
           f"({int((d < -1).sum())})")
 
-    order = np.argsort(d)[:args.top]
-    print(f"\nworst {len(order)} frames for B:")
-    print(f"  {'frame':18s} {'A':>7s} {'B':>7s} {'B-A':>8s}")
-    for i in order:
-        print(f"  {names[i]:18s} {pa[i]:7.2f} {pb[i]:7.2f} {d[i]:+8.2f}")
+    for lbl, order in (("worst", np.argsort(d)[:args.top]),
+                       ("BEST", np.argsort(-d)[:args.top])):
+        print(f"\n{lbl} {len(order)} frames for B:")
+        print(f"  {'frame':18s} {'A':>7s} {'B':>7s} {'B-A':>8s}")
+        for i in order:
+            print(f"  {names[i]:18s} {pa[i]:7.2f} {pb[i]:7.2f} {d[i]:+8.2f}")
+    # ready to paste into a tar for figure selection
+    best = [names[i] for i in np.argsort(-d)[:args.top]]
+    print("\nbest frames, space separated (for tar/cp):")
+    print(" ".join(best))
 
 
 if __name__ == "__main__":
