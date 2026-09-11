@@ -493,23 +493,13 @@ def main():
 
         dyn_mask = dyn_mask.float().cpu()
 
-        # The detector returns PARTS of an object (limbs and outlines, not the
-        # torso interior), and every downstream mechanism then splits the person:
-        # masked parts get handled, unmasked parts stay and render from every
-        # frame at once. Completing the shape first is what makes the mask
-        # describe an OBJECT rather than the places motion was easiest to see.
-        if (args.mask_close or args.mask_fill or args.mask_min_area or args.mask_dilate):
-            _m = complete_masks(dyn_mask[0].numpy(), close=args.mask_close,
-                                fill=args.mask_fill, min_area=args.mask_min_area,
-                                dilate=args.mask_dilate)
-            print(f"[MaskPost] dynamic pixels {dyn_mask.mean()*100:.1f}% -> "
-                  f"{_m.mean()*100:.1f}% (close={args.mask_close} fill={args.mask_fill} "
-                  f"min_area={args.mask_min_area} dilate={args.mask_dilate})", flush=True)
-            dyn_mask = torch.from_numpy(_m).unsqueeze(0)
-
-        # Gate LAST: completion first joins the parts into whole objects, then the
-        # gate judges those objects. Reversing it would test fragments, and a
-        # fragment of a slow torso can fail a motion test the whole person passes.
+        # Gate BEFORE completion. Completion does not only join an object to itself
+        # -- close=4 + dilate=2 also bridges a person to the desk they stand beside,
+        # and the gate then judges ONE component containing both. Measured: it either
+        # passed (person AND desk marked) or failed (person gone entirely), which is
+        # the same bug showing up two ways. On the raw detection those are separate
+        # components, so the static ones can be removed and completion afterwards
+        # grows only what survived.
         if args.mask_motion_gate > 0:
             if args.stages < 3:
                 print("[MotionGate] needs --stages 3 (Stage-1 depth + Stage-2 poses); skipping")
@@ -523,6 +513,20 @@ def main():
                       f"{100*_g.mean():.1f}% (mult={args.mask_motion_gate}, "
                       f"residual median={float(np.median(_res)):.2f}px)", flush=True)
                 dyn_mask = torch.from_numpy(_g).unsqueeze(0)
+
+        # The detector returns PARTS of an object (limbs and outlines, not the
+        # torso interior), and every downstream mechanism then splits the person:
+        # masked parts get handled, unmasked parts stay and render from every
+        # frame at once. Completing the shape first is what makes the mask
+        # describe an OBJECT rather than the places motion was easiest to see.
+        if (args.mask_close or args.mask_fill or args.mask_min_area or args.mask_dilate):
+            _m = complete_masks(dyn_mask[0].numpy(), close=args.mask_close,
+                                fill=args.mask_fill, min_area=args.mask_min_area,
+                                dilate=args.mask_dilate)
+            print(f"[MaskPost] dynamic pixels {dyn_mask.mean()*100:.1f}% -> "
+                  f"{_m.mean()*100:.1f}% (close={args.mask_close} fill={args.mask_fill} "
+                  f"min_area={args.mask_min_area} dilate={args.mask_dilate})", flush=True)
+            dyn_mask = torch.from_numpy(_m).unsqueeze(0)
 
         emit_set = set(emit_idxs)
         for i, p in enumerate(chunk_paths):

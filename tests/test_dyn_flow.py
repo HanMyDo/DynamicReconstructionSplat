@@ -606,10 +606,20 @@ def main() -> int:
     _pix = ((_res > 3.0 * 0.5) & (_msk > 0.5))
     _pix_keep = _pix[_person].mean()
     t21d = _pix_keep < 0.75 and _gated[_person].mean() == 1.0
-    t21 = t21a and t21b and t21c and t21d
+    # ORDERING: if shape completion runs FIRST, close+dilate bridges the person to
+    # the desk beside them and the gate judges ONE component containing both. It is
+    # then all-or-nothing -- measured on balloon as "person AND desk marked" in some
+    # frames and "person gone entirely" in others, which is the same bug twice. The
+    # gate must run on the RAW detection, where they are still separate components.
+    _merged = _msk.copy()
+    _merged[28:32, 40:60] = 1.0                      # the bridge completion would create
+    _gm = _mm.motion_gate(_merged, _res, mult=3.0)
+    t21e = _gm[_chair].any()        # merged: the static chair rides along -> must not gate here
+    t21 = t21a and t21b and t21c and t21d and t21e
     print(f"[21] component motion gate keeps whole objects: {'PASS' if t21 else 'FAIL'} "
           f"(person kept {100*_gated[_person].mean():.0f}% vs {100*_pix_keep:.0f}% pixel-wise, "
-          f"chair dropped={t21b}, mult=0 is off={t21c})")
+          f"chair dropped={t21b}, mult=0 is off={t21c}, "
+          f"merged-first would keep the chair={t21e})")
     if not t21:
         fails.append(21)
 
