@@ -61,6 +61,62 @@ def complete_mask(m: np.ndarray, close: int = 0, fill: bool = False,
     return b.astype(m.dtype)
 
 
+def motion_gate(m: np.ndarray, residual: np.ndarray, mult: float = 3.0,
+                min_pixels: int = 50, quantile: float = 0.75,
+                floor: float = 0.5) -> np.ndarray:
+    """Drop mask components that do not actually move. -> same shape/dtype as m.
+
+    WHY. Attention over-fires on STATIC structure beside a moving object -- the desk
+    edge and the chair next to a person -- because it responds to attention
+    dissimilarity in that neighbourhood, not to motion. Raising the threshold to
+    exclude them also drops the person's slow parts, which is the whole reason the
+    published masks are arm-only. Recall and precision cannot both be bought from
+    one attention threshold.
+
+    Geometry separates them cleanly, because the two signals fail differently: flow
+    residual (measured flow minus the flow the camera alone would produce) is ~0 on
+    anything static REGARDLESS of how close it sits to a moving object.
+
+    Deciding per COMPONENT rather than per pixel is the point. A pixel-wise
+    intersection re-erodes the person wherever the residual is locally noisy --
+    undoing the shape completion that made the mask cover a whole object. A whole
+    component is kept or dropped together, so the person survives intact including
+    the parts where the residual is weak, while the chair goes entirely.
+
+    The bar is RELATIVE to the frame's own static regions (pixels outside the mask),
+    which is where depth error puts a noise floor -- an absolute threshold would need
+    retuning per scene. `floor` keeps a near-perfect static prediction from making the
+    bar zero and admitting everything.
+    """
+    from scipy import ndimage as ndi
+
+    b = m > 0.5
+    if mult <= 0 or not b.any():
+        return m
+    bg = residual[~b]
+    base = float(np.quantile(bg, quantile)) if bg.size else 0.0
+    thr = mult * max(base, floor)
+
+    lab, n = ndi.label(b)
+    keep = np.zeros_like(b)
+    for i in range(1, n + 1):
+        sel = lab == i
+        if sel.sum() < min_pixels:
+            continue                      # too small to judge; specks go
+        if float(np.quantile(residual[sel], quantile)) > thr:
+            keep |= sel
+    return keep.astype(m.dtype)
+
+
+def motion_gate_masks(masks: np.ndarray, residual: np.ndarray, mult: float = 3.0,
+                      min_pixels: int = 50, quantile: float = 0.75) -> np.ndarray:
+    """[V,H,W] masks gated against [V,H,W] residual, each frame independently."""
+    if mult <= 0:
+        return masks
+    return np.stack([motion_gate(masks[i], residual[i], mult, min_pixels, quantile)
+                     for i in range(masks.shape[0])], axis=0)
+
+
 def complete_masks(masks: np.ndarray, close: int = 0, fill: bool = False,
                    min_area: int = 0, dilate: int = 0) -> np.ndarray:
     """[V,H,W] -> [V,H,W], each frame completed independently."""

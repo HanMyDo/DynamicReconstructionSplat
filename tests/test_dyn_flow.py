@@ -584,6 +584,35 @@ def main() -> int:
     if not t20:
         fails.append(20)
 
+    # 21. COMPONENT-LEVEL MOTION GATE. Attention over-fires on static structure
+    #     BESIDE a moving object (the desk, the chair) -- it responds to attention
+    #     dissimilarity there, not motion. Flow residual is ~0 on anything static
+    #     however close it sits, so geometry separates them. The gate must decide
+    #     per COMPONENT: a pixel-wise intersection re-erodes the person wherever the
+    #     residual is weak, undoing exactly what the shape completion achieved.
+    _msk = _np.zeros((80, 100), _np.float32)
+    _msk[20:50, 20:40] = 1.0             # person: fast torso + slow legs
+    _msk[20:40, 60:75] = 1.0             # chair: mask false positive, static
+    _res = _np.full((80, 100), 0.2, _np.float32)   # depth-error noise floor
+    _res[20:35, 20:40] = 5.0             # only the UPPER half of the person moves fast
+    _person = _np.zeros_like(_msk, bool); _person[20:50, 20:40] = True
+    _chair = _np.zeros_like(_msk, bool); _chair[20:40, 60:75] = True
+
+    _gated = _mm.motion_gate(_msk, _res, mult=3.0)
+    t21a = _gated[_person].all()                    # person kept ENTIRELY, slow legs too
+    t21b = not _gated[_chair].any()                 # chair dropped entirely
+    t21c = _np.array_equal(_mm.motion_gate(_msk, _res, mult=0.0), _msk)   # 0 = off
+    # what a pixel-wise intersection would have done to the same person
+    _pix = ((_res > 3.0 * 0.5) & (_msk > 0.5))
+    _pix_keep = _pix[_person].mean()
+    t21d = _pix_keep < 0.75 and _gated[_person].mean() == 1.0
+    t21 = t21a and t21b and t21c and t21d
+    print(f"[21] component motion gate keeps whole objects: {'PASS' if t21 else 'FAIL'} "
+          f"(person kept {100*_gated[_person].mean():.0f}% vs {100*_pix_keep:.0f}% pixel-wise, "
+          f"chair dropped={t21b}, mult=0 is off={t21c})")
+    if not t21:
+        fails.append(21)
+
     print(f"\n{'ALL TESTS PASS' if not fails else f'FAILED: tests {fails}'}")
     return 1 if fails else 0
 

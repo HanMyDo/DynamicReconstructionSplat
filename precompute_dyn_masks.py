@@ -57,7 +57,7 @@ from src.model.encoder.vggt4d.masks.dynamic_mask import adaptive_multiotsu_varia
 from src.model.encoder.vggt.utils.load_fn import load_and_preprocess_images
 from src.model.encoder.vggt.utils.pose_enc import pose_encoding_to_extri_intri
 from src.model.encoder.dyn_flow_mask import flow_residual_map
-from src.model.encoder.dyn_mask_post import complete_masks
+from src.model.encoder.dyn_mask_post import complete_masks, motion_gate_masks
 from src.model.encoder.vggt4d.masks import cluster_attention_maps
 
 
@@ -213,6 +213,17 @@ def main():
                          "chunked -- only the post-processing goes global -- at the cost of "
                          "running stage 1 twice. Needs host RAM for the encoder features of "
                          "the whole sequence (~1 GB per 500 frames at 518).")
+    ap.add_argument("--mask_motion_gate", type=float, default=0.0,
+                    help="Drop mask COMPONENTS whose flow residual does not exceed this "
+                         "multiple of the frame's own static-region residual. Attention "
+                         "over-fires on static structure BESIDE a moving object (the desk, "
+                         "the chair) because it responds to attention dissimilarity there, "
+                         "not motion; geometry is ~0 on anything static however close it "
+                         "sits. Gating per component, not per pixel, keeps the person whole "
+                         "where the residual is weak instead of re-eroding what the shape "
+                         "completion joined. 3.0 is a reasonable start; 0 = off. Needs "
+                         "--stages 3 (uses Stage-1 depth and Stage-2 poses) and costs a "
+                         "RAFT pass over the chunk.")
     ap.add_argument("--mask_close", type=int, default=0,
                     help="Morphological closing radius (px) to BRIDGE the gaps between parts "
                          "of one object -- the detector fires on limbs and outlines and misses "
@@ -496,6 +507,23 @@ def main():
                   f"min_area={args.mask_min_area} dilate={args.mask_dilate})", flush=True)
             dyn_mask = torch.from_numpy(_m).unsqueeze(0)
 
+        # Gate LAST: completion first joins the parts into whole objects, then the
+        # gate judges those objects. Reversing it would test fragments, and a
+        # fragment of a slow torso can fail a motion test the whole person passes.
+        if args.mask_motion_gate > 0:
+            if args.stages < 3:
+                print("[MotionGate] needs --stages 3 (Stage-1 depth + Stage-2 poses); skipping")
+            else:
+                _res = flow_residual_map(images[0], depth_s1[0].squeeze(-1),
+                                         extrinsic_s2[0], intrinsic_s1[0]).cpu().numpy()
+                _before = float(dyn_mask.mean())
+                _g = motion_gate_masks(dyn_mask[0].numpy(), _res,
+                                       mult=args.mask_motion_gate)
+                print(f"[MotionGate] dynamic pixels {100*_before:.1f}% -> "
+                      f"{100*_g.mean():.1f}% (mult={args.mask_motion_gate}, "
+                      f"residual median={float(np.median(_res)):.2f}px)", flush=True)
+                dyn_mask = torch.from_numpy(_g).unsqueeze(0)
+
         emit_set = set(emit_idxs)
         for i, p in enumerate(chunk_paths):
             if idxs[i] not in emit_set:
@@ -520,6 +548,7 @@ def main():
         "mask_method": args.mask_method,
         "mask_otsu_level": args.mask_otsu_level,
         "global_post": args.global_post,
+        "mask_motion_gate": args.mask_motion_gate,
         "mask_close": args.mask_close,
         "mask_fill": args.mask_fill,
         "mask_min_area": args.mask_min_area,
