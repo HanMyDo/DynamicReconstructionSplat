@@ -236,6 +236,7 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
              track_dynamic=False, gain_correct=False, scale_mult=1.0,
              image_save_every=1, batch_stride=1, images_only=False, image_views=None,
              ply_batch=None, ply_per_frame=False, ply_dyn_source=-1, ply_dyn_opacity=1.0,
+             ply_own_frame_only=False,
              image_error_map=False, image_error_gain=4.0):
     os.makedirs(output_dir, exist_ok=True)
     images_dir = os.path.join(output_dir, "images")
@@ -652,7 +653,18 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
                 # Without this the 4D file still shows the copies the render removed,
                 # so the point cloud disagrees with the picture it is supposed to show.
                 _k = _ply_keep(means.shape[0], dev)
-                if dvalid is not None:
+                if ply_own_frame_only:
+                    # ONE copy of the moving object, as observed at j. The relocated
+                    # copies are each individually plausible but carry displacement
+                    # error, so ~9 of them stacked spread into a diffuse shell rather
+                    # than reinforcing -- that is the scatter. Frame j's own Gaussians
+                    # are already a COMPLETE dense unprojection of the object at that
+                    # instant, so dropping the rest costs coverage of surfaces j could
+                    # not see, and buys a crisp object. Best artifact; it shows
+                    # per-timestamp geometry rather than the scene-flow mechanism.
+                    _own = (dyn_v <= 0.5) | (fid_v == j)
+                    _k = _own if _k is None else (_k & _own)
+                elif dvalid is not None:
                     _ok = ((dyn_v <= 0.5) | (fid_v == j)
                            | (dvalid[0, :, j].to(dev) > 0))
                     _k = _ok if _k is None else (_k & _ok)
@@ -786,6 +798,15 @@ def main():
                              "result look worse. With e.g. 0, the control shows one person frozen at "
                              "frame 0 and the flow export shows that same person moving to where "
                              "they were at t -- the actual difference, unobscured.")
+    parser.add_argument("--ply_own_frame_only", action="store_true",
+                        help="4D EXPORT: at timestamp j keep ONLY frame j's own dynamic "
+                             "Gaussians, not the relocated ones. The relocated copies each "
+                             "carry displacement error, so stacking ~9 of them spreads the "
+                             "object into a shell instead of reinforcing it. Frame j's own "
+                             "are already a complete dense view of the object at that "
+                             "instant. Gives the cleanest-looking 4D artifact, at the cost "
+                             "of showing per-timestamp geometry rather than the scene-flow "
+                             "mechanism -- say which one a figure is.")
     parser.add_argument("--ply_dyn_opacity", type=float, default=1.0,
                         help="Opacity multiplier for DYNAMIC gaussians in the 4D export. "
                              "1.0 = untouched (the moving object is the point of the file). "
@@ -1008,6 +1029,7 @@ def main():
              ply_per_frame=args.ply_per_frame,
              ply_dyn_source=args.ply_dyn_source,
              ply_dyn_opacity=args.ply_dyn_opacity,
+             ply_own_frame_only=args.ply_own_frame_only,
              image_error_map=args.image_error_map,
              image_error_gain=args.image_error_gain,
              image_views=(None if args.image_views.strip().lower() == "all"
