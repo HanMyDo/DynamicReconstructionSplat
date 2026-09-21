@@ -728,6 +728,13 @@ def predict_tracks_loo(traj: torch.Tensor, ok: torch.Tensor, min_pts: int = 2,
     return pred, pred_ok
 
 
+# Last call's gate accounting, so the caller can record it without re-deriving it.
+# A module-level stash rather than a third return value because tests/test_dyn_flow.py
+# unpacks (disp, valid) in twelve places and the encoder calls this once per batch item.
+# Single-threaded, written at the end of every call, read immediately after.
+LAST_FLOW_STATS: dict = {}
+
+
 @torch.no_grad()
 def knn_flow_displacement(
     traj: torch.Tensor,
@@ -882,4 +889,18 @@ def knn_flow_displacement(
                   f"radius rejected {100.0 * _gate_radius / _gate_tot:.1f}%, "
                   f"target-frame visibility rejected {100.0 * _gate_vis / _gate_tot:.1f}%",
                   flush=True)
+        # THE number that says whether better masks helped. Radius rejection is
+        # dominated by dynamic Gaussians sitting metres from any track, i.e. mask
+        # false positives in 3D -- so a mask change should move it and little else
+        # will. It was only ever printed per window; recording it lets one eval be
+        # compared against another without grepping a log.
+        LAST_FLOW_STATS.clear()
+        LAST_FLOW_STATS.update(
+            moved_frac=float(cover),
+            radius_rejected_frac=(_gate_radius / _gate_tot) if _gate_tot else None,
+            vis_rejected_frac=(_gate_vis / _gate_tot) if _gate_tot else None,
+            disp_median=(float(mags.median()) if mags.numel() else 0.0),
+            disp_p99=(float(mags.quantile(0.99)) if mags.numel() else 0.0),
+            n_dyn=n_dyn,
+        )
     return disp, valid

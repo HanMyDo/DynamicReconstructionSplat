@@ -54,6 +54,7 @@ from src.model.encoder.dyn_motion import (
     compute_dyn_group_motion,
     collect_dyn_tracks,
     knn_flow_displacement,
+    LAST_FLOW_STATS,
 )
 from src.model.encoder.vggt4d.masks import (
     extract_dyn_map,
@@ -1358,6 +1359,11 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
             # from direct track correspondence (dyn_motion.py "UPGRADE").
             infos["gaussian_disp"] = gaussian_disp            # [B,N,V,3]
             infos["gaussian_disp_valid"] = gaussian_disp_valid  # [B,N,V]
+            # Gate accounting from the last knn_flow_displacement call, so eval can
+            # average it over the sequence instead of the log carrying one line per
+            # window. radius_rejected_frac is the mask-quality read-out.
+            if LAST_FLOW_STATS:
+                infos["dyn_flow_stats"] = dict(LAST_FLOW_STATS)
 
         # --- First-order MOTION MODEL for the dynamic content ------------------
         # Gaussian positions come from the FROZEN depth/pose heads, so a moving object

@@ -249,6 +249,11 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
     n_precomp_hits = 0
     n_group_motion = 0   # batches where the tracker-driven motion model was available
     n_knn_motion = 0     # batches where the scene-flow displacement field was available
+    # Gate accounting, averaged over windows. radius_rejected is the MASK-QUALITY
+    # read-out: it is dominated by dynamic Gaussians sitting far from any track,
+    # i.e. mask false positives in 3D, so a mask change should move it and little
+    # else will. Previously one printed line per window and nothing in metrics.json.
+    flow_stat_sums, n_flow_stats = {}, 0
     total_gain = 0.0; n_gain = 0            # mean applied exposure gain (diagnostic)
     total_ate = 0.0;  n_ate = 0             # per-window Sim(3)-aligned ATE
 
@@ -435,6 +440,12 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
             n_group_motion += 1
         if infos.get("gaussian_disp") is not None:
             n_knn_motion += 1
+        _fs = infos.get("dyn_flow_stats")
+        if _fs:
+            for k, val in _fs.items():
+                if val is not None:
+                    flow_stat_sums[k] = flow_stat_sums.get(k, 0.0) + float(val)
+            n_flow_stats += 1
         pred_rgb = decoder_out.color  # [B, V, 3, H, W] in [0, 1]
         pred_alpha = getattr(decoder_out, "alpha", None)  # [B, V, H, W] or None
         # The decoder builds this with a bare .squeeze(), which collapses the view
@@ -747,6 +758,37 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
             print(f"  -> {output_dir}/gaussians_t00..t{n_views-1:02d}.ply "
                   f"({int(dyn_v.sum())} dynamic gaussians move; the rest are identical)")
 
+    # --- PLY statistics -------------------------------------------------------
+    # PSNR/SSIM/LPIPS cannot see representation degeneracy -- a cloud of collapsed
+    # or oversized Gaussians still renders correctly at the eval camera, which is
+    # why three separate scale collapses were only ever caught by eye in a viewer.
+    # inspect_ply.py answers this but has to be run by hand on a downloaded file.
+    # Recording a few numbers here makes a PLY regression visible in the same diff
+    # as a PSNR regression.
+    ply_stats = None
+    if last_gaussians is not None:
+        try:
+            _sc = last_gaussians.scales[0].detach().float()
+            _op = last_gaussians.opacities[0].detach().float().flatten()
+            _mu = last_gaussians.means[0].detach().float()
+            _big = _sc.max(dim=-1).values
+            _lo = torch.quantile(_mu[:: max(_mu.shape[0] // 100000, 1)], 0.01, dim=0)
+            _hi = torch.quantile(_mu[:: max(_mu.shape[0] // 100000, 1)], 0.99, dim=0)
+            _diag = float((_hi - _lo).norm())
+            ply_stats = {
+                "n_gaussians": int(_sc.shape[0]),
+                "scene_diag": _diag,
+                "opacity_median": float(_op.median()),
+                "opacity_frac_above_0p5": float((_op > 0.5).float().mean()),
+                "scale_max_axis_median": float(_big.median()),
+                # the oversized tail export_ply now drops -- if this grows, the
+                # viewer is about to fill with concentric-ring haze again
+                "frac_oversized": float((_big > 0.011 * _diag).float().mean()),
+                "scale_frac_below_1e4": float((_big < 1e-4).float().mean()),
+            }
+        except Exception as e:
+            print(f"[ply] stats failed ({e})", flush=True)
+
     # --- Metrics summary ---
     avg_dyn_pixel_frac = total_dyn_pixel_fraction / n_frames if n_frames > 0 else None
     metrics = {
@@ -792,6 +834,10 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
         "dyn_motion_chain": getattr(config, "dyn_motion_chain", False),
         "dyn_motion_tracker": getattr(config, "dyn_motion_tracker", "vggt"),
         "n_batches_with_knn_motion": n_knn_motion,
+        **({f"flow_{k}": v / n_flow_stats for k, v in flow_stat_sums.items()}
+           if n_flow_stats else {}),
+        "n_windows_with_flow_stats": n_flow_stats,
+        "ply": ply_stats,
         "mask_source": ("precomputed" if precomputed_mask_dir is not None else "live_detection"),
         "precomputed_mask_dir": precomputed_mask_dir,
         "n_batches_with_precomputed_mask": n_precomp_hits,
@@ -804,6 +850,16 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
         print(f"  LPIPS (overall, lower better): {metrics['lpips']:.4f}")
     if metrics["lpips_dynamic"] is not None:
         print(f"  LPIPS (dynamic crop):          {metrics['lpips_dynamic']:.4f}")
+    if ply_stats is not None:
+        print(f"  PLY: {ply_stats['n_gaussians']} gaussians  opacity med "
+              f"{ply_stats['opacity_median']:.3f}  max-axis med "
+              f"{ply_stats['scale_max_axis_median']:.5f}  oversized "
+              f"{100 * ply_stats['frac_oversized']:.2f}% (dropped on export)")
+    if metrics.get("flow_radius_rejected_frac") is not None:
+        print(f"  Flow gates: moved {100 * metrics['flow_moved_frac']:.1f}%  |  "
+              f"radius rejected {100 * metrics['flow_radius_rejected_frac']:.1f}%  "
+              f"(mask-quality read-out)  |  visibility rejected "
+              f"{100 * metrics['flow_vis_rejected_frac']:.1f}%")
     if metrics["alpha_mean"] is not None:
         _ad, _as = metrics["alpha_dynamic"], metrics["alpha_static"]
         print(f"  Rendered alpha (overall):{metrics['alpha_mean']:.4f}")
@@ -1017,6 +1073,11 @@ def main():
                              "dynamic centroids; target-frame centroid is fitted from the OTHER "
                              "frames only, so it is leave-one-out safe). Off = Gaussians stay at "
                              "their source-frame positions (the baseline).")
+    parser.add_argument("--allow_partial_masks", action="store_true",
+                        help="Run even though --dyn_mask_dir does not cover every frame. "
+                             "The uncovered frames are treated as fully static, so their "
+                             "moving object ghosts and lands in the static PSNR bucket -- "
+                             "not comparable to a fully-covered run.")
     parser.add_argument("--ply_max_scale_frac", type=float, default=0.011,
                         help="PLY only: drop Gaussians whose largest axis exceeds this "
                              "fraction of the scene's p1-p99 diagonal. 0 disables. A tiny "
@@ -1062,6 +1123,30 @@ def main():
                      "--per_frame_dynamic (render), or --ply_own_frame_only / "
                      "--ply_dyn_source (PLY). With every copy kept, the V-fold stack "
                      "the head sized its opacities for is still there and this is a no-op.")
+
+    # A mask directory that does not cover every RGB frame is the worst failure mode
+    # here, because nothing fails: frames without a mask get an all-zero one, their
+    # moving object is scored as static, and the run looks complete. submit_final_
+    # battery.sh already guards this for its own submissions; a direct invocation or
+    # slurm_probe_hex.sh did not. Counting files is enough -- the mask stems mirror
+    # the rgb stems by construction.
+    if args.dyn_mask_dir is not None:
+        import glob as _glob
+        _mdir = os.path.join(args.dyn_mask_dir, args.dataset_name, "masks")
+        _rgb = len(_glob.glob(os.path.join(args.data_dir, args.dataset_name, "rgb", "*.png")))
+        _msk = len(_glob.glob(os.path.join(_mdir, "*.png")))
+        if _msk == 0:
+            raise SystemExit(
+                f"ERROR: --dyn_mask_dir given but no masks found at {_mdir}. Eval would "
+                f"silently fall back to LIVE in-window detection, which is a different "
+                f"protocol and not comparable to your other runs.")
+        if _rgb and _msk < _rgb and not args.allow_partial_masks:
+            raise SystemExit(
+                f"ERROR: incomplete masks at {_mdir}: {_msk}/{_rgb} frames. The missing "
+                f"ones would be treated as fully static, so their moving object ghosts "
+                f"and is scored in the STATIC bucket. Finish the precompute, or pass "
+                f"--allow_partial_masks if you know this is what you want.")
+        print(f"[dyn_mask] {_msk}/{_rgb} frames covered at {_mdir}", flush=True)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")

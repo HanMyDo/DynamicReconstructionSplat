@@ -1021,6 +1021,18 @@ def load_precomputed_masks(frame_names, mask_dir, H, W, device, dataset_name=Non
             masks.append(torch.zeros(H, W))
     if found == 0:
         return None
+    if found < len(frame_names):
+        # A PARTIAL window is worse than none: the frames without a mask get an
+        # all-zero one, so their moving object is silently labelled static -- it
+        # ghosts in the render and lands in the STATIC bucket of the psnr split.
+        # Louder than a silent zero, and load_batch_dyn_masks / eval count these.
+        load_precomputed_masks.n_partial = getattr(
+            load_precomputed_masks, "n_partial", 0) + 1
+        if load_precomputed_masks.n_partial <= 3:
+            print(f"[dyn_mask] WARNING: only {found}/{len(frame_names)} frames in this "
+                  f"window have a precomputed mask; the rest are all-zero (treated as "
+                  f"fully static). Check that the precompute covered every frame.",
+                  flush=True)
     return torch.stack(masks, dim=0).unsqueeze(0).to(device)  # [1, V, H, W]
 
 
