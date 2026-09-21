@@ -19,6 +19,17 @@
 # USAGE: sbatch slurm_probe_hex.sh CKPT MASKDIR [SEQ] [NUM_FRAMES] [STRIDE] [START] [NWIN]
 #   sbatch slurm_probe_hex.sh "$CK" "$M2" rgbd_bonn_balloon 6 8 0 30
 #
+# TIER-1 RENDER SWEEP (one allocation, each spec is NAME=FLAGS):
+#   F="--per_frame_dynamic --track_dynamic --dyn_motion_knn 8 --dyn_motion_strict \
+#      --dyn_motion_pred_bandwidth 1.5 --dyn_motion_tracker raft --dyn_motion_max_disp_mult 3.0"
+#   sbatch slurm_probe_hex.sh baseline "$M2" rgbd_bonn_balloon 16 4 0 30 \
+#     "ctl=$F" "bgw=$F --bg_color 1 1 1" "bgw_oc50=$F --bg_color 1 1 1 --dyn_opacity_comp 0.5" \
+#     "bgw_oc100=$F --bg_color 1 1 1 --dyn_opacity_comp 1.0"
+# Read alpha_dynamic vs alpha_static in each metrics.json FIRST: if the gap is
+# already ~0 the moving objects are not under-covered and --dyn_opacity_comp has
+# nothing to fix, whatever PSNR does. Change ONE of the two knobs at a time --
+# they both move brightness inside the mask and will not be separable otherwise.
+#
 # Metrics here cover ONLY the probed range and are not comparable to a full run.
 # =============================================================================
 set -uo pipefail
@@ -84,5 +95,11 @@ fi
 
 echo "done $(date)"
 echo "--- read the diagnostics with:"
-echo "    grep -E 'PROBE|DynFlow' slurm_logs/probe_${SLURM_JOB_ID}.out"
+echo "    grep -E 'PROBE|DynFlow|alpha' slurm_logs/probe_${SLURM_JOB_ID}.out"
+echo "--- compare coverage across the probed configs with:"
+echo "    for d in output_probe_${MODE}_*_${SEQ_TAG}_${TAG}; do printf '%-46s' \$d; \\"
+echo "      python -c \"import json,sys;m=json.load(open(sys.argv[1]));\\"
+echo "      print(' psnr %.2f dyn %.2f a_dyn %.4f a_stat %.4f gap %+.4f'%(m['psnr'],\\"
+echo "      m['psnr_dynamic'] or 0,m['alpha_dynamic'] or 0,m['alpha_static'] or 0,\\"
+echo "      (m['alpha_dynamic'] or 0)-(m['alpha_static'] or 0)))\" \$d/metrics.json; done"
 ls -d output_probe_${MODE}_*_${SEQ_TAG}_${TAG}

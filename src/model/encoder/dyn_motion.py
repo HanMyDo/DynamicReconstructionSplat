@@ -155,6 +155,45 @@ def near_camera_reject(xyz_old: torch.Tensor, xyz_new: torch.Tensor,
     return moved & (z_new < ref) & (z_new < z_old)
 
 
+def compensate_dyn_opacity(opacity: torch.Tensor, dyn: torch.Tensor,
+                           keep: torch.Tensor, num_views: int,
+                           strength: float = 1.0) -> torch.Tensor:
+    """Raise dynamic opacities to cover for the contributors compositing removed.
+
+    WHY. The pretrained head never chose these opacities in isolation. AnySplat
+    renders every Gaussian into every view, so a surface is composited from ~V of
+    them and each only has to carry a fraction of the alpha. Per-frame compositing
+    breaks that contract for dynamic Gaussians: own-frame always survives, a
+    relocated one survives and lands in the SAME place (so it still stacks), but a
+    radius-rejected one is dropped outright. The survivors are then asked to cover
+    a surface with a fraction of the alpha budget it was calibrated for -- which is
+    the under-covered, see-through moving object.
+
+    Match the ALPHA, not the opacity. V contributors at opacity o compose to
+    1-(1-o)^V; n survivors reproduce that at o' = 1 - (1-o)^(V/n). `strength`
+    interpolates the EXPONENT from 1 (off, the measured behaviour) to the full
+    correction, so the fix can be swept rather than trusted.
+
+    n is estimated per target view from the survivor fraction among dynamic
+    Gaussians. It has to be a scalar: which Gaussians land on a given surface point
+    is not knowable here, only how many of them the gate let through.
+
+    opacity [N] in [0,1]; dyn [N] (1 = dynamic); keep [N] (1 = survives this
+    target); num_views = V. Returns [N], static entries untouched.
+    """
+    if strength <= 0.0:
+        return opacity
+    is_dyn = dyn > 0.5
+    if not bool(is_dyn.any()):
+        return opacity
+    # Expected contributors at the RIGHT place for this target. Own-frame is always
+    # one of them, so clamping at 1 only guards the degenerate all-gated case.
+    n_keep = max(float(keep[is_dyn].mean()) * num_views, 1.0)
+    expo = 1.0 + strength * (num_views / n_keep - 1.0)
+    comp = 1.0 - (1.0 - opacity).clamp(0.0, 1.0) ** expo
+    return torch.where(is_dyn, comp, opacity)
+
+
 @torch.no_grad()
 def compute_dyn_group_motion(
     track_head,

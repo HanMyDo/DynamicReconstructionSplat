@@ -87,6 +87,15 @@ case "${EXTRA_FLAGS}" in *dyn_motion_max_disp_mult*)
   [ -n "${MD}" ] && [ "${MD}" != "0" ] && [ "${MD}" != "0.0" ] && T="${T}_cl$(echo ${MD} | tr '.' 'p')" ;;
 esac
 case "${EXTRA_FLAGS}" in *gain_correct*) T="${T}_gc" ;; esac
+# Tier-1 render knobs. Both change every pixel, so they MUST split the output
+# dir or an A/B silently overwrites its own control.
+case "${EXTRA_FLAGS}" in *bg_color*)
+  T="${T}_bg$(echo "${EXTRA_FLAGS}" | sed -n 's/.*--bg_color[= ]*\([0-9.]*\) \([0-9.]*\) \([0-9.]*\).*/\1\2\3/p' | tr -d '.')" ;;
+esac
+case "${EXTRA_FLAGS}" in *dyn_opacity_comp*)
+  OC=$(echo "${EXTRA_FLAGS}" | sed -n 's/.*--dyn_opacity_comp[= ]*\([0-9.]*\).*/\1/p')
+  [ -n "${OC}" ] && [ "${OC}" != "0" ] && [ "${OC}" != "0.0" ] && T="${T}_oc$(echo ${OC} | tr '.' 'p')" ;;
+esac
 case "${EXTRA_FLAGS}" in *dyn_mask_dir*) T="${T}_pcm" ;; esac
 T="${T}_nf${NUM_FRAMES}"
 SEQ_TAG=$(echo ${EVAL_SEQ} | sed 's/rgbd_bonn_//')

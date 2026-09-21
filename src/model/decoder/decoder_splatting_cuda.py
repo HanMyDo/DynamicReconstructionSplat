@@ -10,7 +10,7 @@ import torchvision
 from ..types import Gaussians
 # from .cuda_splatting import DepthRenderingMode, render_cuda
 from .decoder import Decoder, DecoderOutput
-from src.model.encoder.dyn_motion import near_camera_reject
+from src.model.encoder.dyn_motion import near_camera_reject, compensate_dyn_opacity
 from math import sqrt 
 from gsplat import rasterization
 
@@ -65,6 +65,7 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
         gaussian_disp: Tensor | None = None,
         gaussian_disp_valid: Tensor | None = None,
         per_frame_compositing: bool = False,
+        dyn_opacity_comp: float = 0.0,
     ) -> DecoderOutput:
         B, V, _, _  = intrinsics.shape
         H, W = image_shape
@@ -107,6 +108,10 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
                     fidx_i = gaussian_frame_idx[i].to(opacity_i.device)
                     own_frame = (fidx_i == j).float()          # 1 if Gaussian came from view j
                     gate = torch.ones_like(opacity_i)
+                    # The opacity the surviving Gaussians render WITH. Only (1b)
+                    # changes it; everywhere else it stays opacity_i, so every
+                    # existing recipe renders bit-identically.
+                    opac_eff = opacity_i
 
                     # (1) Per-frame dynamic compositing (needs the dynamic flags):
                     #     dynamic Gaussians survive ONLY in their own frame.
@@ -130,6 +135,30 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
                             dv = gaussian_disp_valid[i].to(opacity_i.device)[:, j].float()
                             keep = (own_frame + dv).clamp(max=1.0)
                         gate = gate * (1.0 - dyn_i * (1.0 - keep))
+
+                        # (1b) OPACITY COMPENSATION for the contributors the gate
+                        # removed. The pretrained head never chose these opacities in
+                        # isolation: AnySplat renders every Gaussian into every view,
+                        # so a surface is composited from ~V of them and each one only
+                        # has to carry 1/V of the alpha. The gate above breaks that
+                        # contract for dynamic Gaussians -- own-frame always survives,
+                        # a relocated one survives and lands in the SAME place (so it
+                        # still stacks), but a radius-rejected one is dropped outright.
+                        # The survivors are then asked to cover a surface with a
+                        # fraction of the alpha budget it was calibrated for, which is
+                        # exactly the "under-covered / semi-transparent person".
+                        #
+                        # Match the ALPHA, not the opacity. V contributors at opacity o
+                        # give 1-(1-o)^V; n survivors reproduce that at
+                        #     o' = 1 - (1-o)^(V/n).
+                        # n is estimated per target view from the survivor fraction
+                        # among dynamic Gaussians -- a scalar, because which ones land
+                        # on a given surface point is not knowable per Gaussian here.
+                        # `dyn_opacity_comp` scales the exponent between 1 (off, the
+                        # measured behaviour) and the full correction, so it can be
+                        # swept rather than trusted.
+                        opac_eff = compensate_dyn_opacity(
+                            opac_eff, dyn_i, keep, V, dyn_opacity_comp)
 
                     # (2) Leave-one-out: drop view j's OWN Gaussians entirely (static
                     #     AND dynamic), so view j must be reconstructed from the OTHER
@@ -167,7 +196,7 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
                     elif leave_one_out:
                         gate = gate * (1.0 - own_frame)
 
-                    opacity_ij = opacity_i * gate
+                    opacity_ij = opac_eff * gate
                 # ----------------------------------------------------------------
 
                 # --- (3) MOTION DISPLACEMENT of dynamic Gaussians ---------------
@@ -288,6 +317,7 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
         gaussian_disp: Tensor | None = None,
         gaussian_disp_valid: Tensor | None = None,
         per_frame_compositing: bool = False,
+        dyn_opacity_comp: float = 0.0,
     ) -> DecoderOutput:
 
         return self.rendering_fn(gaussians, extrinsics, intrinsics, near, far, image_shape, depth_mode, cam_rot_delta, cam_trans_delta,
@@ -297,5 +327,6 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
                                  dyn_group_centroid=dyn_group_centroid, dyn_group_pred=dyn_group_pred,
                                  dyn_group_valid=dyn_group_valid, gaussian_group_idx=gaussian_group_idx,
                                  gaussian_disp=gaussian_disp, gaussian_disp_valid=gaussian_disp_valid,
-                                 per_frame_compositing=per_frame_compositing)
+                                 per_frame_compositing=per_frame_compositing,
+                                 dyn_opacity_comp=dyn_opacity_comp)
 

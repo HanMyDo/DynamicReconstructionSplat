@@ -261,6 +261,20 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
     # artificial black edges into the perceptual network).
     total_lpips = 0.0
     total_lpips_dyn = 0.0
+    # RENDERED ALPHA (coverage). The decoder already returns it and eval threw it
+    # away, so the one quantity that says whether a region is actually COVERED was
+    # never recorded. It is the direct read-out for --dyn_opacity_comp: the
+    # compositing gate removes contributors inside the dynamic mask, so alpha there
+    # should sit below the static alpha, and the compensation should close the gap.
+    # Split dyn/static because a single mean is dominated by the static majority --
+    # which is exactly how a previous alpha measurement (0.967, ungated, during
+    # training) concluded coverage was fine.
+    total_alpha = 0.0
+    total_alpha_dyn = 0.0
+    total_alpha_static = 0.0
+    n_alpha_dyn_frames = 0
+    n_alpha_static_frames = 0
+    n_alpha_frames = 0
     n_lpips_dyn_frames = 0
     n_dyn_frames = 0
     n_static_frames = 0
@@ -411,12 +425,22 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
             # when the encoder ran phase A+B, so no extra config gate needed here.
             gaussian_disp=(infos.get("gaussian_disp") if track_dynamic else None),
             gaussian_disp_valid=(infos.get("gaussian_disp_valid") if track_dynamic else None),
+            # Opacity compensation for the contributors the compositing gate drops.
+            # Only meaningful WITH the gate -- without it nothing was removed.
+            dyn_opacity_comp=(getattr(config, "dyn_opacity_comp", 0.0)
+                              if per_frame_dynamic else 0.0),
         )
         if infos.get("dyn_group_pred") is not None:
             n_group_motion += 1
         if infos.get("gaussian_disp") is not None:
             n_knn_motion += 1
         pred_rgb = decoder_out.color  # [B, V, 3, H, W] in [0, 1]
+        pred_alpha = getattr(decoder_out, "alpha", None)  # [B, V, H, W] or None
+        # The decoder builds this with a bare .squeeze(), which collapses the view
+        # axis too when V == 1. Only trust it at the expected rank -- a coverage
+        # diagnostic must never be the thing that crashes an eval.
+        if pred_alpha is not None and pred_alpha.dim() != 4:
+            pred_alpha = None
 
         # --- per-window camera-trajectory error (Sim3-aligned ATE) -------------
         # VGGT4D's actual published contribution is pose robustness under dynamics, which
@@ -462,12 +486,30 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
             total_lpips += lpips_val
             n_frames += 1
 
+            # --- rendered alpha (coverage), overall and split by the mask -----
+            a_frame = None
+            if pred_alpha is not None:
+                a_frame = pred_alpha[0, v_idx].detach().float()
+                if a_frame.dim() == 3:          # [H,W,1] -> [H,W]
+                    a_frame = a_frame.squeeze(-1)
+                total_alpha += float(a_frame.mean())
+                n_alpha_frames += 1
+
             # Dynamic-masked metrics (PSNR only — masked SSIM is unreliable due to zero-padding bias)
             if dyn_mask is not None:
                 mask = dyn_mask[0, v_idx].to(device)   # [H, W]
                 n_total_px = mask.numel()
                 n_px = mask.sum().item()
                 total_dyn_pixel_fraction += n_px / n_total_px
+
+                if a_frame is not None and a_frame.shape == mask.shape:
+                    m = mask > 0.5
+                    if int(m.sum()) >= 10:
+                        total_alpha_dyn += float(a_frame[m].mean())
+                        n_alpha_dyn_frames += 1
+                    if int((~m).sum()) >= 10:
+                        total_alpha_static += float(a_frame[~m].mean())
+                        n_alpha_static_frames += 1
 
                 if n_px >= 10:
                     mask3 = mask.unsqueeze(0).expand(3, -1, -1)
@@ -695,6 +737,20 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
         "psnr_dynamic": total_psnr_dyn / n_dyn_frames if n_dyn_frames > 0 else None,
         "psnr_static": total_psnr_static / n_static_frames if n_static_frames > 0 else None,
         "avg_dyn_pixel_fraction": avg_dyn_pixel_frac,
+        # COVERAGE. alpha_dynamic well below alpha_static means the compositing
+        # gate removed contributors the head was counting on -- the moving object
+        # renders see-through and the background shows through it. This is what
+        # --dyn_opacity_comp is meant to close; compare the two runs on this row,
+        # not only on psnr_dynamic (a faint object can still score well against a
+        # background that is roughly the right colour).
+        "alpha_mean": (total_alpha / n_alpha_frames) if n_alpha_frames else None,
+        "alpha_dynamic": ((total_alpha_dyn / n_alpha_dyn_frames)
+                          if n_alpha_dyn_frames else None),
+        "alpha_static": ((total_alpha_static / n_alpha_static_frames)
+                         if n_alpha_static_frames else None),
+        "background_color": list(getattr(config, "background_color", (0.0, 0.0, 0.0))),
+        "dyn_opacity_comp": (getattr(config, "dyn_opacity_comp", 0.0)
+                             if per_frame_dynamic else 0.0),
         "batch_stride": batch_stride,
         # true = metrics cover only the saved image window, NOT the sequence
         "images_only": images_only,
@@ -728,6 +784,13 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
         print(f"  LPIPS (overall, lower better): {metrics['lpips']:.4f}")
     if metrics["lpips_dynamic"] is not None:
         print(f"  LPIPS (dynamic crop):          {metrics['lpips_dynamic']:.4f}")
+    if metrics["alpha_mean"] is not None:
+        _ad, _as = metrics["alpha_dynamic"], metrics["alpha_static"]
+        print(f"  Rendered alpha (overall):{metrics['alpha_mean']:.4f}")
+        if _ad is not None and _as is not None:
+            print(f"    alpha dynamic:         {_ad:.4f}   "
+                  f"static: {_as:.4f}   gap: {_ad - _as:+.4f}"
+                  f"{'  <- moving objects under-covered' if (_ad - _as) < -0.02 else ''}")
     if metrics["psnr_dynamic"] is not None:
         print(f"  PSNR (dynamic regions):  {metrics['psnr_dynamic']:.2f} dB")
         print(f"  PSNR (static  regions):  {metrics['psnr_static']:.2f} dB")
@@ -934,12 +997,39 @@ def main():
                              "dynamic centroids; target-frame centroid is fitted from the OTHER "
                              "frames only, so it is leave-one-out safe). Off = Gaussians stay at "
                              "their source-frame positions (the baseline).")
+    parser.add_argument("--bg_color", type=float, nargs=3, default=None,
+                        metavar=("R", "G", "B"),
+                        help="RENDER BACKGROUND, default black (0 0 0) as this repo has "
+                             "always used. Upstream AnySplat renders on WHITE (1 1 1) and the "
+                             "pretrained head's opacities were fitted against it: splatting "
+                             "ends at C = sum(c_i a_i T_i) + T_final*bg, so every pixel where "
+                             "the head leaves transmittance was TRAINED to be filled white. "
+                             "Over the fused background alpha is near 1 and this barely shows; "
+                             "inside the dynamic mask --per_frame_dynamic drives alpha down, so "
+                             "the mismatch lands on exactly the moving objects. Try `1 1 1`.")
+    parser.add_argument("--dyn_opacity_comp", type=float, default=0.0,
+                        help="OPACITY COMPENSATION for the contributors per-frame compositing "
+                             "removes (decoder (1b)). The head sized each dynamic Gaussian to "
+                             "carry ~1/V of a surface's alpha because AnySplat renders all V "
+                             "into every view; the gate leaves only own-frame + relocated ones, "
+                             "so the survivors under-cover. Raises their opacity to match the "
+                             "alpha V would have produced: 0 = off (the measured behaviour), "
+                             "1 = full correction. SWEEP IT (0.25/0.5/1.0) -- over-correction "
+                             "trades silhouette blur for a hard opaque edge in the wrong place, "
+                             "which lpips_dynamic catches. Needs --per_frame_dynamic.")
     parser.add_argument("--dyn_mask_dir", type=str, default=None,
                         help="Directory of PRECOMPUTED dynamic-mask PNGs (named by rgb frame stem), e.g. "
                              "output_dyn_masks_precomputed_cs16_r518_st3_fs49/<SEQ>/masks. When set, these "
                              "override the live per-window detection for the dynamic/static PSNR split — "
                              "use the validated 518+full-span masks instead of the weak in-eval detection.")
     args = parser.parse_args()
+
+    # --dyn_opacity_comp only compensates for what the COMPOSITING GATE removed, so
+    # without the gate there is nothing to compensate and the flag silently does
+    # nothing. Refuse rather than report a 'no effect' result that was never run.
+    if args.dyn_opacity_comp > 0.0 and not args.per_frame_dynamic:
+        parser.error("--dyn_opacity_comp needs --per_frame_dynamic (it compensates "
+                     "for the contributors that gate removes; with no gate it is a no-op).")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
@@ -972,6 +1062,9 @@ def main():
         dyn_motion_track_iters=args.dyn_motion_track_iters,
         dyn_motion_chain=args.dyn_motion_chain,
         dyn_motion_tracker=args.dyn_motion_tracker,
+        background_color=(tuple(args.bg_color) if args.bg_color is not None
+                          else TrainingConfig.background_color),
+        dyn_opacity_comp=args.dyn_opacity_comp,
     )
 
     print(f"\nLoading {args.split} dataset...")
@@ -997,6 +1090,8 @@ def main():
     with open(os.path.join(args.output_dir, "eval_config.json"), "w") as f:
         json.dump({
             "checkpoint": args.checkpoint,
+            "bg_color": list(config.background_color),
+            "dyn_opacity_comp": args.dyn_opacity_comp,
             "dataset": f"{args.data_dir}/{args.dataset_name}",
             "split": args.split,
             "num_frames": args.num_frames,

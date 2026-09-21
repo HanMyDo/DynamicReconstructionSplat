@@ -369,6 +369,20 @@ class TrainingConfig:
     dyn_mask_normalize: str = "per_frame"
     dyn_mask_aggregate: str = "mean"
     dyn_mask_otsu_level: int = 1
+    # RENDER BACKGROUND. Upstream AnySplat trains and renders on WHITE
+    # (config/model/decoder/splatting_cuda.yaml and config/dataset/base_dataset.yaml,
+    # both still [1,1,1] in this repo). This script has hardcoded BLACK since its
+    # first commit, which nothing ever revisited. It matters because splatting ends
+    # at C = sum(c_i a_i T_i) + T_final * bg: wherever the head deliberately leaves
+    # transmittance, it was TRAINED against white and we fill it with black. Globally
+    # that is small (alpha is near 1 over the fused background), but the compositing
+    # gate drives alpha down inside the dynamic mask, so the mismatch concentrates
+    # exactly on the moving objects. Default stays black so existing runs reproduce.
+    background_color: tuple = (0.0, 0.0, 0.0)
+    # Opacity compensation for the contributors per-frame compositing removes
+    # (decoder_splatting_cuda.py (1b)). 0 = off (measured behaviour), 1 = full
+    # alpha-matching correction. Sweep it; do not trust it.
+    dyn_opacity_comp: float = 0.0
     # KMeans clusters for the mask refinement. Fewer clusters group a person into
     # one region, so a p90/max aggregate can recruit all of them from a moving arm.
     dynamic_n_clusters: int = 64
@@ -649,7 +663,7 @@ def create_model(config: TrainingConfig) -> AnySplat:
 
     decoder_cfg = DecoderSplattingCUDACfg(
         name="splatting_cuda",
-        background_color=[0.0, 0.0, 0.0],
+        background_color=list(config.background_color),
         make_scale_invariant=False,
     )
 
@@ -776,6 +790,7 @@ def compute_rendering_loss(
     gaussian_disp: Optional[torch.Tensor] = None,
     gaussian_disp_valid: Optional[torch.Tensor] = None,
     per_frame_compositing: bool = False,
+    dyn_opacity_comp: float = 0.0,
 ) -> tuple:
     """
     Compute MSE rendering loss by rendering predicted Gaussians with given poses.
@@ -832,6 +847,7 @@ def compute_rendering_loss(
         gaussian_disp=gaussian_disp,
         gaussian_disp_valid=gaussian_disp_valid,
         per_frame_compositing=per_frame_compositing,
+        dyn_opacity_comp=dyn_opacity_comp,
     )
 
     pred_rgb = output.color  # [B, V, 3, H, W]
@@ -1799,6 +1815,15 @@ def main():
                         help="Validate at epoch 1, then every N epochs, then at the end. Set to 1 for a dense val curve (sweeps).")
     parser.add_argument("--keep_best_n", type=int, default=3,
                         help="Keep only the newest N dated checkpoint_best_ep*.pt files (newest == highest full PSNR). 0 = keep all. Never prunes checkpoint_best/final/latest.")
+    parser.add_argument("--bg_color", type=float, nargs=3, default=None,
+                        metavar=("R", "G", "B"),
+                        help="RENDER BACKGROUND, default black (0 0 0) as this script has "
+                             "used since its first commit. Upstream AnySplat renders on "
+                             "WHITE and the pretrained head's opacities were fitted against "
+                             "it. MUST MATCH the eval background: the head can absorb a "
+                             "constant background into its opacities during fine-tuning, so "
+                             "training on one and scoring on the other is a silent "
+                             "train/test mismatch that looks like a bad checkpoint.")
     parser.add_argument("--gradient_clip", type=float, default=1.0,
                         help="Max gradient norm for clipping. Lower = safer against parameter blow-up.")
 
@@ -1861,6 +1886,8 @@ def main():
         val_every_epochs=args.val_every_epochs,
         keep_best_n=args.keep_best_n,
         gradient_clip=args.gradient_clip,
+        background_color=(tuple(args.bg_color) if args.bg_color is not None
+                          else TrainingConfig.background_color),
     )
 
     print("=" * 60)
@@ -1870,6 +1897,8 @@ def main():
     print(f"Intrinsics: {config.intrinsics_preset}")
     print(f"GT poses: {config.use_gt_poses}")
     print(f"Temporal loss weight: {config.temporal_consistency_weight}")
+    print(f"Render background: {tuple(config.background_color)}"
+          f"{'  (upstream AnySplat uses (1,1,1))' if tuple(config.background_color) == (0.0, 0.0, 0.0) else ''}")
     if config.static_first_curriculum:
         print(f"Static-first curriculum: ON — static_epochs={config.curriculum_static_epochs}, "
               f"ramp_epochs={config.curriculum_ramp_epochs}, "
