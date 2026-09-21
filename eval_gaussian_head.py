@@ -60,6 +60,7 @@ from train_temporal_gaussian_head import (
 from src.evaluation.metrics import compute_psnr, compute_ssim, compute_lpips
 from src.misc.image_io import save_interpolated_video, save_image
 from src.model.ply_export import export_ply
+from src.model.encoder.dyn_motion import compensate_dyn_opacity
 
 
 # Config fields that change the MODEL ARCHITECTURE, not just its behaviour. The eval
@@ -711,12 +712,29 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
                            | (dvalid[0, :, j].to(dev) > 0))
                     _k = _ok if _k is None else (_k & _ok)
                 _df = dyn_flat[_k.cpu().numpy()] if (_k is not None and dyn_flat is not None) else dyn_flat
+
+                # OPACITY COMPENSATION, the PLY counterpart of decoder (1b).
+                # gaussians.ply keeps all V copies of a moving object, so the V-fold
+                # stack the head sized its opacities for is still there and nothing
+                # needs fixing. THIS file is different: it keeps one copy per
+                # timestamp (own-frame only) or own-frame plus the relocated ones, so
+                # the survivors carry the same alpha deficit the gated RENDER had --
+                # and a viewer applies no compensation of its own, so without this the
+                # 4D PLY shows a washed-out object while the render next to it does
+                # not. Same helper, same strength, `_k` as the survivor set, so the
+                # two artefacts agree by construction.
+                _op = last_gaussians.opacities[0]
+                _oc = getattr(config, "dyn_opacity_comp", 0.0)
+                if _oc > 0.0 and _k is not None:
+                    _op = compensate_dyn_opacity(
+                        _op, dyn_v, _k.to(_op.dtype), n_views, _oc)
+
                 export_ply(
                     _sub(means_j, _k),
                     _sub(last_gaussians.scales[0], _k),
                     _sub(last_gaussians.rotations[0], _k),
                     _sub(last_gaussians.harmonics[0], _k),
-                    _sub(last_gaussians.opacities[0], _k),
+                    _sub(_op, _k),
                     Path(os.path.join(output_dir, f"gaussians_t{j:02d}.ply")),
                     save_sh_dc_only=True,
                     dyn_mask_flat=_df,
@@ -1027,9 +1045,13 @@ def main():
     # --dyn_opacity_comp only compensates for what the COMPOSITING GATE removed, so
     # without the gate there is nothing to compensate and the flag silently does
     # nothing. Refuse rather than report a 'no effect' result that was never run.
-    if args.dyn_opacity_comp > 0.0 and not args.per_frame_dynamic:
-        parser.error("--dyn_opacity_comp needs --per_frame_dynamic (it compensates "
-                     "for the contributors that gate removes; with no gate it is a no-op).")
+    if args.dyn_opacity_comp > 0.0 and not (args.per_frame_dynamic
+                                            or args.ply_own_frame_only
+                                            or args.ply_dyn_source >= 0):
+        parser.error("--dyn_opacity_comp needs a gate to compensate for: "
+                     "--per_frame_dynamic (render), or --ply_own_frame_only / "
+                     "--ply_dyn_source (PLY). With every copy kept, the V-fold stack "
+                     "the head sized its opacities for is still there and this is a no-op.")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
