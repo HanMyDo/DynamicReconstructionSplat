@@ -237,7 +237,7 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
              track_dynamic=False, gain_correct=False, scale_mult=1.0,
              image_save_every=1, batch_stride=1, images_only=False, image_views=None,
              ply_batch=None, ply_per_frame=False, ply_dyn_source=-1, ply_dyn_opacity=1.0,
-             ply_own_frame_only=False,
+             ply_own_frame_only=False, ply_max_scale_frac=0.011,
              image_error_map=False, image_error_gain=4.0):
     os.makedirs(output_dir, exist_ok=True)
     images_dir = os.path.join(output_dir, "images")
@@ -657,6 +657,7 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
             save_sh_dc_only=True,
             dyn_mask_flat=dyn_mask_flat,
             dyn_opacity_scale=0.5,  # dim dynamic Gaussians to 50% rather than near-invisible
+            max_scale_frac=ply_max_scale_frac,
         )
 
     # --- 4D PLY export: one file per timestamp, dynamic Gaussians DISPLACED --------
@@ -738,6 +739,7 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
                     Path(os.path.join(output_dir, f"gaussians_t{j:02d}.ply")),
                     save_sh_dc_only=True,
                     dyn_mask_flat=_df,
+                    max_scale_frac=ply_max_scale_frac,
                     # 1.0 = no fade. The 4D export exists to SHOW the moving object;
                     # the old 0.5 halved exactly the Gaussians the viewer came to see.
                     dyn_opacity_scale=ply_dyn_opacity,
@@ -1015,6 +1017,14 @@ def main():
                              "dynamic centroids; target-frame centroid is fitted from the OTHER "
                              "frames only, so it is leave-one-out safe). Off = Gaussians stay at "
                              "their source-frame positions (the baseline).")
+    parser.add_argument("--ply_max_scale_frac", type=float, default=0.011,
+                        help="PLY only: drop Gaussians whose largest axis exceeds this "
+                             "fraction of the scene's p1-p99 diagonal. 0 disables. A tiny "
+                             "number of enormous, faint splats carry most of the visible "
+                             "haze -- measured on balloon, 50 of them span 6%% of the scene "
+                             "each and carry 9.4%% of all opacity-weighted area; the default "
+                             "removes 1.9%% of the Gaussians and 31%% of the haze. Affects the "
+                             "exported file ONLY, never a rendered metric.")
     parser.add_argument("--bg_color", type=float, nargs=3, default=None,
                         metavar=("R", "G", "B"),
                         help="RENDER BACKGROUND, default black (0 0 0) as this repo has "
@@ -1147,6 +1157,7 @@ def main():
              ply_dyn_source=args.ply_dyn_source,
              ply_dyn_opacity=args.ply_dyn_opacity,
              ply_own_frame_only=args.ply_own_frame_only,
+             ply_max_scale_frac=args.ply_max_scale_frac,
              image_error_map=args.image_error_map,
              image_error_gain=args.image_error_gain,
              image_views=(None if args.image_views.strip().lower() == "all"

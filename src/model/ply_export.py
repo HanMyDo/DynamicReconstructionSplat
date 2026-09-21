@@ -37,7 +37,53 @@ def export_ply(
     save_sh_dc_only: bool = True,
     dyn_mask_flat: np.ndarray | None = None,
     dyn_opacity_scale: float = 0.05,
+    max_scale_frac: float = 0.011,
 ):
+    """max_scale_frac: drop Gaussians whose LARGEST axis exceeds this fraction of the
+    scene's robust (p1-p99) diagonal. 0 disables.
+
+    WHY A CEILING. Measured on balloon t15 (2.79M Gaussians, scene diagonal 1.80):
+    50 Gaussians are over 0.1 world units across -- each spanning 6% of the whole
+    scene -- and they alone carry 9.4% of all opacity-weighted splat area. The 998
+    above 0.05 carry 20%. In a viewer they are huge, faint (median opacity 0.013 vs
+    0.031 overall), round discs, which is the concentric-ring haze that made these
+    files look broken. The default 0.011 (~0.02 world here) removes 1.9% of the
+    Gaussians and 31% of the haze; user-confirmed as the best of 0.05/0.03/0.02.
+
+    CEILING, NOT FLOOR. prune_ply.py only ever had --min_scale, and opacity pruning
+    has far worse leverage for this defect: dropping everything below opacity 0.02
+    deletes 34% of the file to remove 22% of the haze, against 1.9% for 31% here.
+    The defect is SIZE, so the cut has to be on size.
+
+    WHY THE EXPORTER AND NOT A POST-HOC TOOL. Upstream AnySplat ships this file
+    unfiltered and does not need a filter: it runs voxelize=true, and fusion never
+    produces these. We run voxelize=false (per-pixel Gaussians are what every
+    dynamic mechanism here needs), so we inherited an exporter built for a
+    representation we do not use.
+
+    RELATIVE, not absolute, because the threshold has to mean the same thing in a
+    scene of a different size; VGGT geometry is near-unit-scaled but not exactly.
+    """
+    if max_scale_frac > 0 and means.shape[0] > 0:
+        _m = means.detach().cpu().float().numpy()
+        _lo, _hi = np.percentile(_m, 1, axis=0), np.percentile(_m, 99, axis=0)
+        _diag = float(np.linalg.norm(_hi - _lo))
+        _limit = max_scale_frac * _diag
+        _keep = scales.detach().max(dim=-1).values <= _limit
+        _n_drop = int((~_keep).sum())
+        if 0 < _n_drop < means.shape[0]:
+            means, scales = means[_keep], scales[_keep]
+            rotations, harmonics = rotations[_keep], harmonics[_keep]
+            opacities = opacities[_keep]
+            if dyn_mask_flat is not None and len(dyn_mask_flat) == len(_keep):
+                dyn_mask_flat = dyn_mask_flat[_keep.detach().cpu().numpy()]
+            print(f"[PLY export] dropped {_n_drop} oversized Gaussians "
+                  f"(max axis > {_limit:.4f} = {max_scale_frac:.3f} x scene diagonal "
+                  f"{_diag:.2f}), {means.shape[0]} remain")
+        elif _n_drop:
+            print(f"[PLY export] max_scale_frac {max_scale_frac} would drop EVERY "
+                  f"Gaussian -- skipping the cut, inspect the scene scale")
+
     if shift_and_scale:
         # Shift the scene so that the median Gaussian is at the origin.
         means = means - means.median(dim=0).values

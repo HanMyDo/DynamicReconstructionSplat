@@ -34,6 +34,14 @@ def main():
                     help="drop gaussians whose sigmoid(opacity) is below this")
     ap.add_argument("--min_scale", type=float, default=1e-4,
                     help="drop gaussians whose largest exp(scale) is below this (sub-pixel)")
+    ap.add_argument("--max_scale", type=float, default=0.0,
+                    help="drop gaussians whose largest exp(scale) is ABOVE this (0 = off). "
+                         "THE cut for the concentric-ring haze: measured on balloon, 50 "
+                         "gaussians over 0.1 world units span 6%% of the scene each and carry "
+                         "9.4%% of all opacity-weighted splat area, and 1.9%% of the file carries "
+                         "31%%. Scale, not opacity -- an opacity cut must delete 34%% of the file "
+                         "to remove 22%%. New exports apply this automatically (export_ply "
+                         "max_scale_frac); this flag is for files you already have.")
     ap.add_argument("--opacity_boost", type=float, default=0.0,
                     help="PRESENTATION ONLY: added to the opacity logit of survivors")
     ap.add_argument("--scale_boost", type=float, default=0.0,
@@ -53,6 +61,8 @@ def main():
     keep = np.isfinite(o) & np.isfinite(S).all(axis=1)
     keep &= sig >= args.min_opacity
     keep &= big >= args.min_scale
+    if args.max_scale > 0:
+        keep &= big <= args.max_scale
     data = data[keep]
 
     if args.opacity_boost:
