@@ -219,19 +219,31 @@ RESULT_*/
 # Local scratch for figures/renders/PLYs pulled off the cluster with scp. These are
 # regenerable outputs, not source: one of these directories carried 5311 files and
 # 2.16 GiB into a commit, which GitHub then refused with HTTP 500.
-balloon/
-big_ply/
-cmp/
-crowd/
-demo/
-demo_balloon/
-final/
-mask_cmp/
-mask_overlays/
-masks_*/
-new_balloon/
-norm_cmp/
-playback/
-ply_balloon/
-ply_check/
-renders_*/
+#
+# Every pattern here is ANCHORED with a leading slash so it can only match at the
+# repo root. Unanchored, a name like mask*/ also matches
+# src/model/encoder/vggt4d/masks/ and would quietly untrack real source.
+#
+# Prefixed rather than literal (/cmp*/ not /cmp/) because this list was a literal
+# one and each new scp dump needed its own commit -- cmp_otsu/ is the one that got
+# through and reached `git status` as 200 untracked PNGs.
+/balloon/
+/big_ply/
+/cmp*/
+/crowd/
+/demo*/
+/final/
+/mask*/
+/new_*/
+/norm_cmp/
+/playback/
+/ply_*/
+/renders_*/
+
+# The same outputs in transit. A figure directory is usually tarred before scp, so
+# the archive lands next to the directory it was made from -- cmp_otsu.tgz was 26 MB.
+*.tgz
+*.tar
+*.tar.gz
+*.zip
+*.7z
