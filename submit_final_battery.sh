@@ -28,8 +28,24 @@
 set -uo pipefail
 REPO="${HOME}/DynamicReconstructionSplat"; cd "${REPO}"
 M2="${HOME}/data/mask_out/output_dyn_masks_precomputed_cs64_r518_st3_fs1_m6_otsu2"
-F="--track_dynamic --dyn_motion_knn 8 --dyn_motion_strict --dyn_motion_pred_bandwidth 1.5 --dyn_motion_tracker raft --dyn_motion_max_disp_mult 3.0"
+F="--track_dynamic --dyn_motion_knn 8 --dyn_motion_strict --dyn_motion_pred_bandwidth 1.5 --dyn_motion_tracker raft --dyn_motion_max_disp_mult 3.0 --dyn_opacity_comp 1.0"
+# ADOPTED Sep 2026 (probe on balloon, 30 windows, vs the same config without them):
+#   --dyn_opacity_comp 1.0   +0.87 psnr / +1.70 dyn / -0.027 lpips_dyn; rendered
+#     alpha inside the dynamic mask 0.909 -> 0.968 against 0.979 static. The gate
+#     removes contributors the pretrained head sized its opacities for; this puts
+#     the alpha back. Needs --per_frame_dynamic, so it rides in F, not BG.
+#   --bg_color 1 1 1         +0.43 psnr / +0.84 static / better on BOTH lpips
+#     columns, -0.54 on dyn psnr. Upstream AnySplat renders on white and the head
+#     was fitted against it. MUST be on BOTH arms or the comparison is decided by
+#     fill colour: at oc0 the same swap costs 2.24 dB of dynamic psnr, and it only
+#     becomes a net win once compensation has shrunk the transmittance it fills.
+BG="--bg_color 1 1 1"
 VID="--image_batch_start 0 --max_image_batches 99999 --image_views 0"
+# --ply_own_frame_only: one crisp copy per timestamp. Without it the file holds all
+# V copies stacked along the trajectory, which reads as overlapping ghosts and no
+# defined person. Oversized splats are dropped by export_ply now (1.9% of gaussians
+# carried 31% of the visible haze), so no post-hoc prune_ply pass is needed.
+PLY="--ply_per_frame --ply_own_frame_only"
 export EVAL_DATE="${EVAL_DATE:-final}"
 
 # One GPU at a time: singleton is per (user, job name), so a shared name serialises
@@ -69,9 +85,9 @@ for SEQ in ${SEQS}; do
   fi
 
   A=$(sbatch --parsable ${NAME} $(mkdep "${JID}") slurm_eval_hex.sh baseline \
-        "--no_vggt4d --frame_stride 4 --dyn_mask_dir ${M2} ${VID}" "${SEQ}" 16)
+        "--no_vggt4d --frame_stride 4 --dyn_mask_dir ${M2} ${BG} ${VID}" "${SEQ}" 16)
   B=$(sbatch --parsable ${NAME} $(mkdep "${JID}") slurm_eval_hex.sh baseline \
-        "--frame_stride 4 --dyn_mask_dir ${M2} --per_frame_dynamic ${F} ${VID} --ply_per_frame" "${SEQ}" 16)
+        "--frame_stride 4 --dyn_mask_dir ${M2} --per_frame_dynamic ${F} ${BG} ${VID} ${PLY}" "${SEQ}" 16)
   echo "${SEQ}: vanilla -> job ${A} | ours -> job ${B}"
 done
 
@@ -81,8 +97,8 @@ cat <<TXT
 Submitted. When they finish, build each figure with:
   for S in ${TAG}; do
     sbatch slurm_compare_hex.sh \\
-      output_eval_frozen_vggt_s4_pcm_nf16_\${S}_${EVAL_DATE} \\
-      output_eval_frozen_pfd_s4_flow8raftsb1p5_cl3p0_pcm_nf16_\${S}_${EVAL_DATE} \\
+      output_eval_frozen_vggt_s4_bg111_pcm_nf16_\${S}_${EVAL_DATE} \\
+      output_eval_frozen_pfd_s4_flow8raftsb1p5_cl3p0_bg111_oc1p0_pcm_nf16_\${S}_${EVAL_DATE} \\
       cmp_\${S} "AnySplat + VGGT (vanilla)" "ours: VGGT4D + flow-gated" 1
   done
 TXT
