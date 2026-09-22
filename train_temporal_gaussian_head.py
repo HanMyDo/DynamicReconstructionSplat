@@ -366,6 +366,8 @@ class TrainingConfig:
     dyn_motion_track_iters: int = 0
     dyn_motion_chain: bool = False
     dyn_motion_tracker: str = "vggt"
+    dyn_motion_smooth: int = 0
+    dyn_motion_min_travel: float = 0.0
     dyn_mask_normalize: str = "per_frame"
     dyn_mask_aggregate: str = "mean"
     dyn_mask_otsu_level: int = 1
@@ -647,6 +649,8 @@ def create_model(config: TrainingConfig) -> AnySplat:
         dyn_motion_track_iters=config.dyn_motion_track_iters,
         dyn_motion_chain=config.dyn_motion_chain,
         dyn_motion_tracker=config.dyn_motion_tracker,
+        dyn_motion_smooth=config.dyn_motion_smooth,
+        dyn_motion_min_travel=config.dyn_motion_min_travel,
         dyn_mask_normalize=config.dyn_mask_normalize,
         dyn_mask_aggregate=config.dyn_mask_aggregate,
         dyn_mask_otsu_level=config.dyn_mask_otsu_level,

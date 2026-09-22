@@ -588,6 +588,8 @@ def collect_dyn_tracks(
     track_iters: Optional[int] = None,
     chain: bool = False,
     tracker: str = "vggt",
+    smooth_width: int = 0,
+    min_travel_frac: float = 0.0,
 ) -> Optional[List[Optional[Tuple[torch.Tensor, torch.Tensor]]]]:
     """Phase A of the scene-flow motion model: build a track scaffold.
 
@@ -663,7 +665,16 @@ def collect_dyn_tracks(
             traj_parts.append(traj)
             ok_parts.append(ok)
         if traj_parts:
-            out.append((torch.cat(traj_parts, dim=1), torch.cat(ok_parts, dim=1)))
+            _tj = torch.cat(traj_parts, dim=1)
+            _ok = torch.cat(ok_parts, dim=1)
+            # Clean the scaffold BEFORE anything interpolates from it. Order matters:
+            # smooth first, because drop_static_tracks measures travel and raw depth
+            # jitter inflates the travel of a track that never actually moved.
+            if smooth_width and smooth_width >= 3:
+                _tj = smooth_tracks_temporal(_tj, _ok, smooth_width)
+            if min_travel_frac and min_travel_frac > 0:
+                _ok = drop_static_tracks(_tj, _ok, min_travel_frac)
+            out.append((_tj, _ok))
             any_ok = True
         else:
             out.append(None)
@@ -733,6 +744,113 @@ def predict_tracks_loo(traj: torch.Tensor, ok: torch.Tensor, min_pts: int = 2,
 # unpacks (disp, valid) in twelve places and the encoder calls this once per batch item.
 # Single-threaded, written at the end of every call, read immediately after.
 LAST_FLOW_STATS: dict = {}
+
+
+def smooth_tracks_temporal(traj: torch.Tensor, ok: torch.Tensor,
+                           width: int = 3) -> torch.Tensor:
+    """Temporal MEDIAN filter on each track's 3D trajectory. traj [V,Nt,3] -> same.
+
+    WHY. A track's world position at frame v is read out of frame v's OWN predicted
+    point map (_lift_tracks_nearest), so every frame contributes its own depth error
+    independently. The displacement is a DIFFERENCE of two such positions, so the
+    two errors add rather than cancel: var(disp) ~ var(depth_i) + var(depth_j). The
+    relocated copies then land at slightly wrong depths that differ per source
+    frame, so instead of reinforcing into one object they spread into a shell --
+    the scatter around the moving object, which no opacity or scale fix can touch
+    because the positions themselves disagree.
+
+    A real object's 3D path is smooth over the ~0.5 s of a window; per-frame depth
+    error is not. MEDIAN rather than mean because the errors being removed are
+    outliers, not noise -- a track that momentarily samples the background behind a
+    silhouette jumps metres, and a mean would drag the whole neighbourhood with it.
+
+    Unusable frames (ok=False) are replaced by the centre value inside the window so
+    they neither vote nor shift the median, and their own output is left untouched
+    since they are gated out downstream anyway.
+
+    NOTE ON LEAKAGE: with a width-W window the smoothed source position at frame i
+    depends on frames i +/- W//2, which can include a target frame j. That is a
+    DEPTH-only, 1/W-weighted dependency, and under --dyn_motion_strict the target
+    lookup is still the leak-free predict_tracks_loo fit. Report it; do not let a
+    strict run claim the source position never saw j.
+    """
+    if width < 3 or traj.shape[0] < 3:
+        return traj
+    V = traj.shape[0]
+    half = min(width // 2, V - 1)
+    okf = ok.unsqueeze(-1)
+
+    def _at(j):
+        """Trajectory at frame j, ODD-extended past either end.
+
+        Truncating the window at the boundary instead costs a systematic 1/(V-1)
+        of EVERY displacement -- measured 0.150 -> 0.140 on a constant-velocity
+        scaffold -- because frames 0 and V-1 get averaged inward. Those are the
+        frames furthest in time from the rest of the window, i.e. exactly where
+        the displacement is largest and the mechanism matters most.
+
+        Odd extension (2*end - mirrored) reproduces a linear trend exactly, so a
+        constant-velocity track passes through untouched (verified: node error
+        0.0). Its one cost: an outlier sitting ON frame 0 or V-1 survives, since
+        the pad is built from that same bad value. A systematic shrink of every
+        displacement is the worse of the two, so this is the right trade -- but
+        boundary outliers are NOT removed, and a width of 5 only softens that.
+        """
+        if j < 0:
+            return 2.0 * traj[0] - traj[-j], ok[-j]
+        if j >= V:
+            k = 2 * (V - 1) - j
+            return 2.0 * traj[V - 1] - traj[k], ok[k]
+        return traj[j], ok[j]
+
+    out = traj.clone()
+    for v in range(V):
+        vals, oks = zip(*(_at(j) for j in range(v - half, v + half + 1)))
+        win = torch.stack(vals)                                  # [w, Nt, 3]
+        m = torch.stack(oks).unsqueeze(-1)                       # [w, Nt, 1]
+        win = torch.where(m, win, traj[v].unsqueeze(0).expand_as(win))
+        out[v] = win.median(dim=0).values
+    return torch.where(okf, out, traj)
+
+
+def drop_static_tracks(traj: torch.Tensor, ok: torch.Tensor,
+                       min_travel_frac: float = 0.25) -> torch.Tensor:
+    """Mark tracks that barely move as unusable. ok [V,Nt] -> same shape.
+
+    WHY. Query points are seeded on DYNAMIC-MASK pixels, so every mask false
+    positive seeds a track on genuinely static background. Those tracks are
+    perfectly well behaved -- they just do not move -- and knn_flow_displacement
+    averages them in with the real ones by inverse distance, dragging the
+    interpolated displacement of nearby dynamic Gaussians toward zero. The Gaussian
+    is then relocated too little rather than not at all, which the validity gate
+    cannot catch because the track was never invalid.
+
+    Threshold is RELATIVE to this window's own median travel, because absolute
+    motion is a property of the sequence (Bonn camera speeds vary ~6x across it)
+    while "an order of magnitude less than everything else here" is not.
+
+    Travel = diagonal of the trajectory's bounding box over usable frames only. A
+    track with fewer than two usable frames cannot be judged and is left alone.
+    """
+    if min_travel_frac <= 0:
+        return ok
+    okf = ok.unsqueeze(-1)
+    inf = torch.full_like(traj, float("inf"))
+    hi = torch.where(okf, traj, -inf).max(dim=0).values
+    lo = torch.where(okf, traj, inf).min(dim=0).values
+    travel = (hi - lo).norm(dim=-1)                      # [Nt]
+    judged = ok.sum(dim=0) >= 2
+    travel = torch.where(judged & torch.isfinite(travel), travel,
+                         torch.zeros_like(travel))
+    ref = travel[judged & (travel > 0)]
+    if ref.numel() == 0:
+        return ok
+    keep = (~judged) | (travel >= min_travel_frac * ref.median())
+    n_drop = int((~keep).sum())
+    if n_drop:
+        print(f"[DynTracks] dropped {n_drop}/{keep.numel()} near-static tracks "
+              f"(travel < {min_travel_frac:g} x median {ref.median():.4f})", flush=True)
+    return ok & keep.unsqueeze(0)
 
 
 @torch.no_grad()

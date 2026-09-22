@@ -179,6 +179,13 @@ class EncoderAnySplatCfg:
     # dense optical flow from torchvision's pretrained RAFT, whose per-hop regime
     # (~13 px between adjacent window frames) is well inside its range.
     dyn_motion_tracker: str = "vggt"
+    # TIER 3, both default OFF so every measured result reproduces.
+    # smooth: temporal median on each track's 3D path, against per-frame depth
+    # error entering the displacement twice (source and target).
+    dyn_motion_smooth: int = 0
+    # min_travel: drop tracks that barely move -- mask false positives seed
+    # tracks on static background, which dilute the kNN average toward zero.
+    dyn_motion_min_travel: float = 0.0
     dynamic_n_clusters: int = 64  # Number of clusters for KMeans refinement
     # "per_frame" (original) rescales EVERY frame to [0,1], so a frame with nothing
     # moving still contributes its brightest patches to a globally-thresholded mask.
@@ -1031,6 +1038,8 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
                 track_iters=(getattr(self.cfg, "dyn_motion_track_iters", 0) or None),
                 chain=getattr(self.cfg, "dyn_motion_chain", False),
                 tracker=getattr(self.cfg, "dyn_motion_tracker", "vggt"),
+                smooth_width=getattr(self.cfg, "dyn_motion_smooth", 0),
+                min_travel_frac=getattr(self.cfg, "dyn_motion_min_travel", 0.0),
             )
             if _clean and self.use_vggt4d:
                 del _trk_tokens

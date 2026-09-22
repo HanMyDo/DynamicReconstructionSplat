@@ -833,6 +833,8 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
         "dyn_motion_track_iters": getattr(config, "dyn_motion_track_iters", 0),
         "dyn_motion_chain": getattr(config, "dyn_motion_chain", False),
         "dyn_motion_tracker": getattr(config, "dyn_motion_tracker", "vggt"),
+        "dyn_motion_smooth": getattr(config, "dyn_motion_smooth", 0),
+        "dyn_motion_min_travel": getattr(config, "dyn_motion_min_travel", 0.0),
         "n_batches_with_knn_motion": n_knn_motion,
         **({f"flow_{k}": v / n_flow_stats for k, v in flow_stat_sums.items()}
            if n_flow_stats else {}),
@@ -1062,6 +1064,24 @@ def main():
     parser.add_argument("--dyn_motion_query_first_only", action="store_true",
                         help="Scene-flow mode: sample tracker queries only from frame 0's dynamic "
                              "pixels (legacy behaviour) instead of from every frame.")
+    parser.add_argument("--dyn_motion_smooth", type=int, default=0,
+                        help="Temporal MEDIAN filter width on each track's 3D trajectory "
+                             "(0/1/2 = off, try 3 or 5). A track's position at frame v comes "
+                             "from frame v's OWN predicted depth, so the displacement is a "
+                             "difference of two independent depth errors and they ADD. The "
+                             "relocated copies then land at slightly different wrong depths "
+                             "and spread into a shell instead of reinforcing -- the scatter "
+                             "around the moving object. Median, not mean: the errors are "
+                             "outliers (a track sampling background past a silhouette), and "
+                             "a mean would drag the neighbourhood with it.")
+    parser.add_argument("--dyn_motion_min_travel", type=float, default=0.0,
+                        help="Drop tracks whose 3D travel is below this fraction of the "
+                             "window's MEDIAN track travel (0 = off, try 0.2-0.3). Query "
+                             "points are seeded on dynamic-mask pixels, so every mask false "
+                             "positive seeds a track on static background; those tracks are "
+                             "never invalid, they just do not move, and the kNN average pulls "
+                             "nearby real displacements toward zero. Relative to the median "
+                             "because absolute motion is a property of the sequence.")
     parser.add_argument("--gain_correct", action="store_true",
                         help="CONTROL: rescale each rendered frame by its optimal least-squares "
                              "scalar before computing metrics (pure exposure fix, no structural "
@@ -1179,6 +1199,8 @@ def main():
         dyn_motion_track_iters=args.dyn_motion_track_iters,
         dyn_motion_chain=args.dyn_motion_chain,
         dyn_motion_tracker=args.dyn_motion_tracker,
+        dyn_motion_smooth=args.dyn_motion_smooth,
+        dyn_motion_min_travel=args.dyn_motion_min_travel,
         background_color=(tuple(args.bg_color) if args.bg_color is not None
                           else TrainingConfig.background_color),
         dyn_opacity_comp=args.dyn_opacity_comp,
