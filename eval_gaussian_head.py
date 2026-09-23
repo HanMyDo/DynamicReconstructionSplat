@@ -61,6 +61,7 @@ from src.evaluation.metrics import compute_psnr, compute_ssim, compute_lpips
 from src.misc.image_io import save_interpolated_video, save_image
 from src.model.ply_export import export_ply
 from src.model.encoder.dyn_motion import compensate_dyn_opacity
+from src.model.encoder.dyn_mask_post import largest_dyn_clusters
 
 
 # Config fields that change the MODEL ARCHITECTURE, not just its behaviour. The eval
@@ -238,7 +239,7 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
              image_save_every=1, batch_stride=1, images_only=False, image_views=None,
              ply_batch=None, ply_per_frame=False, ply_dyn_source=-1, ply_dyn_opacity=1.0,
              ply_own_frame_only=False, ply_max_scale_frac=0.011,
-             ply_dyn_scale_mult=1.0,
+             ply_dyn_scale_mult=1.0, ply_dyn_keep_frac=0.0,
              image_error_map=False, image_error_gain=4.0):
     os.makedirs(output_dir, exist_ok=True)
     images_dir = os.path.join(output_dir, "images")
@@ -724,6 +725,14 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
                     _ok = ((dyn_v <= 0.5) | (fid_v == j)
                            | (dvalid[0, :, j].to(dev) > 0))
                     _k = _ok if _k is None else (_k & _ok)
+                # Drop scattered dynamic false positives BEFORE the keep set is
+                # applied, so the two filters compose instead of fighting.
+                if ply_dyn_keep_frac > 0:
+                    _cl = torch.from_numpy(largest_dyn_clusters(
+                        means_j.detach().cpu().numpy(),
+                        (dyn_v > 0.5).detach().cpu().numpy(),
+                        ply_dyn_keep_frac)).to(dev)
+                    _k = _cl if _k is None else (_k & _cl)
                 _df = dyn_flat[_k.cpu().numpy()] if (_k is not None and dyn_flat is not None) else dyn_flat
 
                 # OPACITY COMPENSATION, the PLY counterpart of decoder (1b).
@@ -1112,6 +1121,19 @@ def main():
                              "The uncovered frames are treated as fully static, so their "
                              "moving object ghosts and lands in the static PSNR bucket -- "
                              "not comparable to a fully-covered run.")
+    parser.add_argument("--ply_dyn_keep_frac", type=float, default=0.0,
+                        help="PLY only: keep dynamic Gaussians only where they form a 3D "
+                             "cluster at least this fraction of the largest one (0 = off, "
+                             "try 0.1). Measured on balloon: only 14.8%% of the gaussians "
+                             "flagged dynamic sit within 0.3 world of their densest spot, so "
+                             "most of 'the moving object' is furniture scattered through the "
+                             "room. That hurts the PLY far more than the render, because "
+                             "--ply_own_frame_only deletes the other V-1 copies of a "
+                             "misclassified BACKGROUND patch (a hole) and --dyn_opacity_comp "
+                             "then boosts the survivor into a bright speck. Relative to the "
+                             "largest component so two genuine movers both survive. "
+                             "PRESENTATION: it separates compact from scattered, not true "
+                             "from false -- an isolated small mover is dropped too.")
     parser.add_argument("--image_size", type=int, nargs=2, default=None,
                         metavar=("H", "W"),
                         help="Reconstruction grid, default 448 448. Both must be divisible "
@@ -1310,6 +1332,7 @@ def main():
              ply_own_frame_only=args.ply_own_frame_only,
              ply_max_scale_frac=args.ply_max_scale_frac,
              ply_dyn_scale_mult=args.ply_dyn_scale_mult,
+             ply_dyn_keep_frac=args.ply_dyn_keep_frac,
              image_error_map=args.image_error_map,
              image_error_gain=args.image_error_gain,
              image_views=(None if args.image_views.strip().lower() == "all"
