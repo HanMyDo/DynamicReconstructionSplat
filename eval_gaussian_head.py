@@ -760,9 +760,19 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
                 # "abstract art". Presentation: it changes the model, unlike the
                 # oversize cut, which only removes what was never structure.
                 _sc = last_gaussians.scales[0]
-                if ply_dyn_scale_mult != 1.0:
-                    _sc = torch.where((dyn_v > 0.5).unsqueeze(-1),
-                                      _sc * ply_dyn_scale_mult, _sc)
+                _sm = ply_dyn_scale_mult
+                if _sm < 0:
+                    # AUTO = sqrt(V), the coverage analogue of the opacity fix: at
+                    # 1/V the density a splat needs sqrt(V) more RADIUS to tile the
+                    # same surface, exactly as it needs 1-(1-o)^V more alpha to be
+                    # as opaque. Measured on balloon nf6: the person's splats cover
+                    # 0.41 of their neighbour spacing, so the multiplier needed for
+                    # coverage 1.0 is 1/0.41 = 2.44, against sqrt(6) = 2.45. The
+                    # argument predicts the measurement, so this is derived, not tuned.
+                    _sm = float(n_views) ** 0.5
+                    print(f"[ply] dyn scale x{_sm:.2f} = sqrt(V={n_views}) (auto)", flush=True)
+                if _sm != 1.0:
+                    _sc = torch.where((dyn_v > 0.5).unsqueeze(-1), _sc * _sm, _sc)
 
                 export_ply(
                     _sub(means_j, _k),
@@ -1155,7 +1165,8 @@ def main():
                              "separate into blobs. 1.0 = off. 1.5-2.0 closes the gaps; 4.0 "
                              "(=sqrt(16)) is the full density argument and looks chunky "
                              "against the background. This CHANGES THE MODEL -- say so if a "
-                             "figure uses it.")
+                             "figure uses it. -1 = AUTO = sqrt(V), which measurement "
+                             "agrees with to 0.4%% -- prefer it to a hand-picked value.")
     parser.add_argument("--ply_max_scale_frac", type=float, default=0.011,
                         help="PLY only: drop Gaussians whose largest axis exceeds this "
                              "fraction of the scene's p1-p99 diagonal. 0 disables. A tiny "
