@@ -238,6 +238,7 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
              image_save_every=1, batch_stride=1, images_only=False, image_views=None,
              ply_batch=None, ply_per_frame=False, ply_dyn_source=-1, ply_dyn_opacity=1.0,
              ply_own_frame_only=False, ply_max_scale_frac=0.011,
+             ply_dyn_scale_mult=1.0,
              image_error_map=False, image_error_gain=4.0):
     os.makedirs(output_dir, exist_ok=True)
     images_dir = os.path.join(output_dir, "images")
@@ -741,9 +742,22 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
                     _op = compensate_dyn_opacity(
                         _op, dyn_v, _k.to(_op.dtype), n_views, _oc)
 
+                # COVERAGE companion to the opacity compensation above. That one
+                # made each surviving dynamic Gaussian as OPAQUE as the V it stands
+                # in for; this makes it as LARGE. With 1/V of the splats each needs
+                # ~sqrt(V) more radius to tile the same surface, and a viewer zoomed
+                # onto a face at 448x448 is magnifying past the sampling rate, so
+                # without it they separate into the individual blobs that read as
+                # "abstract art". Presentation: it changes the model, unlike the
+                # oversize cut, which only removes what was never structure.
+                _sc = last_gaussians.scales[0]
+                if ply_dyn_scale_mult != 1.0:
+                    _sc = torch.where((dyn_v > 0.5).unsqueeze(-1),
+                                      _sc * ply_dyn_scale_mult, _sc)
+
                 export_ply(
                     _sub(means_j, _k),
-                    _sub(last_gaussians.scales[0], _k),
+                    _sub(_sc, _k),
                     _sub(last_gaussians.rotations[0], _k),
                     _sub(last_gaussians.harmonics[0], _k),
                     _sub(_op, _k),
@@ -1098,6 +1112,28 @@ def main():
                              "The uncovered frames are treated as fully static, so their "
                              "moving object ghosts and lands in the static PSNR bucket -- "
                              "not comparable to a fully-covered run.")
+    parser.add_argument("--image_size", type=int, nargs=2, default=None,
+                        metavar=("H", "W"),
+                        help="Reconstruction grid, default 448 448. Both must be divisible "
+                             "by 14. THE lever for PLY density: a dynamic object is built "
+                             "from ONE frame, so it gets dynfrac x H x W gaussians -- ~28k at "
+                             "448x448, which is why a face has no features. Gaussian count is "
+                             "per-frame, so TRADE FRAMES FOR PIXELS: --num_frames 6 "
+                             "--image_size 812 616 costs the same total as 16 at 448 but puts "
+                             "2.5x more geometry on the person. 812x616 is also 4:3, so it "
+                             "drops the 448-square squash that makes everything 25%% too "
+                             "narrow and is off VGGT's training distribution. CHANGES EVERY "
+                             "METRIC -- use it for figures, never inside a comparison.")
+    parser.add_argument("--ply_dyn_scale_mult", type=float, default=1.0,
+                        help="PLY only, PRESENTATION: enlarge dynamic Gaussians in the 4D "
+                             "export. Companion to --dyn_opacity_comp, which fixed ALPHA but "
+                             "not COVERAGE: with 1/V of the splats, each needs ~sqrt(V) more "
+                             "radius to tile the same surface, and at 448x448 a viewer zoomed "
+                             "onto a face is magnifying past the sampling rate, so the splats "
+                             "separate into blobs. 1.0 = off. 1.5-2.0 closes the gaps; 4.0 "
+                             "(=sqrt(16)) is the full density argument and looks chunky "
+                             "against the background. This CHANGES THE MODEL -- say so if a "
+                             "figure uses it.")
     parser.add_argument("--ply_max_scale_frac", type=float, default=0.011,
                         help="PLY only: drop Gaussians whose largest axis exceeds this "
                              "fraction of the scene's p1-p99 diagonal. 0 disables. A tiny "
@@ -1132,6 +1168,12 @@ def main():
                              "override the live per-window detection for the dynamic/static PSNR split — "
                              "use the validated 518+full-span masks instead of the weak in-eval detection.")
     args = parser.parse_args()
+
+    # VGGT is a ViT with patch size 14; a grid that is not a multiple of 14 is
+    # silently cropped or crashes deep in the aggregator, far from the cause.
+    if args.image_size is not None and any(v % 14 for v in args.image_size):
+        parser.error(f"--image_size {args.image_size} must be divisible by 14 "
+                     f"(e.g. 448 448, 518 392, 812 616, 896 672)")
 
     # --dyn_opacity_comp only compensates for what the COMPOSITING GATE removed, so
     # without the gate there is nothing to compensate and the flag silently does
@@ -1179,6 +1221,8 @@ def main():
 
     config = TrainingConfig(
         data_dir=args.data_dir,
+        image_size=(tuple(args.image_size) if args.image_size is not None
+                    else TrainingConfig.image_size),
         dataset_name=args.dataset_name,
         num_frames=args.num_frames,
         use_vggt4d=not args.no_vggt4d,
@@ -1265,6 +1309,7 @@ def main():
              ply_dyn_opacity=args.ply_dyn_opacity,
              ply_own_frame_only=args.ply_own_frame_only,
              ply_max_scale_frac=args.ply_max_scale_frac,
+             ply_dyn_scale_mult=args.ply_dyn_scale_mult,
              image_error_map=args.image_error_map,
              image_error_gain=args.image_error_gain,
              image_views=(None if args.image_views.strip().lower() == "all"
