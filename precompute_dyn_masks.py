@@ -58,6 +58,7 @@ from src.model.encoder.vggt.utils.load_fn import load_and_preprocess_images
 from src.model.encoder.vggt.utils.pose_enc import pose_encoding_to_extri_intri
 from src.model.encoder.dyn_flow_mask import flow_residual_map
 from src.model.encoder.dyn_mask_post import complete_masks, motion_gate_masks
+from src.model.encoder.sam_complete import sam_complete_masks
 from src.model.encoder.vggt4d.masks import cluster_attention_maps
 
 
@@ -285,6 +286,32 @@ def main():
                          "the fittable chunk_size is smaller. Needs open3d for Stage 3.")
     ap.add_argument("--preprocess_mode", default="crop", choices=["crop", "pad"],
                     help="Original VGGT4D preprocessing. 'crop' = 518 wide, aspect-preserved (matches demo).")
+    ap.add_argument("--sam_complete", action="store_true",
+                    help="Complete the motion SEED into whole objects with SAM 2. THE fix for "
+                         "the recall/precision trade no threshold can resolve: measured on "
+                         "balloon, otsu1+cs512+glob gives arms only with NO furniture (dyn 0.039) "
+                         "while otsu2 gives the whole person AND the chairs (0.264), because a "
+                         "chair's attention score sits BETWEEN the arm and the torso. Morphology "
+                         "cannot bridge it (0.039 -> 0.044). PROMPT WITH OTSU 1: those seeds are "
+                         "precise and carry the motion evidence, so SAM grows arm -> person and is "
+                         "never prompted on a chair. Prompting otsu2 instead re-imports the "
+                         "furniture and completes THAT -- measured.")
+    ap.add_argument("--sam_model", default="facebook/sam2-hiera-base-plus",
+                    help="SAM 2 model id (hub) or config name when --sam_ckpt is given. SAM 2 and "
+                         "not SAM 3: 162 MB vs 3.45 GB and ~3.4x faster, and SAM 3's only extra is "
+                         "open-vocabulary TEXT prompting, which would segment a stationary person "
+                         "too and throw away the motion criterion this whole pipeline rests on.")
+    ap.add_argument("--sam_ckpt", default=None, help="Local SAM 2 checkpoint; omit to use the hub.")
+    ap.add_argument("--sam_points", type=int, default=3,
+                    help="Prompt points per seed component, spread along its principal axis so an "
+                         "elongated limb is prompted along its length, not 3x in one spot.")
+    ap.add_argument("--sam_min_seed_area", type=int, default=40,
+                    help="Ignore seed components smaller than this; too little evidence to grow from.")
+    ap.add_argument("--sam_max_growth", type=float, default=20.0,
+                    help="REJECT a completed mask more than this many times its seed's area, "
+                         "keeping the seed. The safety rail: completion is exactly the operation "
+                         "that turned a chair patch into a whole chair, so a runaway is caught by "
+                         "size before it reaches the mask.")
     ap.add_argument("--save_overlays", action="store_true", help="Also write red mask-on-RGB overlays.")
     ap.add_argument("--device", default="cuda")
     args = ap.parse_args()
@@ -519,6 +546,20 @@ def main():
         # masked parts get handled, unmasked parts stay and render from every
         # frame at once. Completing the shape first is what makes the mask
         # describe an OBJECT rather than the places motion was easiest to see.
+        # SAM completion runs BEFORE morphology and AFTER any motion gate, the same
+        # ordering commit 3ff0d87 established: gate first so nothing static is grown,
+        # then complete, then let morphology tidy what is left. It replaces what
+        # close/fill were reaching for -- an object prior instead of a disk.
+        if args.sam_complete:
+            _img = (images[0].detach().float().clamp(0, 1).cpu().numpy()
+                    .transpose(0, 2, 3, 1) * 255).astype(np.uint8)   # [V,H,W,3]
+            _m = sam_complete_masks(
+                _img, dyn_mask[0].numpy(), model_id=args.sam_model,
+                ckpt=args.sam_ckpt, device=str(device), n_points=args.sam_points,
+                min_seed_area=args.sam_min_seed_area,
+                max_growth=args.sam_max_growth)
+            dyn_mask = torch.from_numpy(_m).unsqueeze(0)
+
         if (args.mask_close or args.mask_fill or args.mask_min_area or args.mask_dilate):
             _m = complete_masks(dyn_mask[0].numpy(), close=args.mask_close,
                                 fill=args.mask_fill, min_area=args.mask_min_area,
@@ -557,6 +598,9 @@ def main():
         "mask_fill": args.mask_fill,
         "mask_min_area": args.mask_min_area,
         "mask_dilate": args.mask_dilate,
+        "sam_complete": args.sam_complete,
+        "sam_model": args.sam_model if args.sam_complete else None,
+        "sam_max_growth": args.sam_max_growth if args.sam_complete else None,
         "mask_n_clusters": args.mask_n_clusters,
         "preprocess_mode": args.preprocess_mode,
         "det_resolution": args.det_resolution,

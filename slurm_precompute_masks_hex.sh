@@ -50,6 +50,12 @@ CLOSE=${12:-0}; FILL=${13:-0}; MINAREA=${14:-0}; DILATE=${15:-0}
 GLOBAL=${16:-0}
 # Component-level motion gate: drop mask components that do not actually move.
 GATE=${17:-0}
+# SAM=1 completes the motion SEED into whole objects with SAM 2. Use it with
+# OTSU=1: those seeds are precise and furniture-free, and SAM grows arm -> person
+# without ever being prompted on a chair. With OTSU=2 the seed already contains
+# the furniture and SAM completes THAT -- measured, it grew a chair patch into a
+# whole chair.
+SAM=${18:-0}
                       # 1 = original (topmost class only -> a person's arm, not their torso).
                       # 2 = top two classes -> the whole object. THIS is the coverage knob;
                       # the aggregate is not, because the threshold adapts to the scores.
@@ -72,6 +78,7 @@ OUT_DIR="${OUT_ROOT}/output_dyn_masks_precomputed_cs${CHUNK_SIZE}_r${DET_RES}_st
 [ "${DILATE}" != "0" ] && OUT_DIR="${OUT_DIR}_d${DILATE}"
 [ "${GLOBAL}" != "0" ] && OUT_DIR="${OUT_DIR}_glob"
 [ "${GATE}" != "0" ] && OUT_DIR="${OUT_DIR}_mg$(echo ${GATE} | tr '.' 'p')"
+[ "${SAM}" != "0" ] && OUT_DIR="${OUT_DIR}_sam"
 
 mkdir -p "${REPO}/slurm_logs" "${OUT_ROOT}"
 cd "${REPO}"
@@ -131,6 +138,7 @@ python precompute_dyn_masks.py \
     --frame_stride "${STRIDE}" \
     --pass_margin "${MARGIN}" \
     --mask_normalize "${NORM}" \
+    $( [ "${SAM}" != "0" ] && echo --sam_complete ) \
     --mask_aggregate "${AGG}" \
     --mask_n_clusters "${NCLUST}" \
     --mask_method "${METHOD}" \
