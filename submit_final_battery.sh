@@ -87,8 +87,14 @@ for SEQ in ${SEQS}; do
   JID=""
   if [ "${N}" -lt "${NRGB}" ]; then
     [ "${N}" -gt 0 ] && echo "${SEQ}: INCOMPLETE masks (${N}/${NRGB}) -> regenerating"
+    # MUST match the recipe M2 points at, or the masks land in a different
+    # directory and the eval then refuses them. chunk 256 because 512 OOMs on the
+    # ~1000-frame box sequences; global_post still thresholds over the WHOLE
+    # sequence, so the part that mattered survives. Sequences short enough for one
+    # pass were built at 512 and are symlinked in -- meta.json in each sequence
+    # subdir records which, so provenance survives the shared parent name.
     JID=$(sbatch --parsable ${NAME} $(mkdep) slurm_precompute_masks_hex.sh \
-            "${SEQ}" 64 518 3 1 6 per_frame mean 64 attention 2)
+            "${SEQ}" 256 518 3 1 6 per_frame mean 64 attention 2 0 0 0 0 1 0)
     echo "${SEQ}: masks -> job ${JID}"
   else
     echo "${SEQ}: ${N}/${NRGB} masks already present"
