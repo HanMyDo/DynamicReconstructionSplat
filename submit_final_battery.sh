@@ -27,7 +27,17 @@
 # =============================================================================
 set -uo pipefail
 REPO="${HOME}/DynamicReconstructionSplat"; cd "${REPO}"
-M2="${HOME}/data/mask_out/output_dyn_masks_precomputed_cs64_r518_st3_fs1_m6_otsu2"
+# WHOLE-SEQUENCE detection (chunk 512 = one pass, one KMeans, one Otsu), which is
+# parity with demo_vggt4d.process_scene. The old cs64 masks were our chunking
+# deviation. Measured on balloon, 30 windows, same flags both sides:
+#   cs64  psnr 20.62 dyn 16.71 static 21.91 lpips_dyn 0.3731 dynfrac 0.141
+#   cs512 psnr 20.73 dyn 17.27 static 23.81 lpips_dyn 0.3260 dynfrac 0.290
+# Better on every metric at DOUBLE the mask fraction -- under-masking is the
+# expensive error, not over-masking. Static gains most (+1.90) because with the
+# person fully covered none of them ghosts into the static bucket, while a wrongly
+# masked chair only renders own-frame instead of V times: thinner, but in the right
+# place.
+M2="${HOME}/data/mask_out/output_dyn_masks_precomputed_cs512_r518_st3_fs1_m6_otsu2_glob"
 F="--track_dynamic --dyn_motion_knn 8 --dyn_motion_strict --dyn_motion_pred_bandwidth 1.5 --dyn_motion_tracker raft --dyn_motion_max_disp_mult 3.0 --dyn_opacity_comp 1.0"
 # ADOPTED Sep 2026 (probe on balloon, 30 windows, vs the same config without them):
 #   --dyn_opacity_comp 1.0   +0.87 psnr / +1.70 dyn / -0.027 lpips_dyn; rendered
