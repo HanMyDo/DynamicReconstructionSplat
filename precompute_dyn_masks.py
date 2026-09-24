@@ -316,6 +316,22 @@ def main():
     ap.add_argument("--device", default="cuda")
     args = ap.parse_args()
 
+    # FAIL FAST. sam2 is imported lazily inside sam_complete_masks, which runs at
+    # the very END of the pipeline -- so a missing dependency cost a full 52-minute
+    # detection pass before raising. Check it now, while the job is 2 seconds old.
+    if args.sam_complete:
+        try:
+            import sam2  # noqa: F401
+        except ImportError:
+            raise SystemExit(
+                "ERROR: --sam_complete needs the sam2 package, which is not importable "
+                "in this environment.\n"
+                "  conda activate dynrec && pip install 'git+https://github.com/"
+                "facebookresearch/sam2.git'\n"
+                "Install it into the env the JOB activates, not the login shell -- "
+                "detection runs for ~50 min before SAM is reached, so this would "
+                "otherwise fail at the end.")
+
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
     seq_dir = Path(args.data_dir) / args.dataset_name
     out_dir = Path(args.output_dir) / args.dataset_name
