@@ -239,7 +239,7 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
              image_save_every=1, batch_stride=1, images_only=False, image_views=None,
              ply_batch=None, ply_per_frame=False, ply_dyn_source=-1, ply_dyn_opacity=1.0,
              ply_own_frame_only=False, ply_max_scale_frac=0.011,
-             ply_dyn_scale_mult=1.0, ply_dyn_keep_frac=0.0, ply_dyn_min_disp=0.0, ply_single_frame=False,
+             ply_dyn_scale_mult=1.0, ply_dyn_keep_frac=0.0, ply_dyn_min_disp=0.0, ply_single_frame=False, ply_scale_mult=1.0,
              image_error_map=False, image_error_gain=4.0):
     os.makedirs(output_dir, exist_ok=True)
     images_dir = os.path.join(output_dir, "images")
@@ -887,6 +887,24 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
                           flush=True)
                 if _sm != 1.0:
                     _sc = torch.where((_cmask > 0.5).unsqueeze(-1), _sc * _sm, _sc)
+                if ply_scale_mult != 1.0:
+                    # SHARPNESS. The head's splats are about 3x wider than the pixel
+                    # footprint they came from -- measured on balloon nf6 672x896, a
+                    # median long axis of 0.00187 of the scene diagonal against a
+                    # per-copy coverage of 1.71 (footprint over true nearest-neighbour
+                    # spacing, queried against ALL points, not a subsample). That
+                    # surplus is what reads as a painterly smear rather than a
+                    # surface, and there is no heavy tail to cut instead: the oversize
+                    # ceiling already leaves nothing above 0.011, and the distribution
+                    # is smooth, so trimming the top 10% would remove only 19% of the
+                    # visible area and sharpen nothing.
+                    #
+                    # 0.6 puts per-copy coverage at ~1.0, exact tiling. The surface
+                    # stays sealed because own-frame-only still keeps V overlapping
+                    # copies of every STATIC gaussian, so total coverage is ~V x that.
+                    # Below ~0.5 holes should start showing; measure before going
+                    # there rather than trusting this note.
+                    _sc = _sc * ply_scale_mult
 
                 export_ply(
                     _sub(means_j, _k),
@@ -1245,6 +1263,15 @@ def main():
                              "The uncovered frames are treated as fully static, so their "
                              "moving object ghosts and lands in the static PSNR bucket -- "
                              "not comparable to a fully-covered run.")
+    parser.add_argument("--ply_scale_mult", type=float, default=1.0,
+                        help="PLY only: scale EVERY gaussian's radius, static and dynamic alike "
+                             "(--ply_dyn_scale_mult touches only the dynamic ones). The head's "
+                             "splats run about 3x wider than the pixel footprint they came from -- "
+                             "median long axis 0.00187 of the scene diagonal at nf6 672x896, "
+                             "per-copy coverage 1.71 -- and that surplus is what reads as a "
+                             "painterly smear instead of a surface. 0.6 gives coverage ~1.0, exact "
+                             "tiling, and own-frame-only still keeps V overlapping copies of each "
+                             "static gaussian so nothing opens up. Below ~0.5 expect holes.")
     parser.add_argument("--ply_single_frame", action="store_true",
                         help="Export the scene AT TIME j as one gaussian set: keep only frame j's "
                              "gaussians, static and dynamic alike, and compensate opacity and scale "
@@ -1487,6 +1514,7 @@ def main():
              ply_dyn_keep_frac=args.ply_dyn_keep_frac,
              ply_dyn_min_disp=args.ply_dyn_min_disp,
              ply_single_frame=args.ply_single_frame,
+             ply_scale_mult=args.ply_scale_mult,
              image_error_map=args.image_error_map,
              image_error_gain=args.image_error_gain,
              image_views=(None if args.image_views.strip().lower() == "all"
