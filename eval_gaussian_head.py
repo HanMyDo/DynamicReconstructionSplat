@@ -60,7 +60,7 @@ from train_temporal_gaussian_head import (
 from src.evaluation.metrics import compute_psnr, compute_ssim, compute_lpips
 from src.misc.image_io import save_interpolated_video, save_image
 from src.model.ply_export import export_ply
-from src.model.encoder.dyn_motion import compensate_dyn_opacity
+from src.model.encoder.dyn_motion import compensate_dyn_opacity, _q
 from src.model.encoder.dyn_mask_post import largest_dyn_clusters
 
 
@@ -239,7 +239,7 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
              image_save_every=1, batch_stride=1, images_only=False, image_views=None,
              ply_batch=None, ply_per_frame=False, ply_dyn_source=-1, ply_dyn_opacity=1.0,
              ply_own_frame_only=False, ply_max_scale_frac=0.011,
-             ply_dyn_scale_mult=1.0, ply_dyn_keep_frac=0.0,
+             ply_dyn_scale_mult=1.0, ply_dyn_keep_frac=0.0, ply_dyn_min_disp=0.0,
              image_error_map=False, image_error_gain=4.0):
     os.makedirs(output_dir, exist_ok=True)
     images_dir = os.path.join(output_dir, "images")
@@ -697,6 +697,64 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
             dyn_flat = (last_dyn_mask[0].cpu().numpy().reshape(-1).astype(np.float32)
                         if last_dyn_mask is not None else None)
             n_views = disp.shape[2]
+
+            # MOTION GATE FOR THE POINT CLOUD ONLY.
+            #
+            # The render and the PLY want OPPOSITE masks and this is where they
+            # part company. Measured: the whole-sequence masks flag 29% of the
+            # frame -- person, balloon, AND the chairs, desks and cabinet -- and
+            # that WINS on every render metric, because an unmasked mover ghosts
+            # across all V frames while a wrongly masked chair merely renders
+            # own-frame, thinner but in the right place.
+            #
+            # In the PLY that same chair is a disaster. own-frame-only strips its
+            # V-1 copies (a hole) and --dyn_opacity_comp boosts the survivor into
+            # one of the brightest splats in the file (a speck). At nf16 x 672x896
+            # that produced 2,688,387 "dynamic" gaussians of which the cluster
+            # filter could separate nothing -- 1442 components, the largest holding
+            # 97.5% of them, because at that density the link radius bridges person
+            # to floor to furniture into one blob.
+            #
+            # The fix is not a better mask. It is that the ATTENTION mask is the
+            # wrong question here: it asks "does this look like it could move",
+            # while the point cloud needs "did this actually move". We already
+            # compute the second one -- the flow displacement, with its own
+            # validity gate -- and the export used it only to MOVE gaussians, never
+            # to classify them. A gaussian the flow never validated and never
+            # displaced is, for this file, STATIC: it keeps all V copies and
+            # renders correctly, which is what a chair should do.
+            if ply_dyn_min_disp != 0.0:
+                _dm = disp[0].to(dev).float().norm(dim=-1)              # [N, V]
+                if dvalid is not None:
+                    _dm = _dm * (dvalid[0].to(dev) > 0).float()
+                _dmax = _dm.max(dim=-1).values                          # [N]
+                _was = int((dyn_v > 0.5).sum())
+                if ply_dyn_min_disp < 0:
+                    # AUTO: any validated, non-zero displacement counts. No
+                    # threshold to tune -- the flow's own validity gate is the
+                    # criterion, and furniture fails it by construction.
+                    _keepd = _dmax > 0
+                    _how = "auto (any validated displacement)"
+                else:
+                    # Scene-relative so it does not depend on the reconstruction's
+                    # arbitrary scale. Subsampled quantiles: means is N x 3 and N is
+                    # millions, which is past torch.quantile's cap.
+                    _mu = means.detach().float()
+                    _sub_mu = _mu[:: max(_mu.shape[0] // 100000, 1)]
+                    _diag = float((_sub_mu.quantile(0.99, dim=0)
+                                   - _sub_mu.quantile(0.01, dim=0)).norm())
+                    _thr = ply_dyn_min_disp * _diag
+                    _keepd = _dmax > _thr
+                    _how = f"> {ply_dyn_min_disp:g} x scene diag ({_thr:.4f} world)"
+                dyn_v = dyn_v * _keepd.to(dyn_v.dtype)
+                _nz = _dmax[_dmax > 0]
+                _pct = (" | displacement of the movers: median "
+                        f"{float(_nz.median()):.4f} p90 {float(_q(_nz, 0.9)):.4f}"
+                        ) if _nz.numel() else ""
+                print(f"[ply] motion gate {_how}: {_was} -> {int((dyn_v > 0.5).sum())} "
+                      f"dynamic gaussians; the rest are exported as STATIC (all V "
+                      f"copies, no opacity/scale compensation){_pct}", flush=True)
+
             print(f"Saving {n_views} per-timestamp PLYs (4D export)...")
             for j in range(n_views):
                 # own-frame Gaussians are already at their correct place for j
@@ -1131,6 +1189,19 @@ def main():
                              "The uncovered frames are treated as fully static, so their "
                              "moving object ghosts and lands in the static PSNR bucket -- "
                              "not comparable to a fully-covered run.")
+    parser.add_argument("--ply_dyn_min_disp", type=float, default=0.0,
+                        help="PLY only: require a gaussian to have actually MOVED before "
+                             "treating it as dynamic. -1 = AUTO (any validated, non-zero flow "
+                             "displacement); a positive value is a fraction of the scene diagonal. "
+                             "The render and the PLY want opposite masks: coverage wins every "
+                             "render metric (a wrongly masked chair just renders thinner, in the "
+                             "right place) but ruins the point cloud (own-frame-only strips its "
+                             "V-1 copies and opacity compensation turns the survivor into a bright "
+                             "speck). Measured at nf16 672x896: 2,688,387 'dynamic' gaussians, one "
+                             "component holding 97.5%% of them, nothing for --ply_dyn_keep_frac to "
+                             "separate. The attention mask asks 'could this move'; this asks 'did "
+                             "it', which is the right question for a point cloud. START HERE before "
+                             "reaching for --ply_dyn_keep_frac.")
     parser.add_argument("--ply_dyn_keep_frac", type=float, default=0.0,
                         help="PLY only: keep dynamic Gaussians only where they form a 3D "
                              "cluster at least this fraction of the largest one (0 = off, "
@@ -1344,6 +1415,7 @@ def main():
              ply_max_scale_frac=args.ply_max_scale_frac,
              ply_dyn_scale_mult=args.ply_dyn_scale_mult,
              ply_dyn_keep_frac=args.ply_dyn_keep_frac,
+             ply_dyn_min_disp=args.ply_dyn_min_disp,
              image_error_map=args.image_error_map,
              image_error_gain=args.image_error_gain,
              image_views=(None if args.image_views.strip().lower() == "all"
