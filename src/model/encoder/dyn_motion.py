@@ -348,7 +348,7 @@ def compute_dyn_group_motion(
         print(f"[DynMotion] assigned {n_assigned}/{n_dyn_px} dynamic px "
               f"({100.0 * n_assigned / max(n_dyn_px, 1):.1f}%) | displacement "
               f"median={m.median().item():.4f} mean={m.mean().item():.4f} "
-              f"p90={m.quantile(0.9).item():.4f} (world units)")
+              f"p90={_q(m, 0.9):.4f} (world units)")
     else:
         print(f"[DynMotion] assigned {n_assigned}/{n_dyn_px} dynamic px — NO usable motion")
     # -----------------------------------------------------------------------------
@@ -654,9 +654,9 @@ def collect_dyn_tracks(
             traj, in_b = _lift_tracks_nearest(pts_all[b], tracks)   # [V,Nq,3], [V,Nq]
             _d3d = (traj - traj[qf:qf + 1]).norm(dim=-1).max(0).values       # [Nq]
             print(f"[DynTracks] qf={qf} n={tracks.shape[1]} | 2D travel median="
-                  f"{_d2d.median().item():.1f}px p90={_d2d.quantile(0.9).item():.1f}px "
+                  f"{_d2d.median().item():.1f}px p90={_q(_d2d, 0.9):.1f}px "
                   f"| 3D travel median={_d3d.median().item():.4f} "
-                  f"p90={_d3d.quantile(0.9).item():.4f} world", flush=True)
+                  f"p90={_q(_d3d, 0.9):.4f} world", flush=True)
             ok = in_b
             if vis is not None:
                 ok = ok & (vis > 0.5)
@@ -854,6 +854,24 @@ def drop_static_tracks(traj: torch.Tensor, ok: torch.Tensor,
 
 
 @torch.no_grad()
+def _q(t: torch.Tensor, q: float) -> float:
+    """Quantile that survives a large tensor.
+
+    torch.quantile caps its input at ~16M elements and RAISES past it, which at
+    nf16 x 672x896 (9.6M gaussians, and more once a per-pair tensor is built)
+    killed a whole export from inside a PRINT statement -- the displacement had
+    already been computed correctly. Subsample to a bounded size first: a p90 read
+    off 1M random values is identical to four decimal places, and no diagnostic is
+    worth failing a 30-minute run over.
+    """
+    if t.numel() == 0:
+        return 0.0
+    if t.numel() > 1_000_000:
+        idx = torch.randint(0, t.numel(), (1_000_000,), device=t.device)
+        t = t.flatten()[idx]
+    return float(t.quantile(q))
+
+
 def knn_flow_displacement(
     traj: torch.Tensor,
     ok: torch.Tensor,
@@ -997,8 +1015,8 @@ def knn_flow_displacement(
             print(f"[DynFlow{'/strict' if strict else ''}] moved {100.0 * float(cover):.1f}% of dynamic "
                   f"(gaussian, target) pairs | displacement "
                   f"median={mags.median().item():.4f} mean={mags.mean().item():.4f} "
-                  f"p90={mags.quantile(0.9).item():.4f} "
-                  f"p99={mags.quantile(0.99).item():.4f} max={mags.max().item():.4f} "
+                  f"p90={_q(mags, 0.9):.4f} "
+                  f"p99={_q(mags, 0.99):.4f} max={mags.max().item():.4f} "
                   f"(world units)")
         else:
             print("[DynFlow] NO usable displacement (gates removed everything)")
@@ -1018,7 +1036,7 @@ def knn_flow_displacement(
             radius_rejected_frac=(_gate_radius / _gate_tot) if _gate_tot else None,
             vis_rejected_frac=(_gate_vis / _gate_tot) if _gate_tot else None,
             disp_median=(float(mags.median()) if mags.numel() else 0.0),
-            disp_p99=(float(mags.quantile(0.99)) if mags.numel() else 0.0),
+            disp_p99=_q(mags, 0.99),
             n_dyn=n_dyn,
         )
     return disp, valid
