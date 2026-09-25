@@ -239,7 +239,7 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
              image_save_every=1, batch_stride=1, images_only=False, image_views=None,
              ply_batch=None, ply_per_frame=False, ply_dyn_source=-1, ply_dyn_opacity=1.0,
              ply_own_frame_only=False, ply_max_scale_frac=0.011,
-             ply_dyn_scale_mult=1.0, ply_dyn_keep_frac=0.0, ply_dyn_min_disp=0.0,
+             ply_dyn_scale_mult=1.0, ply_dyn_keep_frac=0.0, ply_dyn_min_disp=0.0, ply_single_frame=False,
              image_error_map=False, image_error_gain=4.0):
     os.makedirs(output_dir, exist_ok=True)
     images_dir = os.path.join(output_dir, "images")
@@ -768,7 +768,28 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
                 # Without this the 4D file still shows the copies the render removed,
                 # so the point cloud disagrees with the picture it is supposed to show.
                 _k = _ply_keep(means.shape[0], dev)
-                if ply_own_frame_only:
+                if ply_single_frame:
+                    # THE SCENE AT TIME j, as one gaussian set -- which is what a
+                    # per-timestamp PLY should mean. --ply_own_frame_only does this
+                    # for the moving object but keeps ALL V copies of the static
+                    # scene, and that is what makes the file unviewable: measured at
+                    # nf16 672x896, 6,882,392 gaussians at median opacity 0.030.
+                    # Every static surface carries 16 overlapping splats at ~3% alpha
+                    # each, which composite to something solid ONLY in a viewer doing
+                    # correct alpha accumulation over millions of splats from near the
+                    # original camera. From any other angle, or in a viewer that caps
+                    # splat count, it is haze. A_hi_final looks better for exactly this
+                    # reason and no other -- it is nf6, so half the copies at double
+                    # the per-splat opacity.
+                    #
+                    # Keeping frame j alone gives N/V gaussians, and the compensations
+                    # below then run over ALL of them rather than the dynamic subset,
+                    # so one splat carries the alpha and the footprint of the V it
+                    # replaces. Cost: coverage drops to what camera j saw. On Bonn the
+                    # camera moves slowly enough that this is nearly the whole scene.
+                    _sf = (fid_v == j)
+                    _k = _sf if _k is None else (_k & _sf)
+                elif ply_own_frame_only:
                     # ONE copy of the moving object, as observed at j. The relocated
                     # copies are each individually plausible but carry displacement
                     # error, so ~9 of them stacked spread into a diffuse shell rather
@@ -816,9 +837,13 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
                 # two artefacts agree by construction.
                 _op = last_gaussians.opacities[0]
                 _oc = getattr(config, "dyn_opacity_comp", 0.0)
+                # Under --ply_single_frame EVERY surviving gaussian stands in for V,
+                # not just the dynamic ones, so the compensation applies to all of
+                # them. Otherwise only the moving object lost copies.
+                _cmask = torch.ones_like(dyn_v) if ply_single_frame else dyn_v
                 if _oc > 0.0 and _k is not None:
                     _op = compensate_dyn_opacity(
-                        _op, dyn_v, _k.to(_op.dtype), n_views, _oc)
+                        _op, _cmask, _k.to(_op.dtype), n_views, _oc)
 
                 # COVERAGE companion to the opacity compensation above. That one
                 # made each surviving dynamic Gaussian as OPAQUE as the V it stands
@@ -841,7 +866,7 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
                     _sm = float(n_views) ** 0.5
                     print(f"[ply] dyn scale x{_sm:.2f} = sqrt(V={n_views}) (auto)", flush=True)
                 if _sm != 1.0:
-                    _sc = torch.where((dyn_v > 0.5).unsqueeze(-1), _sc * _sm, _sc)
+                    _sc = torch.where((_cmask > 0.5).unsqueeze(-1), _sc * _sm, _sc)
 
                 export_ply(
                     _sub(means_j, _k),
@@ -1200,6 +1225,17 @@ def main():
                              "The uncovered frames are treated as fully static, so their "
                              "moving object ghosts and lands in the static PSNR bucket -- "
                              "not comparable to a fully-covered run.")
+    parser.add_argument("--ply_single_frame", action="store_true",
+                        help="Export the scene AT TIME j as one gaussian set: keep only frame j's "
+                             "gaussians, static and dynamic alike, and compensate opacity and scale "
+                             "for all of them. --ply_own_frame_only does this for the moving object "
+                             "but keeps all V copies of the static scene, which is what makes the "
+                             "file unviewable -- measured at nf16 672x896, 6,882,392 gaussians at "
+                             "median opacity 0.030, i.e. 16 overlapping splats per surface at ~3%% "
+                             "alpha. That composites correctly only in a viewer doing full alpha "
+                             "accumulation from near the original camera; anywhere else it is haze. "
+                             "This gives N/V gaussians each carrying the alpha and footprint of the "
+                             "V it replaces. Cost: coverage limited to what camera j saw.")
     parser.add_argument("--ply_dyn_min_disp", type=float, default=0.0,
                         help="PLY only: require a gaussian to have actually MOVED before "
                              "treating it as dynamic. -1 = AUTO (any validated, non-zero flow "
@@ -1427,6 +1463,7 @@ def main():
              ply_dyn_scale_mult=args.ply_dyn_scale_mult,
              ply_dyn_keep_frac=args.ply_dyn_keep_frac,
              ply_dyn_min_disp=args.ply_dyn_min_disp,
+             ply_single_frame=args.ply_single_frame,
              image_error_map=args.image_error_map,
              image_error_gain=args.image_error_gain,
              image_views=(None if args.image_views.strip().lower() == "all"
