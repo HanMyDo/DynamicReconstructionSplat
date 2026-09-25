@@ -856,15 +856,35 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
                 _sc = last_gaussians.scales[0]
                 _sm = ply_dyn_scale_mult
                 if _sm < 0:
-                    # AUTO = sqrt(V), the coverage analogue of the opacity fix: at
-                    # 1/V the density a splat needs sqrt(V) more RADIUS to tile the
-                    # same surface, exactly as it needs 1-(1-o)^V more alpha to be
-                    # as opaque. Measured on balloon nf6: the person's splats cover
-                    # 0.41 of their neighbour spacing, so the multiplier needed for
-                    # coverage 1.0 is 1/0.41 = 2.44, against sqrt(6) = 2.45. The
-                    # argument predicts the measurement, so this is derived, not tuned.
-                    _sm = float(n_views) ** 0.5
-                    print(f"[ply] dyn scale x{_sm:.2f} = sqrt(V={n_views}) (auto)", flush=True)
+                    # AUTO = sqrt(V). ** RETRACTED -- DO NOT USE. **
+                    #
+                    # The argument was: at 1/V the density a splat needs sqrt(V) more
+                    # RADIUS to tile, as it needs 1-(1-o)^V more alpha to be as
+                    # opaque. It was "confirmed" by a measured coverage of 0.41,
+                    # whose reciprocal 2.44 matched sqrt(6)=2.45 to 0.4%.
+                    #
+                    # That measurement was wrong. It computed nearest neighbours
+                    # WITHIN a 3000-point sample of 36,335 points, which inflates
+                    # spacing by ~sqrt(N/n) = 3.5x. Against all points the native
+                    # splats already tile: a single frame measures nn 0.00128 vs
+                    # footprint 0.0022, coverage 1.7 -- mild overlap, which is what
+                    # splatting wants. Multiplying by 4 took it to 6.84 and produced
+                    # the blobs it was meant to prevent.
+                    #
+                    # The premise was also wrong. sqrt(V) assumes the V copies are
+                    # spatially INTERLEAVED so dropping them leaves gaps. With a
+                    # slowly moving camera they are near-DUPLICATES at sub-pixel
+                    # offsets -- the full file's nn (0.00111) is SMALLER than one
+                    # frame's (0.00128) despite 10x the points, because it is
+                    # measuring copy-to-copy distance. Dropping duplicates costs
+                    # ALPHA, not coverage. Hence: compensate opacity, leave scale at
+                    # 1.0, which is the default.
+                    _sm = 1.0
+                    print("[ply] --ply_dyn_scale_mult -1 (sqrt(V)) is RETRACTED: the "
+                          "coverage measurement behind it sampled nearest neighbours "
+                          "within a subsample and inflated spacing ~3.5x. Native splats "
+                          "already tile (coverage ~1.7 in one frame). Using 1.0.",
+                          flush=True)
                 if _sm != 1.0:
                     _sc = torch.where((_cmask > 0.5).unsqueeze(-1), _sc * _sm, _sc)
 
@@ -1283,8 +1303,11 @@ def main():
                              "separate into blobs. 1.0 = off. 1.5-2.0 closes the gaps; 4.0 "
                              "(=sqrt(16)) is the full density argument and looks chunky "
                              "against the background. This CHANGES THE MODEL -- say so if a "
-                             "figure uses it. -1 = AUTO = sqrt(V), which measurement "
-                             "agrees with to 0.4%% -- prefer it to a hand-picked value.")
+                             "figure uses it. -1 is RETRACTED (it meant sqrt(V), justified by a "
+                             "coverage measurement that sampled nearest neighbours within a "
+                             "SUBSAMPLE and inflated spacing ~3.5x; measured against all points "
+                             "the native splats already tile at coverage ~1.7 in a single frame). "
+                             "Leave at 1.0 unless a measurement on YOUR export says otherwise.")
     parser.add_argument("--ply_max_scale_frac", type=float, default=0.011,
                         help="PLY only: drop Gaussians whose largest axis exceeds this "
                              "fraction of the scene's p1-p99 diagonal. 0 disables. A tiny "
