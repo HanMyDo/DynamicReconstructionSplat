@@ -783,13 +783,24 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
                     _ok = ((dyn_v <= 0.5) | (fid_v == j)
                            | (dvalid[0, :, j].to(dev) > 0))
                     _k = _ok if _k is None else (_k & _ok)
-                # Drop scattered dynamic false positives BEFORE the keep set is
-                # applied, so the two filters compose instead of fighting.
+                # Cluster over what this file WILL CONTAIN, not over every copy.
+                # This used to pass the raw dynamic flag, i.e. all V frames' dynamic
+                # gaussians at once -- but --ply_own_frame_only writes only frame j's.
+                # Sixteen overlapping copies of the same moving object occupy the
+                # same space, so the link radius bridged them into ONE component and
+                # the filter became a no-op: measured at nf16 672x896, 1442
+                # components with the largest holding 97.5% of 2.69M gaussians.
+                # Restricting to the keep set first leaves ~1/V as many points, which
+                # is what the filter was designed to separate.
                 if ply_dyn_keep_frac > 0:
+                    _dynk = (dyn_v > 0.5) if _k is None else ((dyn_v > 0.5) & _k)
                     _cl = torch.from_numpy(largest_dyn_clusters(
                         means_j.detach().cpu().numpy(),
-                        (dyn_v > 0.5).detach().cpu().numpy(),
+                        _dynk.detach().cpu().numpy(),
                         ply_dyn_keep_frac)).to(dev)
+                    # keep every static gaussian; drop only dynamic ones the filter
+                    # rejected, so the scene around the object stays intact.
+                    _cl = _cl | (dyn_v <= 0.5)
                     _k = _cl if _k is None else (_k & _cl)
                 _df = dyn_flat[_k.cpu().numpy()] if (_k is not None and dyn_flat is not None) else dyn_flat
 
