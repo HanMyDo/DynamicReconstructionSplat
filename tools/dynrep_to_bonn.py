@@ -41,19 +41,39 @@ def main():
     os.makedirs(rgb_dir, exist_ok=True)
     os.makedirs(msk_dir, exist_ok=True)
 
-    n_m = 0
+    n_m, bad = 0, []
     for i, f in enumerate(frames):
         stem = os.path.basename(f).rsplit(".", 1)[0]          # 00001-left
+        dst = os.path.join(rgb_dir, f"{i:06d}.png")
         # PNG because the completeness guards count rgb/*.png, and a mask set that
         # is one frame short makes eval fall back to LIVE detection for the rest --
         # a silently different protocol rather than an error.
-        Image.open(f).convert("RGB").save(os.path.join(rgb_dir, f"{i:06d}.png"))
+        try:
+            Image.open(f).convert("RGB").save(dst)
+            # VERIFY. A truncated write here does not fail now, it fails an hour
+            # later inside the mask job with "image file is truncated" and no clue
+            # which frame. Decoding it back costs milliseconds and names the file.
+            with Image.open(dst) as chk:
+                chk.load()
+        except Exception as e:
+            bad.append((os.path.basename(f), type(e).__name__, str(e)[:60]))
+            if os.path.exists(dst):
+                os.remove(dst)
+            continue
         src_m = os.path.join(base, "masks", f"{stem}.png")
         if os.path.exists(src_m):
             shutil.copyfile(src_m, os.path.join(msk_dir, f"{i:06d}.png"))
             n_m += 1
 
-    print(f"{name}: {len(frames)} frames -> {rgb_dir}")
+    if bad:
+        print(f"SKIPPED {len(bad)} unreadable source frames:")
+        for b in bad[:10]:
+            print(f"   {b[0]}  {b[1]}: {b[2]}")
+        print("Frames are renumbered contiguously, so the sequence stays usable -- "
+              "but it now has a time gap where those frames were.")
+
+    n_ok = len(glob.glob(os.path.join(rgb_dir, "*.png")))
+    print(f"{name}: {n_ok} frames written (of {len(frames)} found) -> {rgb_dir}")
     print(f"{'':>{len(name)}}  {n_m} GT masks -> {msk_dir}")
     if n_m and n_m != len(frames):
         print(f"WARNING: {len(frames) - n_m} frames have no GT mask")
