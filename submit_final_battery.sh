@@ -37,7 +37,10 @@ REPO="${HOME}/DynamicReconstructionSplat"; cd "${REPO}"
 # person fully covered none of them ghosts into the static bucket, while a wrongly
 # masked chair only renders own-frame instead of V times: thinner, but in the right
 # place.
-M2="${HOME}/data/mask_out/output_dyn_masks_precomputed_cs512_r518_st3_fs1_m6_otsu2_glob"
+# Overridable so a mask variant can be evaluated through the same two-arm harness
+# without editing the adopted default, e.g.
+#   M2=~/data/mask_out/..._glob_prop5 ./submit_final_battery.sh <seq>
+M2="${M2:-${HOME}/data/mask_out/output_dyn_masks_precomputed_cs512_r518_st3_fs1_m6_otsu2_glob}"
 F="--track_dynamic --dyn_motion_knn 8 --dyn_motion_strict --dyn_motion_pred_bandwidth 1.5 --dyn_motion_tracker raft --dyn_motion_max_disp_mult 3.0 --dyn_opacity_comp 1.0"
 # ADOPTED Sep 2026 (probe on balloon, 30 windows, vs the same config without them):
 #   --dyn_opacity_comp 1.0   +0.87 psnr / +1.70 dyn / -0.027 lpips_dyn; rendered
