@@ -62,6 +62,13 @@ export EVAL_DATE="${EVAL_DATE:-final}"
 # everything. Combined with afterok via a comma, which slurm ANDs.
 SERIAL="${SERIAL:-0}"
 NAME=""
+# GRES lets a caller widen the GPU request, e.g. GRES="--gres=gpu:2". Both
+# slurm_eval_hex.sh and slurm_precompute_masks_hex.sh ask for one card and then
+# refuse to start under 12 GB free. When a process outside Slurm is holding a
+# card -- Slurm reports the node idle and schedules onto it anyway -- asking for
+# two lets their "pick the freest visible GPU" step route around the blocked one.
+# Empty by default, so nothing changes once the node is clean.
+GRES="${GRES:-}"
 [ "${SERIAL}" = "1" ] && NAME="--job-name=chain"
 mkdep () {   # $1 = job id to wait for, or empty
   local d=""
@@ -93,16 +100,16 @@ for SEQ in ${SEQS}; do
     # sequence, so the part that mattered survives. Sequences short enough for one
     # pass were built at 512 and are symlinked in -- meta.json in each sequence
     # subdir records which, so provenance survives the shared parent name.
-    JID=$(sbatch --parsable ${NAME} $(mkdep) slurm_precompute_masks_hex.sh \
+    JID=$(sbatch --parsable ${NAME} ${GRES} $(mkdep) slurm_precompute_masks_hex.sh \
             "${SEQ}" 256 518 3 1 6 per_frame mean 64 attention 2 0 0 0 0 1 0)
     echo "${SEQ}: masks -> job ${JID}"
   else
     echo "${SEQ}: ${N}/${NRGB} masks already present"
   fi
 
-  A=$(sbatch --parsable ${NAME} $(mkdep "${JID}") slurm_eval_hex.sh baseline \
+  A=$(sbatch --parsable ${NAME} ${GRES} $(mkdep "${JID}") slurm_eval_hex.sh baseline \
         "--no_vggt4d --frame_stride 4 --dyn_mask_dir ${M2} ${BG} ${VID}" "${SEQ}" 16)
-  B=$(sbatch --parsable ${NAME} $(mkdep "${JID}") slurm_eval_hex.sh baseline \
+  B=$(sbatch --parsable ${NAME} ${GRES} $(mkdep "${JID}") slurm_eval_hex.sh baseline \
         "--frame_stride 4 --dyn_mask_dir ${M2} --per_frame_dynamic ${F} ${BG} ${VID} ${PLY}" "${SEQ}" 16)
   echo "${SEQ}: vanilla -> job ${A} | ours -> job ${B}"
 done
