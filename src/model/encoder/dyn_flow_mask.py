@@ -71,6 +71,90 @@ def raft_flow(model, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     return flow[:, :H, :W].permute(1, 2, 0)         # [H, W, 2]
 
 
+def _warp_mask(src: torch.Tensor, flow: torch.Tensor) -> torch.Tensor:
+    """Sample `src` [H,W] at p + flow[p]. `flow` must map THIS frame -> src's frame.
+
+    A gather, not a scatter: computing the backward flow and sampling is exact,
+    whereas pushing pixels forward leaves holes wherever the source expands.
+    NEAREST because a mask is labels -- bilinear would invent half-dynamic pixels
+    along every silhouette, which is where precision is decided.
+    """
+    H, W = src.shape
+    yy, xx = torch.meshgrid(torch.arange(H, device=src.device, dtype=src.dtype),
+                            torch.arange(W, device=src.device, dtype=src.dtype),
+                            indexing="ij")
+    x = xx + flow[..., 0]
+    y = yy + flow[..., 1]
+    grid = torch.stack([2.0 * x / max(W - 1, 1) - 1.0,
+                        2.0 * y / max(H - 1, 1) - 1.0], dim=-1).unsqueeze(0)
+    out = F.grid_sample(src[None, None], grid, mode="nearest",
+                        padding_mode="zeros", align_corners=True)
+    return out[0, 0]
+
+
+@torch.no_grad()
+def propagate_masks(masks: torch.Tensor, images: torch.Tensor,
+                    max_carry: int = 5) -> torch.Tensor:
+    """Carry a confident detection through frames where the detector loses it.
+
+    WHY. The attention score is not stationary over a long sequence, and
+    thresholding it fails either way round. Measured on Dynamic Replica 0cde48,
+    300 frames, against ground truth: recall holds at 0.98 for 120 frames then
+    collapses to 0.08 -- while the object KEEPS MOVING (GT travel 2.51 px/frame in
+    frames 0-29 vs 2.73 in 180-209, near identical, recall 0.978 vs 0.119). One
+    global threshold cannot adapt; per-chunk thresholds adapt to an arbitrary
+    boundary instead of to content and were catastrophic either side of it (0.119
+    -> 0.014). Both are the wrong tool for a drifting score.
+
+    So stop re-deciding every frame independently. A region confidently detected
+    at t is still the same object at t+1, and RAFT already tells us where it went.
+
+    BOUNDED by max_carry: a region may be carried at most that many consecutive
+    frames without being re-detected. Unbounded propagation would smear the object
+    along its whole path -- here it travels 1087 px -- turning a recall fix into a
+    precision disaster. The carry count travels WITH the pixels, so it measures
+    frames-since-evidence for that piece of object, not for that screen position.
+
+    Runs in both directions and unions: forward repairs a detection that fades,
+    backward repairs one that starts late. Neither alone covers both.
+
+    masks [V,H,W] in {0,1}; images [V,3,H,W] in [0,1]. -> [V,H,W] float {0,1}
+    """
+    V, _, H, W = images.shape
+    if V < 2 or max_carry <= 0:
+        return masks
+    dev = images.device
+    model = _raft(dev)
+    imgs = images.float().clamp(0, 1) * 2.0 - 1.0            # RAFT wants [-1,1]
+    det = (masks > 0.5).float()
+
+    def sweep(order):
+        out = det.clone()
+        carry = torch.zeros(H, W, device=dev)                # frames since evidence
+        prev_i = order[0]
+        for t in order[1:]:
+            # flow from THIS frame back to the previous one in sweep order, so the
+            # warp is a gather (see _warp_mask).
+            flow = raft_flow(model, imgs[t:t + 1], imgs[prev_i:prev_i + 1])
+            warped = _warp_mask(out[prev_i], flow)
+            carry = _warp_mask(carry, flow)
+            d = det[t] > 0.5
+            fresh = warped > 0.5
+            carry = torch.where(d, torch.zeros_like(carry), carry + 1.0)
+            keep = fresh & (carry <= max_carry) & (~d)
+            out[t] = torch.where(d | keep, torch.ones_like(out[t]), torch.zeros_like(out[t]))
+            prev_i = t
+        return out
+
+    fwd = sweep(list(range(V)))
+    bwd = sweep(list(range(V - 1, -1, -1)))
+    out = torch.maximum(fwd, bwd)
+    before, after = float(det.mean()), float(out.mean())
+    print(f"[MaskProp] dynamic pixels {100 * before:.1f}% -> {100 * after:.1f}% "
+          f"(max_carry={max_carry}, both directions)", flush=True)
+    return out
+
+
 def _pixel_grid(H: int, W: int, device) -> torch.Tensor:
     """[H, W, 2] of (u, v) pixel centres."""
     v, u = torch.meshgrid(torch.arange(H, device=device, dtype=torch.float32),

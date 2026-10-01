@@ -56,6 +56,10 @@ GATE=${17:-0}
 # the furniture and SAM completes THAT -- measured, it grew a chair patch into a
 # whole chair.
 SAM=${18:-0}
+# PROP>0 carries a confident detection through frames where the detector loses it,
+# warping the previous mask with RAFT. The value is the max frames a region may be
+# carried without re-detection. See --mask_propagate for the measurement.
+PROP=${19:-0}
                       # 1 = original (topmost class only -> a person's arm, not their torso).
                       # 2 = top two classes -> the whole object. THIS is the coverage knob;
                       # the aggregate is not, because the threshold adapts to the scores.
@@ -79,6 +83,7 @@ OUT_DIR="${OUT_ROOT}/output_dyn_masks_precomputed_cs${CHUNK_SIZE}_r${DET_RES}_st
 [ "${GLOBAL}" != "0" ] && OUT_DIR="${OUT_DIR}_glob"
 [ "${GATE}" != "0" ] && OUT_DIR="${OUT_DIR}_mg$(echo ${GATE} | tr '.' 'p')"
 [ "${SAM}" != "0" ] && OUT_DIR="${OUT_DIR}_sam"
+[ "${PROP}" != "0" ] && OUT_DIR="${OUT_DIR}_prop${PROP}"
 
 mkdir -p "${REPO}/slurm_logs" "${OUT_ROOT}"
 cd "${REPO}"
@@ -139,6 +144,7 @@ python precompute_dyn_masks.py \
     --pass_margin "${MARGIN}" \
     --mask_normalize "${NORM}" \
     $( [ "${SAM}" != "0" ] && echo --sam_complete ) \
+    --mask_propagate "${PROP}" \
     --mask_aggregate "${AGG}" \
     --mask_n_clusters "${NCLUST}" \
     --mask_method "${METHOD}" \

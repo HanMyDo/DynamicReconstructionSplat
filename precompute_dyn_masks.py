@@ -56,7 +56,7 @@ from src.model.encoder.anysplat import _AMP_DTYPE
 from src.model.encoder.vggt4d.masks.dynamic_mask import adaptive_multiotsu_variance
 from src.model.encoder.vggt.utils.load_fn import load_and_preprocess_images
 from src.model.encoder.vggt.utils.pose_enc import pose_encoding_to_extri_intri
-from src.model.encoder.dyn_flow_mask import flow_residual_map
+from src.model.encoder.dyn_flow_mask import flow_residual_map, propagate_masks
 from src.model.encoder.dyn_mask_post import complete_masks, motion_gate_masks
 from src.model.encoder.sam_complete import sam_complete_masks
 from src.model.encoder.vggt4d.masks import cluster_attention_maps
@@ -312,6 +312,19 @@ def main():
                          "keeping the seed. The safety rail: completion is exactly the operation "
                          "that turned a chair patch into a whole chair, so a runaway is caught by "
                          "size before it reaches the mask.")
+    ap.add_argument("--mask_propagate", type=int, default=0,
+                    help="Carry a confident detection through frames where the detector loses "
+                         "it, warping the previous mask with RAFT. 0 = off; the value is the "
+                         "MAX number of consecutive frames a region may be carried without "
+                         "being re-detected. Measured motivation (Dynamic Replica 0cde48, 300 "
+                         "frames, vs ground truth): recall holds at 0.98 for 120 frames then "
+                         "collapses to 0.08 WHILE THE OBJECT KEEPS MOVING -- GT travel is 2.51 "
+                         "px/frame in frames 0-29 against 2.73 in 180-209, yet recall is 0.978 "
+                         "vs 0.119. One global threshold cannot adapt to a drifting score and "
+                         "per-chunk thresholds adapt to an arbitrary boundary (0.119 -> 0.014 "
+                         "across it), so neither thresholding scheme is the fix. Try 5; raise it "
+                         "if recall still fades, lower it if precision drops, and score against "
+                         "GT with tools/score_masks_vs_gt.py rather than guessing.")
     ap.add_argument("--save_overlays", action="store_true", help="Also write red mask-on-RGB overlays.")
     ap.add_argument("--device", default="cuda")
     args = ap.parse_args()
@@ -543,6 +556,14 @@ def main():
         # the same bug showing up two ways. On the raw detection those are separate
         # components, so the static ones can be removed and completion afterwards
         # grows only what survived.
+        # PROPAGATION runs FIRST, because it repairs the DETECTION: everything
+        # after it (gate, SAM, morphology) operates on what the detector found, so
+        # a frame where the detector lost the object is a frame they all inherit.
+        if args.mask_propagate > 0:
+            _m = propagate_masks(dyn_mask[0].to(device), images[0],
+                                 max_carry=args.mask_propagate)
+            dyn_mask = _m.detach().cpu().unsqueeze(0)
+
         if args.mask_motion_gate > 0:
             if args.stages < 3:
                 print("[MotionGate] needs --stages 3 (Stage-1 depth + Stage-2 poses); skipping")
@@ -614,6 +635,7 @@ def main():
         "mask_fill": args.mask_fill,
         "mask_min_area": args.mask_min_area,
         "mask_dilate": args.mask_dilate,
+        "mask_propagate": args.mask_propagate,
         "sam_complete": args.sam_complete,
         "sam_model": args.sam_model if args.sam_complete else None,
         "sam_max_growth": args.sam_max_growth if args.sam_complete else None,
