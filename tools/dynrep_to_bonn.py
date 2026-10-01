@@ -14,7 +14,7 @@ The GT foreground masks come along into a sibling gt_masks/ directory. They are
 not used by the pipeline -- they are there so the predicted dynamic masks can be
 scored against truth, which is the thing Bonn cannot give us.
 """
-import argparse, glob, os, shutil
+import argparse, glob, os, re, shutil
 from PIL import Image
 
 
@@ -30,10 +30,43 @@ def main():
     ap.add_argument("--name", default=None, help="output sequence name (default dynrep_<scene>)")
     args = ap.parse_args()
 
-    base = os.path.join(args.src, args.scene, args.split)
-    frames = sorted(glob.glob(os.path.join(base, "frames_rect", f"*-{args.side}.*")))
+    # TWO LAYOUTS. The `real` split puts both stereo sides in one folder
+    # (<scene>/<split>/frames_rect/00001-left.jpg) with masks/ alongside. The
+    # synthetic splits give each side its own scene directory
+    # (<scene>_left/images/<scene>_left-0000.png) and add depths, flow and
+    # trajectories. Detect rather than ask, so the same command works for both.
+    real_base = os.path.join(args.src, args.scene, args.split)
+    syn_base = os.path.join(args.src, args.scene)
+    if os.path.isdir(os.path.join(real_base, "frames_rect")):
+        base = real_base
+        frames = sorted(glob.glob(os.path.join(base, "frames_rect", f"*-{args.side}.*")))
+        mask_dir = os.path.join(base, "masks")
+        layout = "real"
+    elif os.path.isdir(os.path.join(syn_base, "images")):
+        base = syn_base
+        frames = sorted(glob.glob(os.path.join(base, "images", "*.png")))
+        mask_dir = os.path.join(base, "masks")
+        layout = "synthetic"
+    else:
+        raise SystemExit(f"no frames_rect/ or images/ under {args.src}/{args.scene}")
     if not frames:
-        raise SystemExit(f"no {args.side} frames under {base}/frames_rect")
+        raise SystemExit(f"no frames found for {args.scene}")
+
+    # Pair images to masks by FRAME INDEX, not by filename: the synthetic split
+    # writes images as <scene>-0000.png and masks as <scene>_0000.png, and ships
+    # one more image than mask. Matching on the trailing digits survives both.
+    def fidx(path):
+        stem = os.path.basename(path).rsplit(".", 1)[0]
+        if stem.endswith(".geometric"):
+            stem = stem[: -len(".geometric")]
+        m = re.search(r"(\d+)$", stem)
+        return m.group(1).lstrip("0") or "0" if m else None
+
+    masks_by_idx = {}
+    for mp in glob.glob(os.path.join(mask_dir, "*.png")):
+        k = fidx(mp)
+        if k is not None:
+            masks_by_idx[k] = mp
 
     name = args.name or f"dynrep_{args.scene}"
     rgb_dir = os.path.join(args.out, name, "rgb")
@@ -43,7 +76,6 @@ def main():
 
     n_m, bad = 0, []
     for i, f in enumerate(frames):
-        stem = os.path.basename(f).rsplit(".", 1)[0]          # 00001-left
         dst = os.path.join(rgb_dir, f"{i:06d}.png")
         # PNG because the completeness guards count rgb/*.png, and a mask set that
         # is one frame short makes eval fall back to LIVE detection for the rest --
@@ -60,8 +92,8 @@ def main():
             if os.path.exists(dst):
                 os.remove(dst)
             continue
-        src_m = os.path.join(base, "masks", f"{stem}.png")
-        if os.path.exists(src_m):
+        src_m = masks_by_idx.get(fidx(f))
+        if src_m and os.path.exists(src_m):
             shutil.copyfile(src_m, os.path.join(msk_dir, f"{i:06d}.png"))
             n_m += 1
 
@@ -73,7 +105,7 @@ def main():
               "but it now has a time gap where those frames were.")
 
     n_ok = len(glob.glob(os.path.join(rgb_dir, "*.png")))
-    print(f"{name}: {n_ok} frames written (of {len(frames)} found) -> {rgb_dir}")
+    print(f"{name} [{layout}]: {n_ok} frames written (of {len(frames)} found) -> {rgb_dir}")
     print(f"{'':>{len(name)}}  {n_m} GT masks -> {msk_dir}")
     if n_m and n_m != len(frames):
         print(f"WARNING: {len(frames) - n_m} frames have no GT mask")
