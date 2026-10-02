@@ -1473,6 +1473,15 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
     with open(os.path.join(args.output_dir, "eval_config.json"), "w") as f:
         json.dump({
+            # EVERY argument, not a curated subset. The curated list below is kept
+            # for readability, but it silently omitted all the --ply_* flags, and a
+            # month later there was no way to tell whether an exported point cloud
+            # was own-frame or accumulated -- the two artefacts look similar enough
+            # that the question had to be settled by measuring the file. A figure
+            # whose configuration cannot be recovered is a figure that cannot be
+            # defended, so record the lot and let the reader filter.
+            "argv": {k: (list(v) if isinstance(v, tuple) else v)
+                     for k, v in sorted(vars(args).items())},
             "checkpoint": args.checkpoint,
             "bg_color": list(config.background_color),
             "dyn_opacity_comp": args.dyn_opacity_comp,
