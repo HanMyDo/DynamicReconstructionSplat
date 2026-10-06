@@ -10,10 +10,12 @@ Three conventions matter, all read off their shipped DAVIS clip:
 1. C2W[0] IS THE IDENTITY. Poses are relative to the first frame, VGGT-style, so we
    pre-multiply by inv(C2W[0]). Absolute world coordinates would be out of
    distribution for a model trained on normalised cameras.
-2. THE SCENE IS SCALE-NORMALISED. Their translations span 0.21 over 13 frames, which
-   is camera motion as a FRACTION of scene depth, not metres. We divide translations
-   by the clip's mean GT depth, so "1.0" means one average scene depth either way.
-   Feeding raw metres would make the camera look stationary to the model.
+2. THERE IS NO SCALE NORMALISATION. Read from their own code: BaseDataset's
+   `_camera_normalize` supports only "none" and "canonical", and canonical does
+   exactly the transform above -- nothing touches translation scale. An earlier
+   version of this file divided translations by mean scene depth, which was an
+   invention on our part; Bonn's raw metres give a 0.31 span against their clip's
+   0.21, so the guess was unnecessary as well as wrong.
 3. INTRINSICS ARE NORMALISED, fx by W and fy by H separately (their fy/fx = 1.76 =
    518/294 is exactly the aspect ratio).
 
@@ -85,15 +87,8 @@ def main():
     gap = max(abs(gt_ts[np.argmin(np.abs(gt_ts - t))] - t) for t in ts_all)
     C2W = np.linalg.inv(C2W[0])[None] @ C2W                         # frame 0 -> identity
 
-    # Scale: metres -> fractions of scene depth, matching their normalisation.
-    dep = sorted(glob.glob(os.path.join(args.seq_dir, "depth", "*.png")))
-    if dep:
-        d = np.asarray(Image.open(dep[min(idx[len(idx)//2], len(dep)-1)]), dtype=np.float32) / 5000.0
-        mean_depth = float(np.median(d[d > 0])) if (d > 0).any() else 1.0
-    else:
-        mean_depth = 1.0
-        print("WARNING: no depth/ -- translations left in source units, scale may be off")
-    C2W[:, :3, 3] /= max(mean_depth, 1e-6)
+    # NO scale normalisation -- see note 2. Translations stay in the dataset's own
+    # units, which is what their loader does.
 
     fx = args.fx / args.W; fy = args.fy / args.H
     cx = args.cx / args.W; cy = args.cy / args.H
@@ -107,7 +102,7 @@ def main():
     print(f"  C2W      {C2W.shape}  translation max {np.abs(C2W[:, :3, 3]).max():.4f} "
           f"(their DAVIS clip: 0.21)")
     print(f"  fxfycxcy {fxfycxcy[0]}  (their DAVIS clip: [2.509 4.422 0.506 0.506])")
-    print(f"  mean scene depth {mean_depth:.3f} m; worst pose/frame timestamp gap {gap:.4f}s")
+    print(f"  worst pose/frame timestamp gap {gap:.4f}s")
     print(f"  frames: {os.path.basename(sel[0])} .. {os.path.basename(sel[-1])}")
 
 
