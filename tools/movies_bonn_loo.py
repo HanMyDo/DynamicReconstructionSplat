@@ -120,8 +120,15 @@ def main():
 
         pred = r["image"][0, 0].float().clamp(0, 1).cpu().permute(1, 2, 0).numpy()
         gt = imgs[hold].transpose(1, 2, 0)
-        iio.imwrite(os.path.join(args.out, f"pred_{w:04d}.png"), (pred * 255).astype(np.uint8))
-        iio.imwrite(os.path.join(args.out, f"gt_{w:04d}.png"), (gt * 255).astype(np.uint8))
+        # Name by the SOURCE frame, not the window counter. compare_methods.py pairs
+        # files by sorted order, and the two methods hold out different frames at
+        # different window strides -- positional matching would silently compare our
+        # render of frame 130 against theirs of frame 91.
+        stem = os.path.basename(paths[hold])[:-4]
+        iio.imwrite(os.path.join(args.out, f"pred_{idx[hold]:06d}_{stem}.png"),
+                    (pred * 255).astype(np.uint8))
+        iio.imwrite(os.path.join(args.out, f"gt_{idx[hold]:06d}_{stem}.png"),
+                    (gt * 255).astype(np.uint8))
         n += 1
         if w % 10 == 0:
             p = float(-10 * np.log10(((pred - gt) ** 2).mean() + 1e-12))
@@ -129,6 +136,8 @@ def main():
                   flush=True)
 
     print(f"wrote {n} pred/gt pairs to {args.out}")
+    print("held-out source frame indices:", [s + hold * args.stride for s in starts][:20],
+          "..." if len(starts) > 20 else "")
 
 
 if __name__ == "__main__":
