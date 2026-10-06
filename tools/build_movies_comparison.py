@@ -20,6 +20,11 @@ def main():
     ap.add_argument("--movies_dir", required=True, help="dir of MoVieS pred_<idx>_<stem>.png")
     ap.add_argument("--ours_images", required=True, help="our eval's images/ (GT|pred panels)")
     ap.add_argument("--bonn_rgb", required=True, help="the sequence's rgb/ directory")
+    ap.add_argument("--mask_dir", default=None,
+                    help="optional <maskdir>/<seq>/masks, copied alongside so the "
+                         "dynamic/static split can be scored. Using OUR masks for BOTH "
+                         "methods is fair: the mask picks the evaluation region, it is "
+                         "not an input, and MoVieS never sees it.")
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
 
@@ -35,7 +40,8 @@ def main():
 
     ours = sorted(glob.glob(os.path.join(args.ours_images, "*.png")))
     rgb = sorted(glob.glob(os.path.join(args.bonn_rgb, "*.png")))
-    for d in ("gt", "ours", "movies"):
+    masks = sorted(glob.glob(os.path.join(args.mask_dir, "*.png"))) if args.mask_dir else []
+    for d in ("gt", "ours", "movies") + (("mask",) if masks else ()):
         os.makedirs(os.path.join(args.out, d), exist_ok=True)
 
     n, skipped = 0, []
@@ -45,6 +51,8 @@ def main():
         shutil.copyfile(rgb[i],  os.path.join(args.out, "gt",     f"{i:06d}.png"))
         shutil.copyfile(ours[i], os.path.join(args.out, "ours",   f"{i:06d}.png"))
         shutil.copyfile(p,       os.path.join(args.out, "movies", f"{i:06d}.png"))
+        if masks and i < len(masks):
+            shutil.copyfile(masks[i], os.path.join(args.out, "mask", f"{i:06d}.png"))
         n += 1
     print(f"paired {n} frames: {[i for i, _ in idxs[:8]]}{' ...' if len(idxs) > 8 else ''}")
     if skipped:
