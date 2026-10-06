@@ -56,6 +56,30 @@ def load_tum_poses(path):
     return np.array(ts), np.stack(T)
 
 
+_VGGT = {}
+
+
+def vggt_poses(imgs_np):
+    """Predict C2W for a window with VGGT, the same backbone MoVieS bundles.
+
+    imgs_np: (F, 3, H, W) in [0, 1]. -> (F, 4, 4) camera-to-world, canonicalised.
+    """
+    from vggt.models.vggt import VGGT
+    from vggt.utils.pose_enc import pose_encoding_to_extri_intri
+    if "m" not in _VGGT:
+        _VGGT["m"] = VGGT.from_pretrained("facebook/VGGT-1B").to("cuda").eval()
+    m = _VGGT["m"]
+    im = torch.from_numpy(imgs_np).float().unsqueeze(0).to("cuda")
+    with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
+        pred = m(im)
+    extr, _ = pose_encoding_to_extri_intri(pred["pose_enc"], im.shape[-2:])
+    extr = extr[0].float().cpu().numpy()                 # (F, 3, 4) world-to-camera
+    W2C = np.tile(np.eye(4), (extr.shape[0], 1, 1))
+    W2C[:, :3, :4] = extr
+    C2W = np.linalg.inv(W2C)
+    return np.linalg.inv(C2W[0])[None] @ C2W             # canonical
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--seq_dir", required=True)
@@ -66,6 +90,15 @@ def main():
     ap.add_argument("--width", type=int, default=518)
     ap.add_argument("--height", type=int, default=392)
     ap.add_argument("--max_windows", type=int, default=0, help="0 = whole sequence")
+    ap.add_argument("--poses", choices=["gt", "vggt"], default="gt",
+                    help="gt = dataset ground truth; vggt = predicted, which is both the "
+                         "fairer protocol (same pose source as ours) and a fix: Bonn's GT "
+                         "tracks a MOCAP MARKER frame, not the camera optical frame, and that "
+                         "fixed offset does NOT cancel under canonicalisation -- it corrupts "
+                         "every relative pose. Measured: with GT poses, self-reconstruction "
+                         "holds at 22.4 dB (error cancels when rendering back through the same "
+                         "wrong poses) while leave-one-out collapses to 13.4, against 29.1/26.1 "
+                         "on their own DAVIS clip.")
     args = ap.parse_args()
 
     rgb = sorted(glob.glob(os.path.join(args.seq_dir, "rgb", "*.png")))
@@ -98,8 +131,11 @@ def main():
                        Image.BILINEAR), np.float32).transpose(2, 0, 1) / 255.0
             for p in paths])
         tss = np.array([float(os.path.basename(p)[:-4]) for p in paths])
-        C2W = np.stack([gt_T[np.argmin(np.abs(gt_ts - t))] for t in tss])
-        C2W = np.linalg.inv(C2W[0])[None] @ C2W                 # canonical, their only normalisation
+        if args.poses == "vggt":
+            C2W = vggt_poses(imgs)
+        else:
+            C2W = np.stack([gt_T[np.argmin(np.abs(gt_ts - t))] for t in tss])
+            C2W = np.linalg.inv(C2W[0])[None] @ C2W             # canonical, their only normalisation
 
         keep = [i for i in range(args.frames) if i != hold]
         t_norm = np.linspace(0, 1, args.frames).astype(np.float32)
