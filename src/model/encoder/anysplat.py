@@ -155,6 +155,7 @@ class EncoderAnySplatCfg:
     dyn_motion_gate_mult: float = 3.0  # trust radius = mult x median track NN spacing
     dyn_motion_max_disp_mult: float = 0.0  # cap |displacement| at mult x median track motion (0=off)
     dyn_conf_opacity: float = 0.0  # soften the flow gate by track support^gamma (0=off)
+    dyn_same_object: float = 0.0   # restrict the kNN to one object; link radius x track spacing (0=off)
     # STRICT control: predict each track's target-frame position from the OTHER frames
     # instead of observing it, so frame j is never read (see predict_tracks_loo).
     dyn_motion_strict: bool = False
@@ -1188,6 +1189,7 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
                             gate_mult=getattr(self.cfg, "dyn_motion_gate_mult", 3.0),
                             max_disp_mult=getattr(self.cfg, "dyn_motion_max_disp_mult", 0.0),
                             conf_opacity=getattr(self.cfg, "dyn_conf_opacity", 0.0),
+                            same_object=getattr(self.cfg, "dyn_same_object", 0.0),
                             strict=getattr(self.cfg, "dyn_motion_strict", False),
                             pred_bandwidth=getattr(self.cfg, "dyn_motion_pred_bandwidth", 0.0),
                         )

@@ -1179,6 +1179,17 @@ def main():
                              "strict no-look variant is the groups mode; report both.")
     parser.add_argument("--dyn_motion_n_query", type=int, default=1024,
                         help="Scene-flow mode: total tracker query budget, split across query frames.")
+    parser.add_argument("--dyn_same_object", type=float, default=0.0,
+                        help="Restrict each gaussian's kNN to tracks on the SAME object, as a "
+                             "link radius in multiples of the track spacing (0 = off). The "
+                             "weighted mean otherwise averages a silhouette gaussian's "
+                             "neighbours across two objects -- some on the person, some on the "
+                             "wall reporting no motion -- so it moves LESS than the person did "
+                             "and stays partly welded to the background. Labels are computed "
+                             "PER FRAME, which needs no cross-frame correspondence because the "
+                             "comparison is entirely within frame i. Try 3.0, the same scale "
+                             "the radius gate uses; too small fragments one object, too large "
+                             "merges everything and does nothing.")
     parser.add_argument("--dyn_conf_opacity", type=float, default=0.0,
                         help="Soften the flow gate: scale a relocated dynamic Gaussian's opacity "
                              "by (fraction of its k neighbour tracks that were usable)^GAMMA. 0 = "
@@ -1449,6 +1460,7 @@ def main():
         dyn_motion_gate_mult=args.dyn_motion_gate_mult,
         dyn_motion_max_disp_mult=args.dyn_motion_max_disp_mult,
         dyn_conf_opacity=args.dyn_conf_opacity,
+        dyn_same_object=args.dyn_same_object,
         dyn_motion_strict=args.dyn_motion_strict,
         dyn_motion_pred_bandwidth=args.dyn_motion_pred_bandwidth,
         dyn_motion_clean_tokens=args.dyn_motion_clean_tokens,
@@ -1509,6 +1521,7 @@ def main():
             "dyn_motion_gate_mult": args.dyn_motion_gate_mult,
             "dyn_motion_max_disp_mult": args.dyn_motion_max_disp_mult,
             "dyn_conf_opacity": args.dyn_conf_opacity,
+            "dyn_same_object": args.dyn_same_object,
             "dyn_motion_query_all": not args.dyn_motion_query_first_only,
             "dyn_motion_strict": args.dyn_motion_strict,
             "dyn_motion_pred_bandwidth": args.dyn_motion_pred_bandwidth,

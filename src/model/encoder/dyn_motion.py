@@ -854,6 +854,47 @@ def drop_static_tracks(traj: torch.Tensor, ok: torch.Tensor,
 
 
 @torch.no_grad()
+def _label_objects_3d(P: torch.Tensor, link: float) -> torch.Tensor:
+    """Connected-component labels for points in 3D, via a voxel flood fill.
+
+    Used per frame, so the labels never have to agree ACROSS frames -- which is the
+    hard half of object identity and is not needed here: the kNN compares gaussians
+    from frame i against track positions at frame i, so one frame's labelling is
+    enough. Clustering all frames together would be wrong anyway, since the same
+    object at different times occupies different space and the fill would either
+    bridge the trajectory into a tube or split one object in two.
+
+    P [M, 3] -> [M] int64 labels. `link` is the connection radius in world units.
+    """
+    pts = P.detach().cpu().numpy()
+    if pts.shape[0] == 0:
+        return torch.zeros(0, dtype=torch.long, device=P.device)
+    import numpy as _np
+    v = max(float(link), 1e-6)
+    ijk = _np.floor((pts - pts.min(0)) / v).astype(_np.int64)
+    occ = {}
+    for n, key in enumerate(map(tuple, ijk)):
+        occ.setdefault(key, []).append(n)
+    lab = _np.full(pts.shape[0], -1, _np.int64)
+    nbr = [(a, b, c) for a in (-1, 0, 1) for b in (-1, 0, 1) for c in (-1, 0, 1)]
+    cur = 0
+    for key in occ:
+        if lab[occ[key][0]] >= 0:
+            continue
+        stack = [key]
+        seen = {key}
+        while stack:
+            kq = stack.pop()
+            for n in occ[kq]:
+                lab[n] = cur
+            for d in nbr:
+                nk = (kq[0] + d[0], kq[1] + d[1], kq[2] + d[2])
+                if nk in occ and nk not in seen:
+                    seen.add(nk); stack.append(nk)
+        cur += 1
+    return torch.from_numpy(lab).to(P.device)
+
+
 def _q(t: torch.Tensor, q: float) -> float:
     """Quantile that survives a large tensor.
 
@@ -884,6 +925,7 @@ def knn_flow_displacement(
     min_frame_tracks: int = 4,
     max_disp_mult: float = 0.0,
     conf_opacity: float = 0.0,
+    same_object: float = 0.0,
     strict: bool = False,
     pred_bandwidth: float = 0.0,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -936,6 +978,27 @@ def knn_flow_displacement(
         d_gt = torch.cdist(G, P)                     # [n_i, M]
         dist, idx = d_gt.topk(kk, dim=1, largest=False)
         w0 = (dist <= gate_r).float() / (dist + 1e-6)          # [n_i, kk]
+
+        # SAME-OBJECT RESTRICTION. The weighted mean below averages a gaussian's k
+        # nearest tracks, and at a silhouette those span two objects: some on the
+        # person, some on the wall behind reporting no motion. The mean splits the
+        # difference, so the gaussian moves LESS than the person did and stays partly
+        # welded to the background -- the "chewing gum" artefact.
+        #
+        # Labelling is per frame and needs no cross-frame correspondence, because the
+        # comparison here is entirely within frame i: gaussians FROM i against track
+        # positions AT i. Each track takes the label of its nearest gaussian, and
+        # neighbours from a different component get zero weight.
+        #
+        # same_object is the link radius as a multiple of the track spacing, the same
+        # scale-free quantity gate_mult uses. Too small and one object fragments; too
+        # large and everything merges and the restriction does nothing.
+        if same_object > 0:
+            link = (same_object * spacing).clamp_min(1e-5)
+            lab_g = _label_objects_3d(G, float(link))              # [n_i]
+            lab_t = lab_g[torch.cdist(P, G).argmin(dim=1)]         # [M] via nearest gaussian
+            same = (lab_t[idx] == lab_g.unsqueeze(1))              # [n_i, kk]
+            w0 = w0 * same.to(w0.dtype)
         # WHICH gate rejects a pair? Two can, and they need opposite fixes:
         # the RADIUS (no track near this Gaussian -> raise gate_mult / query more)
         # and target-frame VISIBILITY (tracks exist but none survives to frame j ->
