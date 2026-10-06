@@ -883,6 +883,7 @@ def knn_flow_displacement(
     gate_mult: float = 3.0,
     min_frame_tracks: int = 4,
     max_disp_mult: float = 0.0,
+    conf_opacity: float = 0.0,
     strict: bool = False,
     pred_bandwidth: float = 0.0,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -999,7 +1000,22 @@ def knn_flow_displacement(
             row[sel] = d_ij.to(disp.dtype)
             disp[:, j] += row
             vrow = torch.zeros(N, device=dev, dtype=valid.dtype)
-            vrow[sel] = good.to(valid.dtype)
+            if conf_opacity > 0:
+                # SOFT VALIDITY. The gate is otherwise all-or-nothing: a Gaussian
+                # backed by eight close, mutually visible tracks and one backed by a
+                # single marginal neighbour at the edge of the radius are relocated
+                # with identical confidence. Report the FRACTION of the k neighbours
+                # that were usable instead, so the decoder can render a
+                # weakly-supported relocation faintly rather than asserting it.
+                #
+                # This only down-weights relocations that ALREADY pass the gates --
+                # it never revives a rejected one. Reviving them would put a Gaussian
+                # at a position tracking could not support, which is the ghosting the
+                # gate exists to prevent.
+                frac = (w > 0).to(valid.dtype).sum(dim=1) / max(kk, 1)
+                vrow[sel] = good.to(valid.dtype) * frac.clamp(0, 1).pow(conf_opacity)
+            else:
+                vrow[sel] = good.to(valid.dtype)
             valid[:, j] += vrow
 
     # --- DIAGNOSTIC: did the mechanism actually DO anything? --------------------

@@ -1179,6 +1179,16 @@ def main():
                              "strict no-look variant is the groups mode; report both.")
     parser.add_argument("--dyn_motion_n_query", type=int, default=1024,
                         help="Scene-flow mode: total tracker query budget, split across query frames.")
+    parser.add_argument("--dyn_conf_opacity", type=float, default=0.0,
+                        help="Soften the flow gate: scale a relocated dynamic Gaussian's opacity "
+                             "by (fraction of its k neighbour tracks that were usable)^GAMMA. 0 = "
+                             "off, the current all-or-nothing gate. The gate treats a Gaussian "
+                             "backed by eight close mutually-visible tracks and one backed by a "
+                             "single marginal neighbour identically, though ~30%% of pairs are "
+                             "radius-rejected and coverage sits near 54%%. Only DOWN-weights "
+                             "relocations that already pass the gates; it never revives a rejected "
+                             "one, which would reintroduce the ghosting the gate prevents. 1.0 is "
+                             "linear, higher is more aggressive.")
     parser.add_argument("--dyn_motion_max_disp_mult", type=float, default=0.0,
                         help="Cap each Gaussian's displacement at this multiple of the MEDIAN "
                              "observed track motion for the frame pair. Guards the strict "
@@ -1438,6 +1448,7 @@ def main():
         dyn_motion_query_all=not args.dyn_motion_query_first_only,
         dyn_motion_gate_mult=args.dyn_motion_gate_mult,
         dyn_motion_max_disp_mult=args.dyn_motion_max_disp_mult,
+        dyn_conf_opacity=args.dyn_conf_opacity,
         dyn_motion_strict=args.dyn_motion_strict,
         dyn_motion_pred_bandwidth=args.dyn_motion_pred_bandwidth,
         dyn_motion_clean_tokens=args.dyn_motion_clean_tokens,
@@ -1497,6 +1508,7 @@ def main():
             "dyn_motion_n_query": args.dyn_motion_n_query,
             "dyn_motion_gate_mult": args.dyn_motion_gate_mult,
             "dyn_motion_max_disp_mult": args.dyn_motion_max_disp_mult,
+            "dyn_conf_opacity": args.dyn_conf_opacity,
             "dyn_motion_query_all": not args.dyn_motion_query_first_only,
             "dyn_motion_strict": args.dyn_motion_strict,
             "dyn_motion_pred_bandwidth": args.dyn_motion_pred_bandwidth,

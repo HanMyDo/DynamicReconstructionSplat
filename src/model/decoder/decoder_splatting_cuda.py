@@ -220,7 +220,13 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
                     dynf = gaussian_dyn_flag[i].to(xyz_i.device).float()
                     move = dynf * (1.0 - (fidx == j).float())
                     if gaussian_disp_valid is not None:
-                        move = move * gaussian_disp_valid[i].to(xyz_i.device)[:, j].float()
+                        # BINARISE for the move. Under --dyn_conf_opacity this tensor
+                        # carries a confidence in [0,1] rather than a flag, and a
+                        # fractional move would put the Gaussian PART of the way to
+                        # where tracking says the object went -- a position nothing
+                        # supports. Move it fully or not at all; the confidence acts
+                        # on opacity (see the gate above), not on geometry.
+                        move = move * (gaussian_disp_valid[i].to(xyz_i.device)[:, j] > 0).float()
                     xyz_ij = xyz_i + move.unsqueeze(-1) * gaussian_disp[i].to(xyz_i.device)[:, j].float()
                 elif (dyn_group_centroid is not None and dyn_group_pred is not None
                         and gaussian_group_idx is not None and gaussian_frame_idx is not None
