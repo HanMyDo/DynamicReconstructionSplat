@@ -102,7 +102,17 @@ def main():
     args = ap.parse_args()
 
     rgb = sorted(glob.glob(os.path.join(args.seq_dir, "rgb", "*.png")))
-    gt_ts, gt_T = load_tum_poses(os.path.join(args.seq_dir, "groundtruth.txt"))
+    # Only Bonn-style sequences ship groundtruth.txt. Converted Dynamic Replica
+    # sequences have rgb/ and gt_masks/ only, and --poses vggt needs neither -- which
+    # is the protocol we settled on anyway, since Bonn's GT poses track a mocap marker
+    # frame rather than the camera and cost MoVieS 10 dB.
+    gt_path = os.path.join(args.seq_dir, "groundtruth.txt")
+    if args.poses == "gt":
+        if not os.path.exists(gt_path):
+            raise SystemExit(f"--poses gt needs {gt_path}; use --poses vggt for this sequence")
+        gt_ts, gt_T = load_tum_poses(gt_path)
+    else:
+        gt_ts = gt_T = None
     os.makedirs(args.out, exist_ok=True)
 
     opt = opt_dict["movies"]
