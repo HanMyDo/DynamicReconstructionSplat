@@ -138,6 +138,72 @@ python compare_methods.py --gt_dir cmp_${SEQ}_clean_s12/gt \
   --b cmp_${SEQ}_clean_s12/movies --b_label MoVieS --out fig_${SEQ}_s12 --fig_stride 4
 ```
 
+### Which protocol row is which (read this before quoting a number)
+
+Two independent things must match between the methods, and each was wrong once:
+
+**1. HORIZON must match.** `submit_final_battery.sh` hardcodes `--frame_stride 4`,
+so the `final*` renders are a ~2 s window NO MATTER what stride MoVieS runs at.
+Pairing those against MoVieS at stride 8 or 12 hands MoVieS a 2-3x longer
+reconstruction window than we take ourselves. Measured cost of that mistake: a
+balloon row read `+0.70` overall unmatched and `-0.50` matched -- a sign flip.
+⇒ Use the per-stride ladders, which are config-identical to `final4` and differ
+ONLY in `frame_stride`:
+
+```
+balloon      output_probe_frozen_h04|h08|h12|h16|h20_balloon_h{NN}
+synchronous2 output_probe_frozen_g4|g8|g12_synchronous2_g{N}
+```
+
+⚠️ Check a config by reading `eval_config.json["argv"]`, the NESTED dict. A
+top-level `.get("frame_stride")` returns `None` even when it is set, which will
+fool you into thinking a run is unconfigured.
+
+**2. HELD-OUT PROTOCOL must match.** `movies_bonn_loo.py` holds out `frames//2`
+and reconstructs it from the other 15. Our eval only does the equivalent with
+`--eval_loo`, and the ladders above do NOT use it. Report these as separate rows,
+never mixed:
+
+| row | ours | MoVieS | `--ours_offset` |
+|---|---|---|---|
+| self-recon (symmetric, weaker) | `h*`/`g*` ladder, no `--eval_loo` | `--self_recon` | `0` |
+| leave-one-out (headline) | `--eval_loo --image_views 8` | default | `$((8 * STRIDE))` |
+| strict no-look-at-j (control) | piecewise-rigid mode, no `--track_dynamic` | default | per above |
+
+`--image_views 8` rather than the launcher's hardcoded `0` is REQUIRED for the LOO
+row: view 0 is the window's FIRST frame, so holding it out means extrapolating from
+one side while MoVieS interpolates from both. Spec flags are appended after `${WIN}`
+in `slurm_probe_hex.sh`, so a later `--image_views 8` overrides it. Middle-view
+coverage also aligns with MoVieS's held-out range, which fixes thin samples
+(synchronous2 at 6 s: 17 -> ~36 paired frames).
+
+**Asymmetries to STATE rather than fix**, both in our favour:
+- Under `--eval_loo` the scene-flow path still displaces Gaussians using the tracks'
+  OBSERVED position at frame j (`decoder_splatting_cuda.py` "SCENE FLOW", and the
+  protocol note in `dyn_motion.py`). Appearance and source geometry come only from
+  other frames, but POSITION reads frame j. This is the standard monocular
+  dynamic-NVS convention ("motion fitted on the full video, appearance held out");
+  MoVieS instead predicts forward from 15 frames. The piecewise-rigid mode is the
+  strict variant and is the third row above.
+- `--eval_loo` drops view j's Gaussians, but the backbone still SAW frame j.
+
+Launching the LOO ladder (chained = one GPU at a time):
+
+```
+M2=~/data/mask_out/output_dyn_masks_precomputed_cs512_r518_st3_fs1_m6_otsu2_glob
+F="--per_frame_dynamic --dyn_conf_opacity 4.0 --track_dynamic --dyn_motion_knn 8 \
+   --dyn_motion_strict --dyn_motion_pred_bandwidth 1.5 --dyn_motion_tracker raft \
+   --dyn_motion_max_disp_mult 3.0 --dyn_opacity_comp 1.0 --bg_color 1 1 1 \
+   --eval_loo --image_views 8"
+P=""
+for S in 4 8 12; do P=$(EVAL_DATE=loo$S sbatch --parsable --time=04:00:00 \
+  ${P:+--dependency=afterany:$P} slurm_probe_hex.sh baseline "$M2" \
+  rgbd_bonn_synchronous2 16 $S 0 99999 "L$S=$F"); echo "stride $S -> $P"; done
+```
+
+⚠️ Always confirm with `squeue` that the jobs exist. Two submissions in one session
+silently never ran, and `sacct --starttime today` was what revealed it.
+
 ### Why these settings
 
 - **`--window_step 5`, not the default 13.** At 13 the paired counts collapse to
