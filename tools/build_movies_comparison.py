@@ -20,6 +20,14 @@ def main():
     ap.add_argument("--movies_dir", required=True, help="dir of MoVieS pred_<idx>_<stem>.png")
     ap.add_argument("--ours_images", required=True, help="our eval's images/ (GT|pred panels)")
     ap.add_argument("--bonn_rgb", required=True, help="the sequence's rgb/ directory")
+    ap.add_argument("--ours_offset", type=int, default=0,
+                    help="source frame rendered by our k-th image = k + this. 0 for "
+                         "--image_views 0 (view 0 of batch k IS frame k). For a MATCHED "
+                         "leave-one-out comparison our eval must hold out the MIDDLE view, "
+                         "--image_views 8 with --num_frames 16, because MoVieS holds out "
+                         "frames//2 and interpolates from BOTH sides while view 0 would make "
+                         "us extrapolate from one side. Then view 8 of batch k is frame "
+                         "k + 8*stride, so pass --ours_offset $((8 * stride)).")
     ap.add_argument("--mask_dir", default=None,
                     help="optional <maskdir>/<seq>/masks, copied alongside so the "
                          "dynamic/static split can be scored. Using OUR masks for BOTH "
@@ -46,10 +54,11 @@ def main():
 
     n, skipped = 0, []
     for i, p in idxs:
-        if i >= len(ours) or i >= len(rgb):
+        j = i - args.ours_offset          # index INTO ours/ of the render of frame i
+        if j < 0 or j >= len(ours) or i >= len(rgb):
             skipped.append(i); continue
         shutil.copyfile(rgb[i],  os.path.join(args.out, "gt",     f"{i:06d}.png"))
-        shutil.copyfile(ours[i], os.path.join(args.out, "ours",   f"{i:06d}.png"))
+        shutil.copyfile(ours[j], os.path.join(args.out, "ours",   f"{i:06d}.png"))
         shutil.copyfile(p,       os.path.join(args.out, "movies", f"{i:06d}.png"))
         if masks and i < len(masks):
             shutil.copyfile(masks[i], os.path.join(args.out, "mask", f"{i:06d}.png"))
