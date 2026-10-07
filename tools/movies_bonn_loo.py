@@ -90,6 +90,13 @@ def main():
     ap.add_argument("--width", type=int, default=518)
     ap.add_argument("--height", type=int, default=392)
     ap.add_argument("--max_windows", type=int, default=0, help="0 = whole sequence")
+    ap.add_argument("--self_recon", action="store_true",
+                    help="Feed the held-out frame as an INPUT too, so the target view is "
+                         "reprojected rather than reconstructed. This is the SYMMETRIC "
+                         "counterpart to running our eval WITHOUT --eval_loo, which is how "
+                         "the h*/g* probe ladders were produced. Weaker than LOO -- it hides "
+                         "pose error (measured on Bonn with GT poses: 22.56 self-recon vs "
+                         "13.44 LOO) -- so report it alongside LOO, never instead of it.")
     ap.add_argument("--poses", choices=["gt", "vggt"], default="gt",
                     help="gt = dataset ground truth; vggt = predicted, which is both the "
                          "fairer protocol (same pose source as ours) and a fix: Bonn's GT "
@@ -147,7 +154,8 @@ def main():
             C2W = np.stack([gt_T[np.argmin(np.abs(gt_ts - t))] for t in tss])
             C2W = np.linalg.inv(C2W[0])[None] @ C2W             # canonical, their only normalisation
 
-        keep = [i for i in range(args.frames) if i != hold]
+        keep = (list(range(args.frames)) if args.self_recon
+                else [i for i in range(args.frames) if i != hold])
         t_norm = np.linspace(0, 1, args.frames).astype(np.float32)
 
         to = lambda a: torch.from_numpy(np.asarray(a)).float().unsqueeze(0).to("cuda", torch.bfloat16)
