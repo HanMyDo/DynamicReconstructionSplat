@@ -54,6 +54,15 @@ def main():
     ap.add_argument("--b", required=True); ap.add_argument("--b_label", default="B")
     ap.add_argument("--b_panels", type=int, default=1)
     ap.add_argument("--mask_dir", required=True)
+    ap.add_argument("--mask_erode", type=int, default=0,
+                    help="Erode the dynamic mask by this many pixels before scoring. "
+                         "WHY: our detector over-flags badly -- on synchronous2 at stride 12 "
+                         "the mask covers 36%% of the frame while the moving people are maybe "
+                         "5-10%%, so psnr_dynamic is dominated by STATIC content sitting inside "
+                         "the mask. A method can then win the dynamic column by rendering walls "
+                         "well while missing the people entirely. Eroding concentrates the "
+                         "region on the mask's interior (the objects) and drops the halo. "
+                         "Report the erosion radius with any number produced this way.")
     args = ap.parse_args()
 
     G = load(args.gt_dir); A = load(args.a, args.a_panels); B = load(args.b, args.b_panels)
@@ -78,6 +87,9 @@ def main():
         # NEAREST: a mask is labels. Bilinear would invent half-dynamic pixels along
         # every silhouette, which is exactly where the two methods differ most.
         m = cv2.resize(m, (w, h), interpolation=cv2.INTER_NEAREST) > 127
+        if args.mask_erode > 0:
+            k = 2 * args.mask_erode + 1
+            m = cv2.erode(m.astype(np.uint8), np.ones((k, k), np.uint8)) > 0
         frac.append(float(m.mean()))
         m3 = np.repeat(m[..., None], g.shape[2], axis=2) if g.ndim == 3 else m
         for k, mm in (("all", None), ("dyn", m3), ("stat", ~m3)):
@@ -91,7 +103,8 @@ def main():
         a_m = float(np.mean(rows[k][0])); b_m = float(np.mean(rows[k][1]))
         print(f"{name:10s}{a_m:12.2f}{b_m:12.2f}{a_m - b_m:+10.2f}")
     print(f"\nmean dynamic pixel fraction {np.mean(frac):.3f}  "
-          f"(both methods scored against the SAME masks)")
+          f"(both methods scored against the SAME masks"
+          f"{', eroded %d px' % args.mask_erode if args.mask_erode else ''})")
 
 
 if __name__ == "__main__":
