@@ -88,6 +88,10 @@ def main():
 
     lp = None
     if args.lpips:
+        import sys
+        # Run as `python tools/compare_masked.py`, sys.path[0] is tools/, so the repo
+        # root holding src/ is not importable. Add it.
+        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         import torch
         from src.evaluation.metrics import compute_lpips, compute_ssim
         lp = {"lpips": [[], []], "ssim": [[], []]}
