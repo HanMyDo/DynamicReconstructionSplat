@@ -440,8 +440,8 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
             # Relocate track-unsupported dynamic Gaussians by the group motion instead
             # of deleting them. Only meaningful WITH the compositing gate -- without it
             # nothing was being deleted.
-            dyn_disp_fallback=(getattr(config, "dyn_disp_fallback", False)
-                               and per_frame_dynamic and track_dynamic),
+            dyn_unsupported=(getattr(config, "dyn_unsupported", "drop")
+                             if (per_frame_dynamic and track_dynamic) else "drop"),
         )
         if infos.get("dyn_group_pred") is not None:
             n_group_motion += 1
@@ -1162,17 +1162,26 @@ def main():
                         help="Fuse STATIC pixels into shared voxels (one set per target view, "
                              "that view excluded so leave-one-out stays exact); dynamic pixels "
                              "stay per-pixel. Requires dynamic masks (--dyn_mask_dir).")
-    parser.add_argument("--dyn_disp_fallback", action="store_true",
-                        help="Relocate track-unsupported dynamic Gaussians by the PIECEWISE-RIGID "
-                             "group motion instead of DELETING them. Flow-gated compositing drops "
-                             "every off-frame dynamic Gaussian no track supports, which is right "
-                             "when the own-frame copy survives to cover the object and catastrophic "
-                             "under --eval_loo, where it does not: ~46%% of the object is deleted and "
-                             "renders as background. Measured on synchronous2 LOO: dynamic 19.69 -> "
-                             "11.39 dB, losing to MoVieS on PSNR, LPIPS AND SSIM, because a "
-                             "complete-but-wrong frame beats a partial one on every metric. The "
-                             "group prediction (dyn_group_pred) is a LEAVE-ONE-OUT fit from the "
-                             "other frames, so it stays valid under LOO. Needs "
+    parser.add_argument("--dyn_unsupported", choices=["drop", "rigid", "static"], default="drop",
+                        help="What to do with an off-frame DYNAMIC gaussian that no RAFT track "
+                             "supports. 'drop' (default, every published recipe) = flow-gated "
+                             "compositing deletes it. That is right while the own-frame copy "
+                             "survives to cover the object and catastrophic under --eval_loo, "
+                             "where it does not: on synchronous2 at stride 12 only ~22%% of "
+                             "(gaussian,target) pairs have flow support, so ~4/5 of the object "
+                             "was being deleted and rendered as background -- dynamic PSNR 19.69 "
+                             "-> 11.39 dB, losing to MoVieS on PSNR, LPIPS AND SSIM, because a "
+                             "complete-but-wrong frame beats a partial one on every metric.\n"
+                             "'rigid' = relocate it by the piecewise-rigid group motion "
+                             "(dyn_group_pred, a leave-one-out fit, so valid under LOO). "
+                             "MEASURED NULL (+0.02 psnr): group assignment derives from the SAME "
+                             "tracks as the flow field, so it reaches almost exactly the "
+                             "gaussians flow already covers.\n"
+                             "'static' = keep it where it is, rendered in all views like a static "
+                             "gaussian. Targets the real population: ~45%% of 'dynamic' gaussians "
+                             "sit metres from any track, i.e. mask FALSE POSITIVES that no "
+                             "track-derived model can place. A genuine mover caught here ghosts "
+                             "from one extra position, which is the price. Needs "
                              "--per_frame_dynamic --track_dynamic.")
     parser.add_argument("--eval_loo", action="store_true",
                         help="Leave-one-out: when rendering view j, drop ALL Gaussians that came from view j, "
@@ -1489,7 +1498,7 @@ def main():
         background_color=(tuple(args.bg_color) if args.bg_color is not None
                           else TrainingConfig.background_color),
         dyn_opacity_comp=args.dyn_opacity_comp,
-        dyn_disp_fallback=args.dyn_disp_fallback,
+        dyn_unsupported=args.dyn_unsupported,
     )
 
     print(f"\nLoading {args.split} dataset...")
@@ -1529,7 +1538,7 @@ def main():
             "dataset": f"{args.data_dir}/{args.dataset_name}",
             "split": args.split,
             "num_frames": args.num_frames,
-            "dyn_disp_fallback": args.dyn_disp_fallback,
+            "dyn_unsupported": args.dyn_unsupported,
             "backbone": "vggt" if args.no_vggt4d else "vggt4d",
             "mode": "finetuned" if args.checkpoint else "baseline",
             "per_frame_dynamic": args.per_frame_dynamic,

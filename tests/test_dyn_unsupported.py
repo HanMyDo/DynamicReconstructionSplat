@@ -1,4 +1,4 @@
-"""Correctness tests for the fallback-displacement selection (--dyn_disp_fallback).
+"""Correctness tests for the unsupported-gaussian policy (--dyn_unsupported).
 
 WHY THIS EXISTS. Flow-gated compositing DELETES every off-frame dynamic Gaussian
 that no RAFT track supports. That is correct when the own-frame copy survives to
@@ -18,15 +18,29 @@ THE PROPERTIES THAT MATTER:
   4. A Gaussian with neither is still deleted -- the fallback must not invent a
      position nothing supports.
   5. The choice is BINARY, never a blend of the two displacements.
+  6. mode 'static' moves NOTHING extra -- it changes only which gaussians SURVIVE
+     the compositing gate, so every displacement must match mode 'drop'.
 
 This re-implements the selection rather than importing the decoder, which would
 drag in gsplat/torch_scatter. The arithmetic under test is small and copied
 verbatim from decoder_splatting_cuda.py section (3); if that changes, this test
 must be updated alongside it.
 
-Run:  python tests/test_dyn_disp_fallback.py
+Run:  python tests/test_dyn_unsupported.py
 """
 import torch
+
+
+def keep_of(own_frame, dv, fb_ok, mode):
+    """Verbatim `keep` arithmetic from decoder_splatting_cuda.py section (1)."""
+    keep = own_frame.clone()
+    if dv is not None:
+        keep = (own_frame + dv).clamp(max=1.0)
+    if mode == "rigid" and fb_ok is not None:
+        keep = (keep + fb_ok).clamp(max=1.0)
+    if mode == "static":
+        keep = torch.ones_like(keep)
+    return keep
 
 
 def select(move, flow_ok, disp_flow, fb_disp, fb_ok, fallback):
@@ -96,13 +110,37 @@ def main():
     if not torch.allclose(soft[0], disp_flow[0]):
         fails.append(f"soft-valid row was blended: {soft[0]}")
 
+    # ---- mode 'static' -------------------------------------------------------
+    # It must not displace anything the 'drop' mode would not: the whole change is
+    # to the survival gate, so positions are identical to 'drop'.
+    stat = select(move, flow_ok, disp_flow, fb_disp, fb_ok, fallback=False)
+    if not torch.allclose(stat, want_off):
+        fails.append(f"'static' changed a DISPLACEMENT; it must only change survival:\n{stat}")
+
+    # And the gate must keep everything, where 'drop' kept only own-frame+supported.
+    own_f = torch.tensor([0.0, 0.0, 0.0, 0.0])        # none from the target view
+    k_drop = keep_of(own_f, flow_ok, None, "drop")
+    k_rigid = keep_of(own_f, flow_ok, fb_ok, "rigid")
+    k_static = keep_of(own_f, flow_ok, fb_ok, "static")
+    if not torch.allclose(k_drop, torch.tensor([1.0, 0.0, 0.0, 1.0])):
+        fails.append(f"'drop' keep wrong: {k_drop}")
+    if not torch.allclose(k_rigid, torch.tensor([1.0, 1.0, 0.0, 1.0])):
+        fails.append(f"'rigid' keep wrong (row 1 is relocatable): {k_rigid}")
+    if not torch.allclose(k_static, torch.ones(4)):
+        fails.append(f"'static' must keep ALL dynamic gaussians: {k_static}")
+    # The no-estimate gaussian (row 2) is the whole point: dropped by the first two
+    # modes, kept by 'static'.
+    if k_drop[2] != 0 or k_rigid[2] != 0 or k_static[2] != 1:
+        fails.append("row 2 (no estimate at all) handled wrongly across modes")
+
     if fails:
         print("FAIL")
         for f in fails:
             print(" -", f)
         return 1
-    print("PASS  (7 properties: off bit-identical, flow precedence, fallback fills,"
-          " neither->deleted, no blending, own-frame untouched, soft validity)")
+    print("PASS  (drop bit-identical, flow precedence, rigid fills, neither->deleted,"
+          " no blending, own-frame untouched, soft validity, and 'static' changes"
+          " ONLY survival: keep drop/rigid/static = 1010/1110/1111)")
     return 0
 
 

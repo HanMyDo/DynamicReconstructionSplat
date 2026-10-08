@@ -387,7 +387,7 @@ class TrainingConfig:
     # (decoder_splatting_cuda.py (1b)). 0 = off (measured behaviour), 1 = full
     # alpha-matching correction. Sweep it; do not trust it.
     dyn_opacity_comp: float = 0.0
-    dyn_disp_fallback: bool = False
+    dyn_unsupported: str = "drop"
     # KMeans clusters for the mask refinement. Fewer clusters group a person into
     # one region, so a p90/max aggregate can recruit all of them from a moving arm.
     dynamic_n_clusters: int = 64
@@ -800,7 +800,7 @@ def compute_rendering_loss(
     gaussian_disp_valid: Optional[torch.Tensor] = None,
     per_frame_compositing: bool = False,
     dyn_opacity_comp: float = 0.0,
-    dyn_disp_fallback: bool = False,
+    dyn_unsupported: str = "drop",
 ) -> tuple:
     """
     Compute MSE rendering loss by rendering predicted Gaussians with given poses.
@@ -858,7 +858,7 @@ def compute_rendering_loss(
         gaussian_disp_valid=gaussian_disp_valid,
         per_frame_compositing=per_frame_compositing,
         dyn_opacity_comp=dyn_opacity_comp,
-        dyn_disp_fallback=dyn_disp_fallback,
+        dyn_unsupported=dyn_unsupported,
     )
 
     pred_rgb = output.color  # [B, V, 3, H, W]
