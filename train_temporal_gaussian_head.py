@@ -387,6 +387,7 @@ class TrainingConfig:
     # (decoder_splatting_cuda.py (1b)). 0 = off (measured behaviour), 1 = full
     # alpha-matching correction. Sweep it; do not trust it.
     dyn_opacity_comp: float = 0.0
+    dyn_disp_fallback: bool = False
     # KMeans clusters for the mask refinement. Fewer clusters group a person into
     # one region, so a p90/max aggregate can recruit all of them from a moving arm.
     dynamic_n_clusters: int = 64

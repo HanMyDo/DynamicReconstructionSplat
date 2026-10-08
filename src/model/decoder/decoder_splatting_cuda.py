@@ -66,6 +66,7 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
         gaussian_disp_valid: Tensor | None = None,
         per_frame_compositing: bool = False,
         dyn_opacity_comp: float = 0.0,
+        dyn_disp_fallback: bool = False,
     ) -> DecoderOutput:
         B, V, _, _  = intrinsics.shape
         H, W = image_shape
@@ -104,10 +105,48 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
                 # leave_one_out = drop view j's OWN Gaussians when rendering view j
                 # (see (2) below) — the honest control against self-reprojection.
                 opacity_ij = opacity_i
+                # Set here, not inside the block below, so section (3) can test it
+                # unconditionally.
+                fb_disp, fb_ok = None, None
                 if gaussian_frame_idx is not None:
                     fidx_i = gaussian_frame_idx[i].to(opacity_i.device)
                     own_frame = (fidx_i == j).float()          # 1 if Gaussian came from view j
                     gate = torch.ones_like(opacity_i)
+
+                    # FALLBACK DISPLACEMENT (--dyn_disp_fallback). Flow-gated
+                    # compositing DELETES every off-frame dynamic Gaussian that no
+                    # track supports. That is right when the own-frame copy survives
+                    # to cover the object, and catastrophic under leave-one-out, where
+                    # it does not: ~46% of the object is deleted and renders as
+                    # background (WHITE, with --bg_color 1 1 1). Measured on
+                    # synchronous2 LOO: dynamic 19.69 -> 11.39 dB, and worse than the
+                    # baseline on PSNR, LPIPS *and* SSIM -- a complete-but-wrong frame
+                    # beats a partial one on every metric.
+                    # So DON'T delete: fall back to the piecewise-rigid group motion,
+                    # which is a LEAVE-ONE-OUT prediction (dyn_group_pred, fitted from
+                    # the other frames) and therefore stays valid under LOO. Flow where
+                    # tracks support it, rigid where they don't, delete only where
+                    # neither has an estimate.
+                    if (dyn_disp_fallback and gaussian_disp is not None
+                            and dyn_group_pred is not None
+                            and dyn_group_centroid is not None
+                            and gaussian_group_idx is not None):
+                        # .long(): these index into the [V,K,...] group tensors, and
+                        # gaussian_frame_idx carries -1 padding, so clamp first.
+                        fidx_l = fidx_i.to(xyz_i.device).long().clamp_min(0)
+                        gidx_f = gaussian_group_idx[i].to(xyz_i.device).long()
+                        has_g = (gidx_f >= 0)              # -1 = static / unassigned
+                        gidx_c = gidx_f.clamp_min(0)
+                        src_f = dyn_group_centroid[i].to(xyz_i.device)[fidx_l, gidx_c]
+                        tgt_f = dyn_group_pred[i].to(xyz_i.device)[j, gidx_c]
+                        ok = has_g
+                        if dyn_group_valid is not None:
+                            # Both ends must have a usable centroid, exactly as the
+                            # piecewise-rigid branch below requires.
+                            gvf = dyn_group_valid[i].to(xyz_i.device).bool()
+                            ok = ok & gvf[fidx_l, gidx_c] & gvf[j, gidx_c]
+                        fb_ok = ok.to(xyz_i.dtype)
+                        fb_disp = (tgt_f - src_f) * fb_ok.unsqueeze(-1)
                     # The opacity the surviving Gaussians render WITH. Only (1b)
                     # changes it; everywhere else it stays opacity_i, so every
                     # existing recipe renders bit-identically.
@@ -134,6 +173,10 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
                         if gaussian_disp_valid is not None:
                             dv = gaussian_disp_valid[i].to(opacity_i.device)[:, j].float()
                             keep = (own_frame + dv).clamp(max=1.0)
+                        if fb_disp is not None:
+                            # A Gaussian the fallback can move is no longer a "could
+                            # only ghost" case, so it survives the gate too.
+                            keep = (keep + fb_ok).clamp(max=1.0)
                         gate = gate * (1.0 - dyn_i * (1.0 - keep))
 
                         # (1b) OPACITY COMPENSATION for the contributors the gate
@@ -226,8 +269,20 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
                         # where tracking says the object went -- a position nothing
                         # supports. Move it fully or not at all; the confidence acts
                         # on opacity (see the gate above), not on geometry.
-                        move = move * (gaussian_disp_valid[i].to(xyz_i.device)[:, j] > 0).float()
-                    xyz_ij = xyz_i + move.unsqueeze(-1) * gaussian_disp[i].to(xyz_i.device)[:, j].float()
+                        flow_ok = (gaussian_disp_valid[i].to(xyz_i.device)[:, j] > 0).float()
+                    else:
+                        flow_ok = torch.ones_like(move)
+                    disp_ij = gaussian_disp[i].to(xyz_i.device)[:, j].float()
+                    if fb_disp is not None:
+                        # Flow takes precedence where it is supported; the fallback
+                        # fills in the rest. Binary choice, never a blend: a Gaussian
+                        # part-way between two estimates sits where nothing supports it.
+                        use_fb = (1.0 - flow_ok) * fb_ok
+                        disp_ij = disp_ij * flow_ok.unsqueeze(-1) + fb_disp * use_fb.unsqueeze(-1)
+                        move = move * (flow_ok + use_fb).clamp(max=1.0)
+                    else:
+                        move = move * flow_ok
+                    xyz_ij = xyz_i + move.unsqueeze(-1) * disp_ij
                 elif (dyn_group_centroid is not None and dyn_group_pred is not None
                         and gaussian_group_idx is not None and gaussian_frame_idx is not None
                         and gaussian_dyn_flag is not None):
@@ -324,6 +379,7 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
         gaussian_disp_valid: Tensor | None = None,
         per_frame_compositing: bool = False,
         dyn_opacity_comp: float = 0.0,
+        dyn_disp_fallback: bool = False,
     ) -> DecoderOutput:
 
         return self.rendering_fn(gaussians, extrinsics, intrinsics, near, far, image_shape, depth_mode, cam_rot_delta, cam_trans_delta,
@@ -333,6 +389,7 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
                                  dyn_group_centroid=dyn_group_centroid, dyn_group_pred=dyn_group_pred,
                                  dyn_group_valid=dyn_group_valid, gaussian_group_idx=gaussian_group_idx,
                                  gaussian_disp=gaussian_disp, gaussian_disp_valid=gaussian_disp_valid,
+                                 dyn_disp_fallback=dyn_disp_fallback,
                                  per_frame_compositing=per_frame_compositing,
                                  dyn_opacity_comp=dyn_opacity_comp)
 
