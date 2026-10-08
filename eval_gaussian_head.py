@@ -445,6 +445,8 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
             gaussian_track_dist=(infos.get("gaussian_track_dist") if track_dynamic else None),
             dyn_far_static=(getattr(config, "dyn_far_static", 0.0)
                             if (per_frame_dynamic and track_dynamic) else 0.0),
+            dyn_nearest_source=(getattr(config, "dyn_nearest_source", 0)
+                                if per_frame_dynamic else 0),
         )
         if infos.get("dyn_group_pred") is not None:
             n_group_motion += 1
@@ -1165,6 +1167,21 @@ def main():
                         help="Fuse STATIC pixels into shared voxels (one set per target view, "
                              "that view excluded so leave-one-out stays exact); dynamic pixels "
                              "stay per-pixel. Requires dynamic masks (--dyn_mask_dir).")
+    parser.add_argument("--dyn_nearest_source", type=int, default=0,
+                        help="Render dynamic content from only the N source frames NEAREST IN "
+                             "TIME to the target (0 = off, all frames contribute). WHY: every "
+                             "source frame carries its own monocular depth map and those "
+                             "disagree -- voxel fusion of the same surface across frames merges "
+                             "almost nothing once the camera has moved (measured ratio 0.694 at "
+                             "stride 8). So the V-1 copies of a mover do not stack into a "
+                             "surface, they scatter in DEPTH into a cloud that fails to occlude "
+                             "the background: the translucent, patchy person, with the stale "
+                             "copies as ghosts. Averaging scattered copies cannot fix that; "
+                             "picking ONE can, because a single frame's reconstruction is "
+                             "internally consistent. Render-time analogue of "
+                             "--ply_own_frame_only, which made the PLY exports sharp for the "
+                             "same reason. Cost: fewer contributors, so the mover is sharper but "
+                             "thinner -- raise --dyn_opacity_comp to compensate. Try 1 and 2.")
     parser.add_argument("--dyn_far_static", type=float, default=0.0,
                         help="Distance-gated rescue, in units of the local track spacing. An "
                              "off-frame dynamic gaussian with NO flow support is KEPT in place "
@@ -1516,6 +1533,7 @@ def main():
         dyn_opacity_comp=args.dyn_opacity_comp,
         dyn_unsupported=args.dyn_unsupported,
         dyn_far_static=args.dyn_far_static,
+        dyn_nearest_source=args.dyn_nearest_source,
     )
 
     print(f"\nLoading {args.split} dataset...")
@@ -1557,6 +1575,7 @@ def main():
             "num_frames": args.num_frames,
             "dyn_unsupported": args.dyn_unsupported,
             "dyn_far_static": args.dyn_far_static,
+            "dyn_nearest_source": args.dyn_nearest_source,
             "backbone": "vggt" if args.no_vggt4d else "vggt4d",
             "mode": "finetuned" if args.checkpoint else "baseline",
             "per_frame_dynamic": args.per_frame_dynamic,

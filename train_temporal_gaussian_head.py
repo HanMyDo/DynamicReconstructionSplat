@@ -389,6 +389,7 @@ class TrainingConfig:
     dyn_opacity_comp: float = 0.0
     dyn_unsupported: str = "drop"
     dyn_far_static: float = 0.0
+    dyn_nearest_source: int = 0
     # KMeans clusters for the mask refinement. Fewer clusters group a person into
     # one region, so a p90/max aggregate can recruit all of them from a moving arm.
     dynamic_n_clusters: int = 64
@@ -804,6 +805,7 @@ def compute_rendering_loss(
     dyn_unsupported: str = "drop",
     gaussian_track_dist=None,
     dyn_far_static: float = 0.0,
+    dyn_nearest_source: int = 0,
 ) -> tuple:
     """
     Compute MSE rendering loss by rendering predicted Gaussians with given poses.
@@ -864,6 +866,7 @@ def compute_rendering_loss(
         dyn_unsupported=dyn_unsupported,
         gaussian_track_dist=gaussian_track_dist,
         dyn_far_static=dyn_far_static,
+        dyn_nearest_source=dyn_nearest_source,
     )
 
     pred_rgb = output.color  # [B, V, 3, H, W]

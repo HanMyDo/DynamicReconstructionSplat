@@ -69,6 +69,7 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
         dyn_unsupported: str = "drop",
         gaussian_track_dist: Tensor | None = None,
         dyn_far_static: float = 0.0,
+        dyn_nearest_source: int = 0,
     ) -> DecoderOutput:
         B, V, _, _  = intrinsics.shape
         H, W = image_shape
@@ -100,6 +101,11 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
             # measured as noise and it took a whole GPU run to work out that the
             # branch had barely fired, which this makes visible immediately.
             _acc = torch.zeros(4, device=xyz_i.device) if gaussian_disp is not None else None
+            # [survived, total] for OFF-FRAME DYNAMIC gaussians, so the effect of
+            # --dyn_nearest_source is visible in the log rather than assumed. Three
+            # separate changes in this file's history looked wired and silently did
+            # nothing; a read-out is cheaper than finding that out from a GPU run.
+            _keep_acc = torch.zeros(2, device=xyz_i.device)
             for j in range(V):
                 # --- Per-frame dynamic compositing ------------------------------
                 # Default (labels None) = original behaviour: every Gaussian renders
@@ -205,6 +211,30 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
                             keep = (keep + fb_ok).clamp(max=1.0)
                         if far_ok is not None and dyn_unsupported != "static":
                             keep = (keep + far_ok).clamp(max=1.0)
+                        if dyn_nearest_source > 0:
+                            # TEMPORAL SOURCE RESTRICTION. Every source frame carries its
+                            # OWN monocular depth map, and those disagree: voxel fusion of
+                            # the same surface across frames merges almost nothing once the
+                            # camera has moved (measured ratio 0.694 at stride 8). So the
+                            # V-1 copies of a mover do not stack into a surface -- they
+                            # scatter in DEPTH into a cloud, which does not occlude the
+                            # background behind it. That is the translucent, patchy person,
+                            # and the stale ones among them are the ghosts.
+                            # Averaging scattered copies cannot fix it; picking ONE can,
+                            # because a single frame's reconstruction is internally
+                            # consistent (one depth map). This is the render-time analogue
+                            # of --ply_own_frame_only, which is what made the PLY exports
+                            # sharp for exactly this reason.
+                            # Ranked by |i - j| with j itself excluded (LOO drops it anyway),
+                            # so window edges pick the nearest available frames rather than
+                            # a fixed offset. Cost: fewer contributors, so the mover is
+                            # sharper but thinner -- --dyn_opacity_comp carries that.
+                            _ord = sorted((x for x in range(V) if x != j),
+                                          key=lambda x: abs(x - j))[:dyn_nearest_source]
+                            _allow = torch.zeros(V, dtype=torch.bool, device=opacity_i.device)
+                            _allow[torch.tensor(_ord, device=opacity_i.device)] = True
+                            near_ok = _allow[fidx_i.long().clamp_min(0)].to(opacity_i.dtype)
+                            keep = keep * (own_frame + near_ok).clamp(max=1.0)
                         if dyn_unsupported == "static":
                             # NOTHING is deleted for want of a motion estimate. A
                             # Gaussian with no estimate renders where it already is,
@@ -218,6 +248,9 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
                             # A genuine mover caught here ghosts from one extra
                             # position, which is the price.
                             keep = torch.ones_like(keep)
+                        _offdyn = dyn_i * (1.0 - own_frame)
+                        _keep_acc[0] += (_offdyn * keep).sum()
+                        _keep_acc[1] += _offdyn.sum()
                         gate = gate * (1.0 - dyn_i * (1.0 - keep))
 
                         # (1b) OPACITY COMPENSATION for the contributors the gate
@@ -406,6 +439,11 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
             if _acc is not None and i == 0:
                 _t = _acc.sum().clamp_min(1.0)
                 _f, _r, _st, _d = (_acc / _t * 100.0).tolist()
+                _ka = _keep_acc.tolist()
+                if _ka[1] > 0:
+                    print(f"[DynKeep] off-frame dynamic gaussians surviving the gate: "
+                          f"{100.0 * _ka[0] / _ka[1]:.1f}%  (nearest_source="
+                          f"{dyn_nearest_source or 'off'})", flush=True)
                 print(f"[DynUnsup/{dyn_unsupported}] of {int(_acc.sum().item())} off-frame "
                       f"dynamic (gaussian,target) pairs: flow {_f:.1f}%  rigid {_r:.1f}%  "
                       f"kept-static {_st:.1f}%  DROPPED {_d:.1f}%", flush=True)
@@ -443,6 +481,7 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
         dyn_unsupported: str = "drop",
         gaussian_track_dist: Tensor | None = None,
         dyn_far_static: float = 0.0,
+        dyn_nearest_source: int = 0,
     ) -> DecoderOutput:
 
         return self.rendering_fn(gaussians, extrinsics, intrinsics, near, far, image_shape, depth_mode, cam_rot_delta, cam_trans_delta,
@@ -455,6 +494,7 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
                                  dyn_unsupported=dyn_unsupported,
                                  gaussian_track_dist=gaussian_track_dist,
                                  dyn_far_static=dyn_far_static,
+                                 dyn_nearest_source=dyn_nearest_source,
                                  per_frame_compositing=per_frame_compositing,
                                  dyn_opacity_comp=dyn_opacity_comp)
 
