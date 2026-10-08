@@ -928,6 +928,7 @@ def knn_flow_displacement(
     same_object: float = 0.0,
     strict: bool = False,
     pred_bandwidth: float = 0.0,
+    nn_dist_out: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Phase B: per-Gaussian displacement toward every target frame, by direct
     track correspondence (NOT extrapolation).
@@ -943,6 +944,17 @@ def knn_flow_displacement(
     `strict` swaps the OBSERVED target-frame track positions for leave-one-out
     predictions (see predict_tracks_loo), so frame j is never read. The source
     frame i is always the observed position — i is not the held-out frame.
+
+    `nn_dist_out` [N], if given, is FILLED with each dynamic Gaussian's distance to
+    its NEAREST track at its own source frame, in units of the local track spacing
+    (the same scale-free quantity gate_mult uses). It is an output buffer rather
+    than a return value so the existing 2-tuple callers keep working. Left at its
+    initial value (use +inf) for Gaussians whose frame had too few tracks.
+    WHY IT IS NEEDED: the two populations the radius gate rejects want OPPOSITE
+    treatment. A Gaussian a few spacings away is a real mover whose correspondence
+    failed -- keeping it ghosts. One METRES away was never near a track at all and
+    is almost certainly a mask false positive, i.e. static content -- dropping it
+    punches a hole in the background. Only the distance separates them.
 
     traj [V,Nt,3], ok [V,Nt];  gauss_pts [N,3], gauss_fidx [N], gauss_dyn [N] bool.
     -> (disp [N, num_views, 3], valid [N, num_views] float 0/1). disp is 0 where
@@ -977,6 +989,10 @@ def knn_flow_displacement(
         kk = min(k, M)
         d_gt = torch.cdist(G, P)                     # [n_i, M]
         dist, idx = d_gt.topk(kk, dim=1, largest=False)
+        if nn_dist_out is not None:
+            # Nearest-track distance in units of the local spacing, so the threshold
+            # is scene-scale free exactly as gate_mult is.
+            nn_dist_out[sel] = (dist[:, 0] / spacing.clamp_min(1e-6)).to(nn_dist_out.dtype)
         w0 = (dist <= gate_r).float() / (dist + 1e-6)          # [n_i, kk]
 
         # SAME-OBJECT RESTRICTION. The weighted mean below averages a gaussian's k

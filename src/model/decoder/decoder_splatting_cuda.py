@@ -67,6 +67,8 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
         per_frame_compositing: bool = False,
         dyn_opacity_comp: float = 0.0,
         dyn_unsupported: str = "drop",
+        gaussian_track_dist: Tensor | None = None,
+        dyn_far_static: float = 0.0,
     ) -> DecoderOutput:
         B, V, _, _  = intrinsics.shape
         H, W = image_shape
@@ -114,11 +116,28 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
                 opacity_ij = opacity_i
                 # Set here, not inside the block below, so section (3) can test it
                 # unconditionally.
-                fb_disp, fb_ok = None, None
+                fb_disp, fb_ok, far_ok = None, None, None
                 if gaussian_frame_idx is not None:
                     fidx_i = gaussian_frame_idx[i].to(opacity_i.device)
                     own_frame = (fidx_i == j).float()          # 1 if Gaussian came from view j
                     gate = torch.ones_like(opacity_i)
+
+                    # DISTANCE-GATED RESCUE (--dyn_far_static M). The radius gate
+                    # rejects two populations that want OPPOSITE treatment:
+                    #   - a few spacings away: a real mover whose correspondence
+                    #     failed. KEEPING it renders the object at a stale position
+                    #     = the ghosts/haze over the scene.
+                    #   - METRES away (never near any track): almost certainly a
+                    #     mask FALSE POSITIVE, i.e. static content. DROPPING it
+                    #     deletes background in every view, and with --bg_color
+                    #     1 1 1 the result is the white speckles in the renders.
+                    # 'drop' treats both as the first case and 'static' treats both
+                    # as the second; measured, each fixes one artefact and causes
+                    # the other. This keeps only the FAR ones, which should give
+                    # solid movers AND no speckles.
+                    if dyn_far_static > 0 and gaussian_track_dist is not None:
+                        far_ok = (gaussian_track_dist[i].to(opacity_i.device)
+                                  > dyn_far_static).to(opacity_i.dtype)
 
                     # FALLBACK DISPLACEMENT (--dyn_unsupported rigid). Flow-gated
                     # compositing DELETES every off-frame dynamic Gaussian that no
@@ -184,6 +203,8 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
                             # A Gaussian the fallback can move is no longer a "could
                             # only ghost" case, so it survives the gate too.
                             keep = (keep + fb_ok).clamp(max=1.0)
+                        if far_ok is not None and dyn_unsupported != "static":
+                            keep = (keep + far_ok).clamp(max=1.0)
                         if dyn_unsupported == "static":
                             # NOTHING is deleted for want of a motion estimate. A
                             # Gaussian with no estimate renders where it already is,
@@ -308,8 +329,14 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
                         _rest = _off * (1.0 - flow_ok) * (1.0 - _fbk)
                         _acc[0] += (_off * flow_ok).sum()
                         _acc[1] += (_off * (1.0 - flow_ok) * _fbk).sum()
-                        _acc[2] += _rest.sum() if dyn_unsupported == "static" else 0.0
-                        _acc[3] += 0.0 if dyn_unsupported == "static" else _rest.sum()
+                        if dyn_unsupported == "static":
+                            _kept = _rest
+                        elif far_ok is not None:
+                            _kept = _rest * far_ok
+                        else:
+                            _kept = torch.zeros_like(_rest)
+                        _acc[2] += _kept.sum()
+                        _acc[3] += (_rest - _kept).sum()
                     xyz_ij = xyz_i + move.unsqueeze(-1) * disp_ij
                 elif (dyn_group_centroid is not None and dyn_group_pred is not None
                         and gaussian_group_idx is not None and gaussian_frame_idx is not None
@@ -414,6 +441,8 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
         per_frame_compositing: bool = False,
         dyn_opacity_comp: float = 0.0,
         dyn_unsupported: str = "drop",
+        gaussian_track_dist: Tensor | None = None,
+        dyn_far_static: float = 0.0,
     ) -> DecoderOutput:
 
         return self.rendering_fn(gaussians, extrinsics, intrinsics, near, far, image_shape, depth_mode, cam_rot_delta, cam_trans_delta,
@@ -424,6 +453,8 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
                                  dyn_group_valid=dyn_group_valid, gaussian_group_idx=gaussian_group_idx,
                                  gaussian_disp=gaussian_disp, gaussian_disp_valid=gaussian_disp_valid,
                                  dyn_unsupported=dyn_unsupported,
+                                 gaussian_track_dist=gaussian_track_dist,
+                                 dyn_far_static=dyn_far_static,
                                  per_frame_compositing=per_frame_compositing,
                                  dyn_opacity_comp=dyn_opacity_comp)
 

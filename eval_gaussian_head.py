@@ -442,6 +442,9 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
             # nothing was being deleted.
             dyn_unsupported=(getattr(config, "dyn_unsupported", "drop")
                              if (per_frame_dynamic and track_dynamic) else "drop"),
+            gaussian_track_dist=(infos.get("gaussian_track_dist") if track_dynamic else None),
+            dyn_far_static=(getattr(config, "dyn_far_static", 0.0)
+                            if (per_frame_dynamic and track_dynamic) else 0.0),
         )
         if infos.get("dyn_group_pred") is not None:
             n_group_motion += 1
@@ -1162,6 +1165,19 @@ def main():
                         help="Fuse STATIC pixels into shared voxels (one set per target view, "
                              "that view excluded so leave-one-out stays exact); dynamic pixels "
                              "stay per-pixel. Requires dynamic masks (--dyn_mask_dir).")
+    parser.add_argument("--dyn_far_static", type=float, default=0.0,
+                        help="Distance-gated rescue, in units of the local track spacing. An "
+                             "off-frame dynamic gaussian with NO flow support is KEPT in place "
+                             "(rendered like a static one) when its nearest track is farther than "
+                             "this, and DROPPED otherwise. 0 = off. Separates the two populations "
+                             "the radius gate rejects: a few spacings away = a real mover whose "
+                             "correspondence failed, and keeping it produces the ghosts/haze; "
+                             "metres away = never near a track at all, almost certainly a mask "
+                             "FALSE POSITIVE, and dropping it deletes background in every view "
+                             "(the white speckles under --bg_color 1 1 1). --dyn_unsupported drop "
+                             "treats both as the first case, 'static' treats both as the second, "
+                             "and each was measured to fix one artefact and cause the other. Try "
+                             "values around 5-20; combine with --dyn_unsupported drop.")
     parser.add_argument("--dyn_unsupported", choices=["drop", "rigid", "static"], default="drop",
                         help="What to do with an off-frame DYNAMIC gaussian that no RAFT track "
                              "supports. 'drop' (default, every published recipe) = flow-gated "
@@ -1499,6 +1515,7 @@ def main():
                           else TrainingConfig.background_color),
         dyn_opacity_comp=args.dyn_opacity_comp,
         dyn_unsupported=args.dyn_unsupported,
+        dyn_far_static=args.dyn_far_static,
     )
 
     print(f"\nLoading {args.split} dataset...")
@@ -1539,6 +1556,7 @@ def main():
             "split": args.split,
             "num_frames": args.num_frames,
             "dyn_unsupported": args.dyn_unsupported,
+            "dyn_far_static": args.dyn_far_static,
             "backbone": "vggt" if args.no_vggt4d else "vggt4d",
             "mode": "finetuned" if args.checkpoint else "baseline",
             "per_frame_dynamic": args.per_frame_dynamic,

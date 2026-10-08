@@ -1092,7 +1092,7 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
         # points from different frames into one anchor, destroying the 1:1
         # Gaussian -> (frame, pixel) correspondence this relies on.
         frame_idx_list, dyn_flag_list, group_idx_list = [], [], []
-        disp_list, disp_valid_list = [], []
+        disp_list, disp_valid_list, track_dist_list = [], [], []
         track_frame_idx = not self.cfg.voxelize
         only_view_list = []
         use_hybrid = (self.cfg.hybrid_voxelize and not self.cfg.voxelize
@@ -1181,6 +1181,14 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
                     _tr = self._dyn_tracks[b_i]
                     _n_b = neural_pts_list[-1].shape[0]
                     if _tr is not None:
+                        # Distance (in track spacings) from each gaussian to its
+                        # nearest track. Separates the two populations the radius
+                        # gate rejects: a real mover whose correspondence failed
+                        # (a few spacings) from a mask false positive that was never
+                        # near a track at all (metres). inf = frame had too few
+                        # tracks, which counts as "far".
+                        _nn = torch.full((_n_b,), float("inf"),
+                                         device=pts_all.device, dtype=pts_all.dtype)
                         _d, _dv = knn_flow_displacement(
                             _tr[0], _tr[1],
                             neural_pts_list[-1], frame_idx_list[-1],
@@ -1192,14 +1200,18 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
                             same_object=getattr(self.cfg, "dyn_same_object", 0.0),
                             strict=getattr(self.cfg, "dyn_motion_strict", False),
                             pred_bandwidth=getattr(self.cfg, "dyn_motion_pred_bandwidth", 0.0),
+                            nn_dist_out=_nn,
                         )
                     else:
                         _d = torch.zeros(_n_b, v, 3, device=pts_all.device,
                                          dtype=pts_all.dtype)
                         _dv = torch.zeros(_n_b, v, device=pts_all.device,
                                           dtype=pts_all.dtype)
+                        _nn = torch.full((_n_b,), float("inf"),
+                                         device=pts_all.device, dtype=pts_all.dtype)
                     disp_list.append(_d)
                     disp_valid_list.append(_dv)
+                    track_dist_list.append(_nn)
 
         max_voxels = max(f.shape[0] for f in neural_feats_list)
         neural_feats = self.pad_tensor_list(
@@ -1243,6 +1255,13 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
         gaussian_disp_valid = (
             self.pad_tensor_list(disp_valid_list, (max_voxels,), 0.0)
             if (track_frame_idx and disp_valid_list)
+            else None
+        )
+        # Padded slots are inert anyway (opacity 0); inf keeps them on the "far"
+        # side so no policy ever revives them.
+        gaussian_track_dist = (
+            self.pad_tensor_list(track_dist_list, (max_voxels,), float("inf"))
+            if (track_frame_idx and track_dist_list)
             else None
         )
 
@@ -1318,6 +1337,10 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
                 gaussian_disp_valid = (
                     gaussian_disp_valid[gaussian_usage].view(b, -1, v).contiguous()
                 )
+            if gaussian_track_dist is not None:
+                gaussian_track_dist = (
+                    gaussian_track_dist[gaussian_usage].view(b, -1).contiguous()
+                )
 
             print(
                 f"finally pruned {gaussian_usage.shape[1] - neural_pts.shape[1]} gaussians out of {gaussian_usage.shape[1]}"
@@ -1371,6 +1394,8 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
             # Scene-flow motion: per-Gaussian displacement toward each target frame,
             # from direct track correspondence (dyn_motion.py "UPGRADE").
             infos["gaussian_disp"] = gaussian_disp            # [B,N,V,3]
+            if gaussian_track_dist is not None:
+                infos["gaussian_track_dist"] = gaussian_track_dist   # [B,N] spacings
             infos["gaussian_disp_valid"] = gaussian_disp_valid  # [B,N,V]
             # Gate accounting from the last knn_flow_displacement call, so eval can
             # average it over the sequence instead of the log carrying one line per
