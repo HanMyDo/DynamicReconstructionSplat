@@ -319,10 +319,20 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
                         # Alpha form, not a multiplier: o' = 1 - (1-o)^G is what
                         # G co-located contributors would compose to, so G has the
                         # same meaning as the exponent in (1b). G = 1 is off.
+                        # SCOPED TO FLOW-SUPPORTED GAUSSIANS. Boosting everything
+                        # flagged dynamic measured dynamic +2.29 dB and static -8.00:
+                        # our masks over-flag 36% of the frame, so a large share of
+                        # "dynamic" gaussians sit on walls and furniture, and making
+                        # them opaque paints patches over the background (a_stat
+                        # 0.974 -> 0.985). Flow support is what separates the two:
+                        # near a track = on the mover, no track = mask false positive.
                         if dyn_opacity_gain != 1.0:
                             _o = opac_eff.clamp(0.0, 1.0)
                             _boost = 1.0 - (1.0 - _o).clamp_min(1e-6).pow(dyn_opacity_gain)
-                            opac_eff = torch.where(dyn_i > 0.5, _boost, opac_eff)
+                            _on_mover = dyn_i > 0.5
+                            if dv is not None:
+                                _on_mover = _on_mover & (dv > 0)
+                            opac_eff = torch.where(_on_mover, _boost, opac_eff)
 
                     # (2) Leave-one-out: drop view j's OWN Gaussians entirely (static
                     #     AND dynamic), so view j must be reconstructed from the OTHER
