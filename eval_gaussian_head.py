@@ -447,6 +447,7 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
                             if (per_frame_dynamic and track_dynamic) else 0.0),
             dyn_nearest_source=(getattr(config, "dyn_nearest_source", 0)
                                 if per_frame_dynamic else 0),
+            dyn_nearest_scope=getattr(config, "dyn_nearest_scope", "flow"),
         )
         if infos.get("dyn_group_pred") is not None:
             n_group_motion += 1
@@ -1182,6 +1183,16 @@ def main():
                              "--ply_own_frame_only, which made the PLY exports sharp for the "
                              "same reason. Cost: fewer contributors, so the mover is sharper but "
                              "thinner -- raise --dyn_opacity_comp to compensate. Try 1 and 2.")
+    parser.add_argument("--dyn_nearest_scope", choices=["flow", "all"], default="flow",
+                        help="Which dynamic gaussians --dyn_nearest_source restricts. 'flow' "
+                             "(default) restricts only the FLOW-SUPPORTED ones -- the genuine "
+                             "mover -- and keeps every unsupported one, because our masks "
+                             "over-flag (36%% of the frame) so most of those are mis-masked "
+                             "BACKGROUND and dropping them punches holes in the walls. 'all' "
+                             "restricts every dynamic gaussian; measured +1.39 dB dynamic but "
+                             "-2.07 static for exactly that reason. The two populations split "
+                             "along flow support, not along distance-to-track, which measured "
+                             "negative.")
     parser.add_argument("--dyn_far_static", type=float, default=0.0,
                         help="Distance-gated rescue, in units of the local track spacing. An "
                              "off-frame dynamic gaussian with NO flow support is KEPT in place "
@@ -1534,6 +1545,7 @@ def main():
         dyn_unsupported=args.dyn_unsupported,
         dyn_far_static=args.dyn_far_static,
         dyn_nearest_source=args.dyn_nearest_source,
+        dyn_nearest_scope=args.dyn_nearest_scope,
     )
 
     print(f"\nLoading {args.split} dataset...")
@@ -1576,6 +1588,7 @@ def main():
             "dyn_unsupported": args.dyn_unsupported,
             "dyn_far_static": args.dyn_far_static,
             "dyn_nearest_source": args.dyn_nearest_source,
+            "dyn_nearest_scope": args.dyn_nearest_scope,
             "backbone": "vggt" if args.no_vggt4d else "vggt4d",
             "mode": "finetuned" if args.checkpoint else "baseline",
             "per_frame_dynamic": args.per_frame_dynamic,

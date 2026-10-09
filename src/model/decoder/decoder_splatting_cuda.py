@@ -70,6 +70,7 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
         gaussian_track_dist: Tensor | None = None,
         dyn_far_static: float = 0.0,
         dyn_nearest_source: int = 0,
+        dyn_nearest_scope: str = "flow",
     ) -> DecoderOutput:
         B, V, _, _  = intrinsics.shape
         H, W = image_shape
@@ -202,6 +203,7 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
                         # Coverage stops being a defect and becomes the relocate/drop
                         # split. With no flow, disp_valid is None and this is plain pfd.
                         keep = own_frame
+                        dv = None
                         if gaussian_disp_valid is not None:
                             dv = gaussian_disp_valid[i].to(opacity_i.device)[:, j].float()
                             keep = (own_frame + dv).clamp(max=1.0)
@@ -252,7 +254,23 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
                             _allow = torch.zeros(V, dtype=torch.bool, device=opacity_i.device)
                             _allow[torch.tensor(_ord, device=opacity_i.device)] = True
                             near_ok = _allow[fidx_i.long().clamp_min(0)].to(opacity_i.dtype)
-                            keep = keep * (own_frame + near_ok).clamp(max=1.0)
+                            # SCOPE. Restricting EVERY dynamic gaussian to the nearest
+                            # sources measured +1.39 dB dynamic and -2.07 static: the
+                            # gain is real, but our masks over-flag (36% of the frame),
+                            # so most "dynamic" gaussians are mis-masked BACKGROUND and
+                            # dropping 87% of them punches the holes back into the walls.
+                            # The two populations split cleanly along FLOW SUPPORT, not
+                            # along distance-to-track (that variant measured negative):
+                            #   supported   = the genuine mover -> restrict, so one
+                            #                 internally consistent surface renders it;
+                            #   unsupported = mask false positives -> keep them all, as
+                            #                 the static policy does, so walls stay filled.
+                            # scope='all' reproduces the first measurement.
+                            if dyn_nearest_scope == "flow" and dv is not None:
+                                _unsup = 1.0 - (dv > 0).to(opacity_i.dtype)
+                                keep = keep * (own_frame + near_ok + _unsup).clamp(max=1.0)
+                            else:
+                                keep = keep * (own_frame + near_ok).clamp(max=1.0)
                         _offdyn = dyn_i * (1.0 - own_frame)
                         _keep_acc[0] += (_offdyn * keep).sum()
                         _keep_acc[1] += _offdyn.sum()
@@ -448,7 +466,8 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
                 if _ka[1] > 0:
                     print(f"[DynKeep] off-frame dynamic gaussians surviving the gate: "
                           f"{100.0 * _ka[0] / _ka[1]:.1f}%  (nearest_source="
-                          f"{dyn_nearest_source or 'off'})", flush=True)
+                          f"{dyn_nearest_source or 'off'}"
+                          f"{'/' + dyn_nearest_scope if dyn_nearest_source else ''})", flush=True)
                 print(f"[DynUnsup/{dyn_unsupported}] of {int(_acc.sum().item())} off-frame "
                       f"dynamic (gaussian,target) pairs: flow {_f:.1f}%  rigid {_r:.1f}%  "
                       f"kept-static {_st:.1f}%  DROPPED {_d:.1f}%", flush=True)
@@ -487,6 +506,7 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
         gaussian_track_dist: Tensor | None = None,
         dyn_far_static: float = 0.0,
         dyn_nearest_source: int = 0,
+        dyn_nearest_scope: str = "flow",
     ) -> DecoderOutput:
 
         return self.rendering_fn(gaussians, extrinsics, intrinsics, near, far, image_shape, depth_mode, cam_rot_delta, cam_trans_delta,
@@ -500,6 +520,7 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
                                  gaussian_track_dist=gaussian_track_dist,
                                  dyn_far_static=dyn_far_static,
                                  dyn_nearest_source=dyn_nearest_source,
+                                 dyn_nearest_scope=dyn_nearest_scope,
                                  per_frame_compositing=per_frame_compositing,
                                  dyn_opacity_comp=dyn_opacity_comp)
 
