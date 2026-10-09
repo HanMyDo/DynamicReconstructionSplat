@@ -71,6 +71,7 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
         dyn_far_static: float = 0.0,
         dyn_nearest_source: int = 0,
         dyn_nearest_scope: str = "flow",
+        dyn_opacity_gain: float = 1.0,
     ) -> DecoderOutput:
         B, V, _, _  = intrinsics.shape
         H, W = image_shape
@@ -300,6 +301,29 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
                         opac_eff = compensate_dyn_opacity(
                             opac_eff, dyn_i, keep, V, dyn_opacity_comp)
 
+                        # (1c) DIRECT OPACITY GAIN on dynamic Gaussians.
+                        # Under leave-one-out a mover is rendered from the OTHER
+                        # frames, whose per-frame depth maps disagree, so its
+                        # Gaussians scatter in depth into a cloud instead of stacking
+                        # into a surface -- and a cloud does not occlude. The wall
+                        # behind shows through, which is the translucent person in the
+                        # renders.
+                        # (1b) above cannot help: it compensates for contributors the
+                        # GATE removed, so with --dyn_unsupported static, where nothing
+                        # is removed, n = V and it is exactly inert. The only time it
+                        # ever fired was when --dyn_nearest_source threw away 87% of
+                        # the contributors, and the +1.39 dB dynamic credited to that
+                        # restriction was in fact this compensation: with the boost
+                        # disabled the same restriction measures -3.39 dB.
+                        # So apply the boost DIRECTLY and keep every contributor.
+                        # Alpha form, not a multiplier: o' = 1 - (1-o)^G is what
+                        # G co-located contributors would compose to, so G has the
+                        # same meaning as the exponent in (1b). G = 1 is off.
+                        if dyn_opacity_gain != 1.0:
+                            _o = opac_eff.clamp(0.0, 1.0)
+                            _boost = 1.0 - (1.0 - _o).clamp_min(1e-6).pow(dyn_opacity_gain)
+                            opac_eff = torch.where(dyn_i > 0.5, _boost, opac_eff)
+
                     # (2) Leave-one-out: drop view j's OWN Gaussians entirely (static
                     #     AND dynamic), so view j must be reconstructed from the OTHER
                     #     frames. This is the honest control: without it, view j's
@@ -507,6 +531,7 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
         dyn_far_static: float = 0.0,
         dyn_nearest_source: int = 0,
         dyn_nearest_scope: str = "flow",
+        dyn_opacity_gain: float = 1.0,
     ) -> DecoderOutput:
 
         return self.rendering_fn(gaussians, extrinsics, intrinsics, near, far, image_shape, depth_mode, cam_rot_delta, cam_trans_delta,
@@ -521,6 +546,7 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
                                  dyn_far_static=dyn_far_static,
                                  dyn_nearest_source=dyn_nearest_source,
                                  dyn_nearest_scope=dyn_nearest_scope,
+                                 dyn_opacity_gain=dyn_opacity_gain,
                                  per_frame_compositing=per_frame_compositing,
                                  dyn_opacity_comp=dyn_opacity_comp)
 

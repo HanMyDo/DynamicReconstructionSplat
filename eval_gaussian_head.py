@@ -448,6 +448,8 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
             dyn_nearest_source=(getattr(config, "dyn_nearest_source", 0)
                                 if per_frame_dynamic else 0),
             dyn_nearest_scope=getattr(config, "dyn_nearest_scope", "flow"),
+            dyn_opacity_gain=(getattr(config, "dyn_opacity_gain", 1.0)
+                              if per_frame_dynamic else 1.0),
         )
         if infos.get("dyn_group_pred") is not None:
             n_group_motion += 1
@@ -1183,6 +1185,20 @@ def main():
                              "--ply_own_frame_only, which made the PLY exports sharp for the "
                              "same reason. Cost: fewer contributors, so the mover is sharper but "
                              "thinner -- raise --dyn_opacity_comp to compensate. Try 1 and 2.")
+    parser.add_argument("--dyn_opacity_gain", type=float, default=1.0,
+                        help="Boost the opacity of DYNAMIC gaussians directly: "
+                             "o' = 1 - (1-o)^G, the alpha G co-located contributors would "
+                             "compose to. 1.0 = off. WHY: under --eval_loo a mover is rendered "
+                             "from the OTHER frames, whose depth maps disagree, so its gaussians "
+                             "scatter in depth into a cloud that does not occlude the wall "
+                             "behind it -- the translucent person. --dyn_opacity_comp cannot fix "
+                             "this: it compensates for contributors the GATE removed, so with "
+                             "--dyn_unsupported static (nothing removed, n = V) it is exactly "
+                             "INERT. It only ever fired when --dyn_nearest_source discarded 87%% "
+                             "of contributors, and the +1.39 dB dynamic credited to that "
+                             "restriction was really this boost: with the boost off the same "
+                             "restriction measures -3.39 dB. This applies the boost while "
+                             "keeping every contributor. Try 2, 4, 8.")
     parser.add_argument("--dyn_nearest_scope", choices=["flow", "all"], default="flow",
                         help="Which dynamic gaussians --dyn_nearest_source restricts. 'flow' "
                              "(default) restricts only the FLOW-SUPPORTED ones -- the genuine "
@@ -1546,6 +1562,7 @@ def main():
         dyn_far_static=args.dyn_far_static,
         dyn_nearest_source=args.dyn_nearest_source,
         dyn_nearest_scope=args.dyn_nearest_scope,
+        dyn_opacity_gain=args.dyn_opacity_gain,
     )
 
     print(f"\nLoading {args.split} dataset...")
@@ -1589,6 +1606,7 @@ def main():
             "dyn_far_static": args.dyn_far_static,
             "dyn_nearest_source": args.dyn_nearest_source,
             "dyn_nearest_scope": args.dyn_nearest_scope,
+            "dyn_opacity_gain": args.dyn_opacity_gain,
             "backbone": "vggt" if args.no_vggt4d else "vggt4d",
             "mode": "finetuned" if args.checkpoint else "baseline",
             "per_frame_dynamic": args.per_frame_dynamic,
