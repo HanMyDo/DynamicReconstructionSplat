@@ -211,6 +211,24 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
                             keep = (keep + fb_ok).clamp(max=1.0)
                         if far_ok is not None and dyn_unsupported != "static":
                             keep = (keep + far_ok).clamp(max=1.0)
+                        if dyn_unsupported == "static":
+                            # NOTHING is deleted for want of a motion estimate. A
+                            # Gaussian with no estimate renders where it already is,
+                            # exactly like a static one. Most of them ARE static:
+                            # ~45% of "dynamic" Gaussians sit metres from any track,
+                            # i.e. they are mask false positives, and no track-derived
+                            # model (flow or rigid) can ever place them. Under
+                            # leave-one-out, deleting them punches holes in the
+                            # BACKGROUND, and a complete-but-wrong frame beats a
+                            # partial one on PSNR, LPIPS and SSIM alike.
+                            # A genuine mover caught here ghosts from one extra
+                            # position, which is the price.
+                            keep = torch.ones_like(keep)
+
+                        # APPLIED LAST, deliberately: this RESTRICTS whatever the
+                        # policy above decided to keep. Placed before the 'static'
+                        # branch it was silently a no-op, because that branch sets
+                        # keep = ones and overwrote it.
                         if dyn_nearest_source > 0:
                             # TEMPORAL SOURCE RESTRICTION. Every source frame carries its
                             # OWN monocular depth map, and those disagree: voxel fusion of
@@ -235,19 +253,6 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
                             _allow[torch.tensor(_ord, device=opacity_i.device)] = True
                             near_ok = _allow[fidx_i.long().clamp_min(0)].to(opacity_i.dtype)
                             keep = keep * (own_frame + near_ok).clamp(max=1.0)
-                        if dyn_unsupported == "static":
-                            # NOTHING is deleted for want of a motion estimate. A
-                            # Gaussian with no estimate renders where it already is,
-                            # exactly like a static one. Most of them ARE static:
-                            # ~45% of "dynamic" Gaussians sit metres from any track,
-                            # i.e. they are mask false positives, and no track-derived
-                            # model (flow or rigid) can ever place them. Under
-                            # leave-one-out, deleting them punches holes in the
-                            # BACKGROUND, and a complete-but-wrong frame beats a
-                            # partial one on PSNR, LPIPS and SSIM alike.
-                            # A genuine mover caught here ghosts from one extra
-                            # position, which is the price.
-                            keep = torch.ones_like(keep)
                         _offdyn = dyn_i * (1.0 - own_frame)
                         _keep_acc[0] += (_offdyn * keep).sum()
                         _keep_acc[1] += _offdyn.sum()
