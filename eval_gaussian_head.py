@@ -450,6 +450,9 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
             dyn_nearest_scope=getattr(config, "dyn_nearest_scope", "flow"),
             dyn_opacity_gain=(getattr(config, "dyn_opacity_gain", 1.0)
                               if per_frame_dynamic else 1.0),
+            dyn_unsup_gain=(getattr(config, "dyn_unsup_gain", 1.0)
+                            if per_frame_dynamic else 1.0),
+            dyn_scale_mult=getattr(config, "dyn_scale_mult", 1.0),
         )
         if infos.get("dyn_group_pred") is not None:
             n_group_motion += 1
@@ -1185,6 +1188,24 @@ def main():
                              "--ply_own_frame_only, which made the PLY exports sharp for the "
                              "same reason. Cost: fewer contributors, so the mover is sharper but "
                              "thinner -- raise --dyn_opacity_comp to compensate. Try 1 and 2.")
+    parser.add_argument("--dyn_unsup_gain", type=float, default=1.0,
+                        help="Alpha gain for the UNSUPPORTED dynamic gaussians (no flow "
+                             "support), the ones --dyn_unsupported static keeps at their "
+                             "ORIGINAL position. Each source frame leaves one copy along the "
+                             "mover's path, which is the duplicated outlines in the renders. "
+                             "Both ends of the binary are measured: dropping them punches white "
+                             "holes and loses on every metric; keeping them at full opacity wins "
+                             "on metrics but ghosts. Set < 1 to ATTENUATE -- they still fill the "
+                             "background so no holes appear, but stop reading as duplicate "
+                             "people. Try 0.5 and 0.25. 1.0 = off.")
+    parser.add_argument("--dyn_scale_mult", type=float, default=1.0,
+                        help="Enlarge DYNAMIC gaussians by this factor at render time. Relocated "
+                             "copies of a mover do not tile into a surface -- each sits at a "
+                             "slightly different depth and is sized for its SOURCE frame's pixel "
+                             "density -- so the person renders granular rather than solid. "
+                             "Applied to the COVARIANCES (as mult**2), because rasterization is "
+                             "called with covars=, which overrides scales in gsplat. Try 1.3, "
+                             "1.6. 1.0 = off.")
     parser.add_argument("--dyn_opacity_gain", type=float, default=1.0,
                         help="Boost the opacity of DYNAMIC gaussians directly: "
                              "o' = 1 - (1-o)^G, the alpha G co-located contributors would "
@@ -1563,6 +1584,8 @@ def main():
         dyn_nearest_source=args.dyn_nearest_source,
         dyn_nearest_scope=args.dyn_nearest_scope,
         dyn_opacity_gain=args.dyn_opacity_gain,
+        dyn_unsup_gain=args.dyn_unsup_gain,
+        dyn_scale_mult=args.dyn_scale_mult,
     )
 
     print(f"\nLoading {args.split} dataset...")
@@ -1607,6 +1630,8 @@ def main():
             "dyn_nearest_source": args.dyn_nearest_source,
             "dyn_nearest_scope": args.dyn_nearest_scope,
             "dyn_opacity_gain": args.dyn_opacity_gain,
+            "dyn_unsup_gain": args.dyn_unsup_gain,
+            "dyn_scale_mult": args.dyn_scale_mult,
             "backbone": "vggt" if args.no_vggt4d else "vggt4d",
             "mode": "finetuned" if args.checkpoint else "baseline",
             "per_frame_dynamic": args.per_frame_dynamic,

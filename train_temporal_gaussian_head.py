@@ -392,6 +392,8 @@ class TrainingConfig:
     dyn_nearest_source: int = 0
     dyn_nearest_scope: str = "flow"
     dyn_opacity_gain: float = 1.0
+    dyn_unsup_gain: float = 1.0
+    dyn_scale_mult: float = 1.0
     # KMeans clusters for the mask refinement. Fewer clusters group a person into
     # one region, so a p90/max aggregate can recruit all of them from a moving arm.
     dynamic_n_clusters: int = 64
@@ -810,6 +812,8 @@ def compute_rendering_loss(
     dyn_nearest_source: int = 0,
     dyn_nearest_scope: str = "flow",
     dyn_opacity_gain: float = 1.0,
+    dyn_unsup_gain: float = 1.0,
+    dyn_scale_mult: float = 1.0,
 ) -> tuple:
     """
     Compute MSE rendering loss by rendering predicted Gaussians with given poses.
@@ -873,6 +877,8 @@ def compute_rendering_loss(
         dyn_nearest_source=dyn_nearest_source,
         dyn_nearest_scope=dyn_nearest_scope,
         dyn_opacity_gain=dyn_opacity_gain,
+        dyn_unsup_gain=dyn_unsup_gain,
+        dyn_scale_mult=dyn_scale_mult,
     )
 
     pred_rgb = output.color  # [B, V, 3, H, W]

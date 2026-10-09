@@ -72,6 +72,8 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
         dyn_nearest_source: int = 0,
         dyn_nearest_scope: str = "flow",
         dyn_opacity_gain: float = 1.0,
+        dyn_unsup_gain: float = 1.0,
+        dyn_scale_mult: float = 1.0,
     ) -> DecoderOutput:
         B, V, _, _  = intrinsics.shape
         H, W = image_shape
@@ -82,6 +84,16 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
             xyz_i = xyzs[i].float()
             feature_i = features[i].float()
             covar_i = covariances[i].float()
+            if dyn_scale_mult != 1.0 and gaussian_dyn_flag is not None:
+                # Relocated copies of a mover do not tile into a surface -- each sits
+                # at a slightly different depth and is sized for its SOURCE frame's
+                # pixel density -- so the person renders granular rather than solid.
+                # Enlarging them makes them overlap. A covariance scales as the SQUARE
+                # of a length, hence mult**2. Applied to covar_i and NOT to scale_i
+                # because rasterization is called with covars=, which overrides scales.
+                _dynm = gaussian_dyn_flag[i].to(covar_i.device).float() > 0.5
+                covar_i = covar_i.clone()
+                covar_i[_dynm] = covar_i[_dynm] * (dyn_scale_mult ** 2)
             scale_i = scales[i].float()
             rotation_i = rotations[i].float()
             opacity_i = opacitys[i].squeeze().float()
@@ -334,6 +346,21 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
                                 _on_mover = _on_mover & (dv > 0)
                             opac_eff = torch.where(_on_mover, _boost, opac_eff)
 
+                        # (1d) FADE THE GHOSTS. The unsupported subset is kept at its
+                        # ORIGINAL position by --dyn_unsupported static, so each source
+                        # frame leaves one copy along the mover's path: the duplicated
+                        # outlines in the renders. Both ends of the binary are measured
+                        # -- dropping them punches white holes and loses on every
+                        # metric, keeping them at full opacity wins on metrics but
+                        # ghosts. Neither is right, so attenuate instead: G < 1 in the
+                        # same alpha form, so they still fill the background (no holes)
+                        # but stop reading as duplicate people.
+                        if dyn_unsup_gain != 1.0 and dv is not None:
+                            _o2 = opac_eff.clamp(0.0, 1.0)
+                            _fade = 1.0 - (1.0 - _o2).clamp_min(1e-6).pow(dyn_unsup_gain)
+                            _ghost = (dyn_i > 0.5) & (dv <= 0) & (own_frame < 0.5)
+                            opac_eff = torch.where(_ghost, _fade, opac_eff)
+
                     # (2) Leave-one-out: drop view j's OWN Gaussians entirely (static
                     #     AND dynamic), so view j must be reconstructed from the OTHER
                     #     frames. This is the honest control: without it, view j's
@@ -542,6 +569,8 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
         dyn_nearest_source: int = 0,
         dyn_nearest_scope: str = "flow",
         dyn_opacity_gain: float = 1.0,
+        dyn_unsup_gain: float = 1.0,
+        dyn_scale_mult: float = 1.0,
     ) -> DecoderOutput:
 
         return self.rendering_fn(gaussians, extrinsics, intrinsics, near, far, image_shape, depth_mode, cam_rot_delta, cam_trans_delta,
@@ -557,6 +586,8 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
                                  dyn_nearest_source=dyn_nearest_source,
                                  dyn_nearest_scope=dyn_nearest_scope,
                                  dyn_opacity_gain=dyn_opacity_gain,
+                                 dyn_unsup_gain=dyn_unsup_gain,
+                                 dyn_scale_mult=dyn_scale_mult,
                                  per_frame_compositing=per_frame_compositing,
                                  dyn_opacity_comp=dyn_opacity_comp)
 
