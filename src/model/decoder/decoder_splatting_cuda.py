@@ -91,7 +91,14 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
                 # Enlarging them makes them overlap. A covariance scales as the SQUARE
                 # of a length, hence mult**2. Applied to covar_i and NOT to scale_i
                 # because rasterization is called with covars=, which overrides scales.
+                # SCOPED TO ACTUAL MOVERS. Keying off the dynamic FLAG enlarges the
+                # ghost copies too, and measured -1.25 static / -0.42 overall with
+                # the renders visibly blobbier. Flow support identifies the genuine
+                # mover; ANY target view suffices, which keeps this per-batch instead
+                # of cloning [N,3,3] covariances once per view.
                 _dynm = gaussian_dyn_flag[i].to(covar_i.device).float() > 0.5
+                if gaussian_disp_valid is not None:
+                    _dynm = _dynm & (gaussian_disp_valid[i].to(covar_i.device) > 0).any(dim=1)
                 covar_i = covar_i.clone()
                 covar_i[_dynm] = covar_i[_dynm] * (dyn_scale_mult ** 2)
             scale_i = scales[i].float()
