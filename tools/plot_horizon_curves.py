@@ -34,6 +34,11 @@ DATA = {
             "MoVieS":   [20.92, 19.10, 17.94, 16.44, 14.88],
             "NeoVerse": [23.80, 19.18, 16.29, 14.83, 13.48],
         },
+        "PSNR, moving content (dB)": {
+            "ours":     [19.75, 16.80, 15.80, 14.21, 11.70],
+            "MoVieS":   [17.90, 15.73, 14.69, 12.92, 10.67],
+            "NeoVerse": [20.98, 16.65, 14.24, 13.41, 12.02],
+        },
         "LPIPS (dynamic crop)": {
             "ours":     [0.2527, 0.3119, 0.3484, 0.3782, 0.4053],
             "MoVieS":   [0.2090, 0.2339, 0.2645, 0.2955, 0.3137],
@@ -45,6 +50,11 @@ DATA = {
             "ours":     [19.14, 16.74, 14.88, 13.33, 12.86],
             "MoVieS":   [21.40, 18.05, 16.51, 15.14, 14.25],
             "NeoVerse": [22.46, 18.38, 15.80, 13.54, 11.69],
+        },
+        "PSNR, moving content (dB)": {
+            "ours":     [16.84, 14.87, 13.63, 12.68, 12.30],
+            "MoVieS":   [18.52, 15.78, 13.12, 11.69, 11.19],
+            "NeoVerse": [19.51, 15.77, 13.69, 11.77, 10.22],
         },
         "LPIPS (dynamic crop)": {
             "ours":     [0.3894, 0.4774, 0.5405, 0.5926, 0.6016],
@@ -58,7 +68,13 @@ DATA = {
 COLORS = {"ours": "#2a78d6", "MoVieS": "#eb6834", "NeoVerse": "#1baf7a"}
 ORDER = ["ours", "MoVieS", "NeoVerse"]
 SURFACE, INK, INK_SOFT = "#fcfcfb", "#0b0b0b", "#52514e"
-HIGHER_IS_BETTER = {"PSNR (dB)": True, "LPIPS (dynamic crop)": False}
+HIGHER_IS_BETTER = {"PSNR (dB)": True, "PSNR, moving content (dB)": True,
+                    "LPIPS (dynamic crop)": False}
+# Lead slide: synchronous2, overall + moving content. The full grid (both
+# sequences, LPIPS included) is one flag away -- keep it as the backup slide
+# rather than deleting it, so an "does it hold elsewhere?" question is
+# answered rather than deflected.
+LEAD = (["synchronous2"], ["PSNR (dB)", "PSNR, moving content (dB)"])
 
 
 def crossings(xs, a, b, higher_better):
@@ -77,6 +93,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default="horizon_curves.png")
     ap.add_argument("--dpi", type=int, default=200)
+    ap.add_argument("--all", action="store_true",
+                    help="backup slide: both sequences, every metric including LPIPS")
     args = ap.parse_args()
 
     try:
@@ -86,9 +104,9 @@ def main():
     except ImportError:
         raise SystemExit("matplotlib not found -- run this in an env that has it (dynrec does)")
 
-    seqs = list(DATA)
-    metrics = list(DATA[seqs[0]])
-    fig, axes = plt.subplots(len(metrics), len(seqs), figsize=(11.5, 7.2),
+    seqs, metrics = (list(DATA), list(DATA[list(DATA)[0]])) if args.all else LEAD
+    fig, axes = plt.subplots(len(metrics), len(seqs),
+                             figsize=(5.9 * len(seqs) + 0.6, 3.6 * len(metrics)),
                              facecolor=SURFACE, squeeze=False)
 
     for r, metric in enumerate(metrics):
@@ -151,9 +169,13 @@ def main():
     handles, labels = axes[0][0].get_legend_handles_labels()
     fig.legend(handles, labels, loc="lower center", ncol=3, frameon=False,
                fontsize=9.5, labelcolor=INK_SOFT, bbox_to_anchor=(0.5, -0.005))
-    fig.suptitle("Reconstruction quality vs temporal baseline — matched leave-one-out",
-                 color=INK, fontsize=13, fontweight="bold", y=0.985)
-    fig.tight_layout(rect=(0, 0.045, 1, 0.955))
+    # Title length has to suit the figure width, or it clips at both edges in the
+    # one-sequence layout.
+    title = ("Reconstruction quality vs temporal baseline — matched leave-one-out"
+             if len(seqs) > 1 else "Quality vs temporal baseline\n(matched leave-one-out)")
+    fig.suptitle(title, color=INK, fontsize=13 if len(seqs) > 1 else 11.5,
+                 fontweight="bold", y=0.985)
+    fig.tight_layout(rect=(0, 0.045, 1, 0.94 if len(seqs) == 1 else 0.955))
     fig.savefig(args.out, dpi=args.dpi, facecolor=SURFACE)
     print(f"wrote {args.out}")
 
@@ -162,10 +184,18 @@ def main():
         for metric in metrics:
             hb = HIGHER_IS_BETTER[metric]
             for rival in ("MoVieS", "NeoVerse"):
-                xs = crossings(HORIZONS, DATA[seq][metric]["ours"],
-                               DATA[seq][metric][rival], hb)
-                got = ", ".join(f"{x:.1f}s" for x in xs) if xs else "never in range"
-                print(f"  {seq:14s} {metric:22s} vs {rival:9s}: {got}")
+                a, b = DATA[seq][metric]["ours"], DATA[seq][metric][rival]
+                xs = crossings(HORIZONS, a, b, hb)
+                lead = [(x > y) == hb for x, y in zip(a, b)]
+                if xs:
+                    got = ", ".join(f"{x:.1f}s" for x in xs)
+                elif all(lead):
+                    got = "ahead at every horizon (no crossing needed)"
+                elif not any(lead):
+                    got = "behind at every horizon"
+                else:
+                    got = "mixed, no clean crossing"
+                print(f"  {seq:14s} {metric:26s} vs {rival:9s}: {got}")
 
 
 if __name__ == "__main__":
