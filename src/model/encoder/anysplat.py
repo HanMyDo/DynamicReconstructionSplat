@@ -771,6 +771,7 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
         global_step: int = 0,
         visualization_dump: Optional[dict] = None,
         dyn_mask_override: Optional[torch.Tensor] = None,
+        gt_depth_override: Optional[torch.Tensor] = None,
     ) -> Gaussians:
         # dyn_mask_override: PRECOMPUTED dynamic mask [B,V,H,W] or [V,H,W] (any resolution;
         # resampled to the Gaussian grid). When given, it REPLACES the internally-detected
@@ -932,6 +933,36 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
                     images=image,
                     patch_start_idx=patch_start_idx,
                 )
+                # ORACLE DEPTH (diagnostic). Substitute metric GT depth for the
+                # predicted depth before unprojecting, keeping the PREDICTED poses --
+                # so this stays pose-free and isolates the DEPTH half of the geometry.
+                # It is an upper bound: if GT depth does not close the static gap, no
+                # depth head and no backbone swap can, and that work is not worth
+                # doing.
+                # ONE GLOBAL SCALE over the window, by median ratio against the
+                # prediction. Per-frame alignment would be wrong: it would wash out
+                # exactly the cross-frame consistency this is meant to supply. GT is
+                # metric while the prediction is up to scale, so without this the
+                # geometry sits at the wrong scale relative to the cameras.
+                if gt_depth_override is not None:
+                    gtd = gt_depth_override.to(depth_map.device, depth_map.dtype)
+                    if gtd.dim() == 3:                       # [V,H,W] -> add batch
+                        gtd = gtd.unsqueeze(0)
+                    if depth_map.dim() == 5 and gtd.dim() == 4:
+                        gtd = gtd.unsqueeze(-1)              # VGGT depth is [B,V,H,W,1]
+                    if gtd.shape != depth_map.shape:
+                        raise ValueError(
+                            f"--gt_depth shape {tuple(gtd.shape)} != predicted depth "
+                            f"{tuple(depth_map.shape)}; refusing to broadcast silently")
+                    ok = (gtd > 1e-6) & (depth_map > 1e-6)   # 0 = no return in Bonn depth
+                    if ok.any():
+                        scale = torch.median(depth_map[ok] / gtd[ok])
+                        # Keep the prediction where GT has no return, so missing depth
+                        # does not punch holes the diagnostic would then blame on us.
+                        depth_map = torch.where(ok, gtd * scale, depth_map)
+                        print(f"[OracleDepth] substituted {int(ok.sum())} px "
+                              f"({100.0 * ok.float().mean():.1f}%), scale {float(scale):.4f}",
+                              flush=True)
                 pts_all = batchify_unproject_depth_map_to_point_map(
                     depth_map, extrinsic, intrinsic
                 )

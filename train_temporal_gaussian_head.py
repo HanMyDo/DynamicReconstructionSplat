@@ -393,6 +393,7 @@ class TrainingConfig:
     dyn_nearest_scope: str = "flow"
     dyn_opacity_gain: float = 1.0
     dyn_unsup_gain: float = 1.0
+    gt_depth: bool = False
     dyn_scale_mult: float = 1.0
     # KMeans clusters for the mask refinement. Fewer clusters group a person into
     # one region, so a p90/max aggregate can recruit all of them from a moving arm.
@@ -485,11 +486,20 @@ class VideoFrameDataset(Dataset):
         frame_stride: int = 1,
         image_size: tuple = (518, 518),
         split: str = "train",
+        gt_depth: bool = False,
     ):
         self.dataset_name = dataset_name  # for locating per-sequence precomputed masks
         self.data_dir = Path(data_dir) / dataset_name
         self.rgb_dir = self.data_dir / "rgb"
         self.depth_dir = self.data_dir / "depth"
+        # ORACLE DEPTH. Bonn ships metric depth in depth/, named by timestamp, on a
+        # different clock from rgb/ -- so pair by NEAREST timestamp, the same way
+        # tools/movies_bonn_loo.py pairs GT poses. Loaded only when asked, because it
+        # is a DIAGNOSTIC: substituting it bounds how much ANY geometry improvement
+        # (a better depth head, VGGT-Omega) could buy, which decides whether that work
+        # is worth doing at all.
+        self.gt_depth = bool(gt_depth)
+        self._depth_ts, self._depth_paths = None, None
         self.num_frames = num_frames
         self.frame_stride = frame_stride
         self.image_size = image_size
@@ -561,6 +571,7 @@ class VideoFrameDataset(Dataset):
         images = []
         extrinsics = []  # World-to-camera (4x4)
         frame_names = []  # rgb stems, for aligning precomputed dynamic masks in eval
+        gt_depths = []
         has_all_poses = True
 
         for i in range(self.num_frames):
@@ -580,6 +591,23 @@ class VideoFrameDataset(Dataset):
             img = TF.to_tensor(pil_img)  # [3, H, W] in [0, 1]
             images.append(img)
 
+            if self.gt_depth:
+                if self._depth_ts is None:
+                    dp = sorted(self.depth_dir.glob("*.png"))
+                    if not dp:
+                        raise FileNotFoundError(f"--gt_depth: no depth PNGs in {self.depth_dir}")
+                    self._depth_paths = dp
+                    self._depth_ts = np.array([float(q.stem) for q in dp])
+                k = int(np.argmin(np.abs(self._depth_ts - float(frame_path.stem))))
+                # Bonn depth PNGs are uint16 millimetre-ish with a 5000 scale factor.
+                # NEAREST on resize: depth is not a colour, and bilinear across a
+                # silhouette invents surfaces at intermediate distances.
+                d_img = Image.open(str(self._depth_paths[k]))
+                if self.image_size is not None:
+                    d_img = d_img.resize((self.image_size[1], self.image_size[0]), Image.NEAREST)
+                d = np.asarray(d_img).astype(np.float32) / 5000.0
+                gt_depths.append(torch.from_numpy(d))
+
             # Convert camera-to-world to world-to-camera (extrinsic)
             if c2w_pose is not None:
                 w2c = np.linalg.inv(c2w_pose)
@@ -592,6 +620,8 @@ class VideoFrameDataset(Dataset):
             "frame_names": frame_names,             # list[str], len V
             "dataset_name": self.dataset_name,      # for per-sequence precomputed masks
         }
+        if gt_depths:
+            result["gt_depth"] = torch.stack(gt_depths, dim=0)   # [V, H, W] metres
 
         if has_all_poses and len(extrinsics) == self.num_frames:
             result["gt_extrinsics"] = torch.stack(extrinsics, dim=0)  # [V, 4, 4]

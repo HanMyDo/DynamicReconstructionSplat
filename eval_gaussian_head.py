@@ -362,7 +362,8 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
                 precomp_mask = load_precomputed_masks(
                     frame_names, precomputed_mask_dir, h, w, device, dataset_name=ds)
 
-        encoder_output = model.encoder(images, global_step=0, dyn_mask_override=precomp_mask)
+        encoder_output = model.encoder(images, global_step=0, dyn_mask_override=precomp_mask,
+                                       gt_depth_override=batch.get("gt_depth"))
         gaussians = encoder_output.gaussians
         # DIAGNOSTIC ONLY (--scale_mult): enlarge every Gaussian at render time.
         # Discriminates the two explanations for the static-PSNR collapse under
@@ -1188,6 +1189,16 @@ def main():
                              "--ply_own_frame_only, which made the PLY exports sharp for the "
                              "same reason. Cost: fewer contributors, so the mover is sharper but "
                              "thinner -- raise --dyn_opacity_comp to compensate. Try 1 and 2.")
+    parser.add_argument("--gt_depth", action="store_true",
+                        help="ORACLE DEPTH (diagnostic, Bonn only). Replace the predicted depth "
+                             "with the dataset's metric GT before unprojecting, keeping the "
+                             "PREDICTED poses so it stays pose-free. Gives the UPPER BOUND on "
+                             "what any geometry improvement -- a better depth head, VGGT-Omega -- "
+                             "could buy. If it does not close the static gap (-4.6..-6.4 dB on "
+                             "balloon vs MoVieS), no backbone swap can, and that work is not "
+                             "worth doing. Aligned by ONE global median-ratio scale over the "
+                             "window; per-frame alignment would wash out the cross-frame "
+                             "consistency being tested. Never a shipping configuration.")
     parser.add_argument("--dyn_unsup_gain", type=float, default=1.0,
                         help="Alpha gain for the UNSUPPORTED dynamic gaussians (no flow "
                              "support), the ones --dyn_unsupported static keeps at their "
@@ -1597,6 +1608,7 @@ def main():
         frame_stride=args.frame_stride,
         image_size=config.image_size,
         split=args.split,
+        gt_depth=args.gt_depth,
     )
     dataloader = torch.utils.data.DataLoader(
         dataset, batch_size=1, shuffle=False,
@@ -1631,6 +1643,7 @@ def main():
             "dyn_nearest_scope": args.dyn_nearest_scope,
             "dyn_opacity_gain": args.dyn_opacity_gain,
             "dyn_unsup_gain": args.dyn_unsup_gain,
+            "gt_depth": args.gt_depth,
             "dyn_scale_mult": args.dyn_scale_mult,
             "backbone": "vggt" if args.no_vggt4d else "vggt4d",
             "mode": "finetuned" if args.checkpoint else "baseline",
