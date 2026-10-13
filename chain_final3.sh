@@ -11,8 +11,19 @@ set -uo pipefail
 D=~/data/mask_out
 M2=$D/output_dyn_masks_precomputed_cs512_r518_st3_fs1_m6_otsu2_glob
 SRC=$D/output_dyn_masks_precomputed_cs256_r518_st3_fs1_m6_otsu2_glob
+# Test for MASKS, not for the directory. A bare `[ -d ]` guard skipped both box
+# sequences for three weeks: an earlier run had left empty stub directories
+# (masks/ and overlays/ present, both empty), so the link was never made and the
+# eval died one second in with "no masks for ...". An empty stub is removed and
+# relinked; a stub with files in it is left alone and reported.
 for S in rgbd_bonn_removing_obstructing_box rgbd_bonn_placing_obstructing_box; do
-  [ -d "$M2/$S" ] && continue
+  N=$(ls "$M2/$S/masks"/*.png 2>/dev/null | wc -l)
+  [ "$N" -gt 0 ] && { echo "$S: $N masks already present"; continue; }
+  if [ -d "$M2/$S" ]; then
+    F=$(find "$M2/$S" -type f | wc -l)
+    [ "$F" -gt 0 ] && { echo "$S: stub holds $F files -- NOT touched, fix by hand"; continue; }
+    rm -rf "$M2/$S"
+  fi
   if [ -d "$SRC/$S" ]; then ln -s "$SRC/$S" "$M2/$S" && echo "linked $S"
   else echo "MISSING $SRC/$S -- battery will refuse this sequence"; fi
 done
