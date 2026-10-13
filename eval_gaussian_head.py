@@ -454,6 +454,8 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
             dyn_unsup_gain=(getattr(config, "dyn_unsup_gain", 1.0)
                             if per_frame_dynamic else 1.0),
             dyn_scale_mult=getattr(config, "dyn_scale_mult", 1.0),
+            render_max_scale_frac=getattr(config, "render_max_scale_frac", 0.0),
+            src_window=getattr(config, "src_window", 0),
         )
         if infos.get("dyn_group_pred") is not None:
             n_group_motion += 1
@@ -1209,6 +1211,19 @@ def main():
                              "on metrics but ghosts. Set < 1 to ATTENUATE -- they still fill the "
                              "background so no holes appear, but stop reading as duplicate "
                              "people. Try 0.5 and 0.25. 1.0 = off.")
+    parser.add_argument("--render_max_scale_frac", type=float, default=0.0,
+                        help="Drop Gaussians whose largest axis exceeds this fraction of "
+                             "the scene p1-p99 diagonal, AT RENDER TIME. The same ceiling "
+                             "ply_export has used since September (0.011), which removes "
+                             "1.9%% of Gaussians and 31%% of the visible haze -- but that "
+                             "one never touched a rendered metric. 0 disables.")
+    parser.add_argument("--src_window", type=int, default=0,
+                        help="A Gaussian contributes only to targets within K frames of "
+                             "its own source frame. Cross-frame pose/depth error puts V "
+                             "copies of a surface at V different places, which is the "
+                             "doubling and smear at long frame_stride. 0 = all V views "
+                             "contribute (previous behaviour). Costs coverage, so pair it "
+                             "with the opacity knobs.")
     parser.add_argument("--dyn_scale_mult", type=float, default=1.0,
                         help="Enlarge DYNAMIC gaussians by this factor at render time. Relocated "
                              "copies of a mover do not tile into a surface -- each sits at a "
@@ -1597,6 +1612,8 @@ def main():
         dyn_opacity_gain=args.dyn_opacity_gain,
         dyn_unsup_gain=args.dyn_unsup_gain,
         dyn_scale_mult=args.dyn_scale_mult,
+        render_max_scale_frac=args.render_max_scale_frac,
+        src_window=args.src_window,
     )
 
     print(f"\nLoading {args.split} dataset...")
@@ -1645,6 +1662,8 @@ def main():
             "dyn_unsup_gain": args.dyn_unsup_gain,
             "gt_depth": args.gt_depth,
             "dyn_scale_mult": args.dyn_scale_mult,
+            "render_max_scale_frac": args.render_max_scale_frac,
+            "src_window": args.src_window,
             "backbone": "vggt" if args.no_vggt4d else "vggt4d",
             "mode": "finetuned" if args.checkpoint else "baseline",
             "per_frame_dynamic": args.per_frame_dynamic,

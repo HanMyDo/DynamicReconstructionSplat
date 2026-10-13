@@ -74,6 +74,8 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
         dyn_opacity_gain: float = 1.0,
         dyn_unsup_gain: float = 1.0,
         dyn_scale_mult: float = 1.0,
+        render_max_scale_frac: float = 0.0,
+        src_window: int = 0,
     ) -> DecoderOutput:
         B, V, _, _  = intrinsics.shape
         H, W = image_shape
@@ -104,6 +106,23 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
             scale_i = scales[i].float()
             rotation_i = rotations[i].float()
             opacity_i = opacitys[i].squeeze().float()
+            # RENDER-SIDE SCALE CEILING (--render_max_scale_frac). A few enormous, faint
+            # splats carry a large share of the visible haze: measured on balloon, 50 of
+            # them span 6% of the scene each, and dropping 1.9% of the Gaussians removes
+            # 31% of the opacity-weighted area. ply_export.py has dropped them since
+            # September -- but only from the exported FILE, so the renderer, and therefore
+            # every metric we have ever reported, still composited them. 0 disables.
+            if render_max_scale_frac > 0:
+                _pts = xyzs[i].float().reshape(-1, 3)
+                # torch.quantile caps at ~16M elements and a window is ~3M points x 3,
+                # so subsample rather than risk a hard failure on a bigger input.
+                if _pts.shape[0] > 100_000:
+                    _pts = _pts[torch.randperm(_pts.shape[0], device=_pts.device)[:100_000]]
+                _lo = torch.quantile(_pts, 0.01, dim=0)
+                _hi = torch.quantile(_pts, 0.99, dim=0)
+                _limit = render_max_scale_frac * torch.linalg.norm(_hi - _lo)
+                _ok = (scale_i.reshape(scale_i.shape[0], -1).max(dim=-1).values <= _limit)
+                opacity_i = opacity_i * _ok.float()
             test_w2c_i = extrinsics[i].float().inverse() # (V, 4, 4)
             test_intr_i_normalized = intrinsics[i].float()
             # Denormalize the intrinsics into standred format
@@ -148,6 +167,19 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
                     fidx_i = gaussian_frame_idx[i].to(opacity_i.device)
                     own_frame = (fidx_i == j).float()          # 1 if Gaussian came from view j
                     gate = torch.ones_like(opacity_i)
+
+                    # SOURCE-FRAME WINDOW (--src_window K). Every Gaussian sits at
+                    # unproject(depth, pose) of ITS OWN frame, so cross-frame pose and
+                    # depth error scatter V copies of one surface across V slightly
+                    # different places -- the doubled edges and smear. The spread grows
+                    # with frame_stride: at stride 40 the window spans 20 s of camera
+                    # motion and the far frames are the worst-registered contributors.
+                    # K keeps only sources within K frames of the target. 0 = all V, the
+                    # previous behaviour. TRADE-OFF: fewer contributors also means less
+                    # coverage, and thin coverage is what makes moving objects
+                    # transparent -- sweep K against the opacity knobs, not alone.
+                    if src_window > 0:
+                        gate = gate * ((fidx_i - j).abs() <= src_window).float()
 
                     # DISTANCE-GATED RESCUE (--dyn_far_static M). The radius gate
                     # rejects two populations that want OPPOSITE treatment:
@@ -578,6 +610,8 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
         dyn_opacity_gain: float = 1.0,
         dyn_unsup_gain: float = 1.0,
         dyn_scale_mult: float = 1.0,
+        render_max_scale_frac: float = 0.0,
+        src_window: int = 0,
     ) -> DecoderOutput:
 
         return self.rendering_fn(gaussians, extrinsics, intrinsics, near, far, image_shape, depth_mode, cam_rot_delta, cam_trans_delta,
@@ -595,6 +629,8 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
                                  dyn_opacity_gain=dyn_opacity_gain,
                                  dyn_unsup_gain=dyn_unsup_gain,
                                  dyn_scale_mult=dyn_scale_mult,
+                                 render_max_scale_frac=render_max_scale_frac,
+                                 src_window=src_window,
                                  per_frame_compositing=per_frame_compositing,
                                  dyn_opacity_comp=dyn_opacity_comp)
 

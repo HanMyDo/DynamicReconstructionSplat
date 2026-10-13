@@ -39,7 +39,7 @@ SEQ=${3:-rgbd_bonn_balloon}; NF=${4:-6}; STRIDE=${5:-8}; START=${6:-0}; NWIN=${7
 while [ "$#" -lt 7 ]; do set -- "$@" ""; done   # pad so `shift 7` is always valid
 TAG=${EVAL_DATE:-probe}
 
-REPO="${HOME}/DynamicReconstructionSplat"; cd ${REPO}; mkdir -p slurm_logs
+REPO="${REPO:-${HOME}/DynamicReconstructionSplat}"; cd ${REPO}; mkdir -p slurm_logs
 # Overridable so the same script serves TUM (and anything else in the same
 # layout: <root>/<sequence>/rgb/*.png). The old slurm_eval_tum.sh is enroot-
 # based and predates this cluster; do not use it.
