@@ -33,6 +33,12 @@ from src.models import SplatRecon
 from src.utils import *
 
 BONN_K = dict(fx=542.822841, fy=542.576870, cx=315.593520, cy=237.756098, SRC_W=640, SRC_H=480)
+# TUM fr3 (Kinect v1, 640x480) -- same values as TUM_FR3_INTRINSICS in
+# train_temporal_gaussian_head.py, so both sides of the comparison are handed the
+# SAME camera. Running TUM through BONN_K is a ~1.4% focal error and a ~10 px
+# principal-point shift against MoVieS, i.e. a handicap in our favour.
+TUM_FR3_K = dict(fx=535.4, fy=539.2, cx=320.1, cy=247.6, SRC_W=640, SRC_H=480)
+INTRINSIC_PRESETS = {"bonn": BONN_K, "tum_fr3": TUM_FR3_K}
 
 
 def quat_to_R(qx, qy, qz, qw):
@@ -97,6 +103,10 @@ def main():
                          "the h*/g* probe ladders were produced. Weaker than LOO -- it hides "
                          "pose error (measured on Bonn with GT poses: 22.56 self-recon vs "
                          "13.44 LOO) -- so report it alongside LOO, never instead of it.")
+    ap.add_argument("--intrinsics", choices=sorted(INTRINSIC_PRESETS), default="bonn",
+                    help="Camera preset. MUST match the sequence: these are normalised and "
+                         "handed to MoVieS as its input K, so the wrong one silently "
+                         "handicaps the baseline.")
     ap.add_argument("--poses", choices=["gt", "vggt"], default="gt",
                     help="gt = dataset ground truth; vggt = predicted, which is both the "
                          "fairer protocol (same pose source as ours) and a fix: Bonn's GT "
@@ -127,8 +137,9 @@ def main():
     model.load_state_dict(load_file("resources/movies_ckpt.safetensors"), strict=True)
     model.eval().to("cuda")
 
-    fx = BONN_K["fx"] / BONN_K["SRC_W"]; fy = BONN_K["fy"] / BONN_K["SRC_H"]
-    cx = BONN_K["cx"] / BONN_K["SRC_W"]; cy = BONN_K["cy"] / BONN_K["SRC_H"]
+    _K = INTRINSIC_PRESETS[args.intrinsics]
+    fx = _K["fx"] / _K["SRC_W"]; fy = _K["fy"] / _K["SRC_H"]
+    cx = _K["cx"] / _K["SRC_W"]; cy = _K["cy"] / _K["SRC_H"]
     K1 = np.array([fx, fy, cx, cy], np.float32)
 
     span = (args.frames - 1) * args.stride
