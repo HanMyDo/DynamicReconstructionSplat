@@ -65,7 +65,10 @@ PROP=${19:-0}
                       # the aggregate is not, because the threshold adapts to the scores.
 
 REPO="${HOME}/DynamicReconstructionSplat"
-DATA_ROOT="${HOME}/data/bonn/rgbd_bonn_dataset"
+# Overridable so the same script serves TUM. slurm_precompute_masks_tum.sh is
+# enroot-based, predates this cluster AND predates the current recipe
+# (cs512 + --global_post + otsu2); do not use it.
+DATA_ROOT="${DATA_ROOT:-${HOME}/data/bonn/rgbd_bonn_dataset}"
 CKPT="${REPO}/ckpts/vggt4d_model_tracker_fixed_e20.pt"
 # Outputs go to /data (14 TB) not home (100 GB quota); symlinked back for convenience.
 OUT_ROOT="${HOME}/data/mask_out"

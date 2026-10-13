@@ -40,7 +40,11 @@ while [ "$#" -lt 7 ]; do set -- "$@" ""; done   # pad so `shift 7` is always val
 TAG=${EVAL_DATE:-probe}
 
 REPO="${HOME}/DynamicReconstructionSplat"; cd ${REPO}; mkdir -p slurm_logs
-DATA_ROOT="${HOME}/data/bonn/rgbd_bonn_dataset"
+# Overridable so the same script serves TUM (and anything else in the same
+# layout: <root>/<sequence>/rgb/*.png). The old slurm_eval_tum.sh is enroot-
+# based and predates this cluster; do not use it.
+DATA_ROOT="${DATA_ROOT:-${HOME}/data/bonn/rgbd_bonn_dataset}"
+INTRINSICS="${INTRINSICS:-bonn}"
 VGGT4D_CKPT="${REPO}/ckpts/vggt4d_model_tracker_fixed_e20.pt"
 # "baseline" = frozen pretrained head, same spelling slurm_eval_hex.sh accepts.
 # Useful for asking whether a defect is in the CHECKPOINT or in the pipeline.
@@ -74,7 +78,7 @@ run () {   # name, extra flags
   echo "PROBE ${name} -> ${out}   $(date +%H:%M:%S)"
   echo "===================================================================="
   python eval_gaussian_head.py --data_dir "${DATA_ROOT}" --dataset_name "${SEQ}" \
-    --intrinsics bonn --num_frames ${NF} --split all \
+    --intrinsics ${INTRINSICS} --num_frames ${NF} --split all \
     --vggt4d_weights_path "${VGGT4D_CKPT}" ${CKPT_FLAG} \
     --output_dir "${out}" ${BASE} ${WIN} "$@" || echo "FAILED: ${name}"
 }

@@ -46,7 +46,23 @@ def main():
         raise SystemExit("no pred_<6 digits>_<stem>.png found -- is this an older run?")
     idxs.sort()
 
-    ours = sorted(glob.glob(os.path.join(args.ours_images, "*.png")))
+    ours_paths = sorted(glob.glob(os.path.join(args.ours_images, "*.png")))
+    # Map SOURCE FRAME -> our render by parsing the batch index out of the filename
+    # (b{batch:04d}_v{view:02d}.png) rather than indexing positionally. Positional
+    # indexing assumes our k-th image is window k, which is false whenever
+    # --batch_stride > 1 (saved windows are 0, N, 2N, ...) or --image_batch_start > 0,
+    # and it fails SILENTLY by comparing mismatched frames. With the index parsed,
+    # --ours_offset is purely the view offset (8 * stride for --image_views 8).
+    ours_by_frame, ours = {}, ours_paths
+    for q in ours_paths:
+        m = re.search(r"b(\d+)_v", os.path.basename(q))
+        if m:
+            ours_by_frame[int(m.group(1)) + args.ours_offset] = q
+    if ours_by_frame:
+        print(f"indexed {len(ours_by_frame)} of our renders by frame "
+              f"({min(ours_by_frame)}..{max(ours_by_frame)})")
+    else:
+        print("WARNING: no b####_v## filenames -- falling back to positional indexing")
     rgb = sorted(glob.glob(os.path.join(args.bonn_rgb, "*.png")))
     masks = sorted(glob.glob(os.path.join(args.mask_dir, "*.png"))) if args.mask_dir else []
     for d in ("gt", "ours", "movies") + (("mask",) if masks else ()):
@@ -54,11 +70,17 @@ def main():
 
     n, skipped = 0, []
     for i, p in idxs:
-        j = i - args.ours_offset          # index INTO ours/ of the render of frame i
-        if j < 0 or j >= len(ours) or i >= len(rgb):
-            skipped.append(i); continue
-        shutil.copyfile(rgb[i],  os.path.join(args.out, "gt",     f"{i:06d}.png"))
-        shutil.copyfile(ours[j], os.path.join(args.out, "ours",   f"{i:06d}.png"))
+        if ours_by_frame:
+            src = ours_by_frame.get(i)
+            if src is None or i >= len(rgb):
+                skipped.append(i); continue
+        else:
+            j = i - args.ours_offset      # index INTO ours/ of the render of frame i
+            if j < 0 or j >= len(ours) or i >= len(rgb):
+                skipped.append(i); continue
+            src = ours[j]
+        shutil.copyfile(rgb[i], os.path.join(args.out, "gt",   f"{i:06d}.png"))
+        shutil.copyfile(src,    os.path.join(args.out, "ours", f"{i:06d}.png"))
         shutil.copyfile(p,       os.path.join(args.out, "movies", f"{i:06d}.png"))
         if masks and i < len(masks):
             shutil.copyfile(masks[i], os.path.join(args.out, "mask", f"{i:06d}.png"))
