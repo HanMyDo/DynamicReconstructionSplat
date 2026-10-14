@@ -301,6 +301,16 @@ def main():
                          "not SAM 3: 162 MB vs 3.45 GB and ~3.4x faster, and SAM 3's only extra is "
                          "open-vocabulary TEXT prompting, which would segment a stationary person "
                          "too and throw away the motion criterion this whole pipeline rests on.")
+    ap.add_argument("--sam_video", action="store_true",
+                    help="Complete seeds with SAM 2's VIDEO predictor instead of per-frame. "
+                         "For a precise but SPARSE detector: anchors on the frames that do "
+                         "carry a seed and propagates both directions through the gaps. Use "
+                         "with --mask_method flow, whose seeds are furniture-free but absent "
+                         "on 42%% of frames in runs of up to 73.")
+    ap.add_argument("--sam_anchors", type=int, default=8,
+                    help="How many frames to prompt SAM 2's video predictor with, spread "
+                         "over the sequence (best seed per bucket, not the N largest, which "
+                         "would all land on the same moment).")
     ap.add_argument("--sam_ckpt", default=None, help="Local SAM 2 checkpoint; omit to use the hub.")
     ap.add_argument("--sam_points", type=int, default=3,
                     help="Prompt points per seed component, spread along its principal axis so an "
@@ -332,7 +342,7 @@ def main():
     # FAIL FAST. sam2 is imported lazily inside sam_complete_masks, which runs at
     # the very END of the pipeline -- so a missing dependency cost a full 52-minute
     # detection pass before raising. Check it now, while the job is 2 seconds old.
-    if args.sam_complete:
+    if args.sam_complete or args.sam_video:
         try:
             import sam2  # noqa: F401
         except ImportError:
@@ -587,9 +597,22 @@ def main():
         # ordering commit 3ff0d87 established: gate first so nothing static is grown,
         # then complete, then let morphology tidy what is left. It replaces what
         # close/fill were reaching for -- an object prior instead of a disk.
-        if args.sam_complete:
+        if args.sam_complete or args.sam_video:
             _img = (images[0].detach().float().clamp(0, 1).cpu().numpy()
                     .transpose(0, 2, 3, 1) * 255).astype(np.uint8)   # [V,H,W,3]
+        if args.sam_video:
+            # VIDEO propagation, for a detector whose seeds are precise but sparse.
+            # The per-frame path assumes a seed on every frame; measured on balloon the
+            # flow detector leaves 42.1% of frames empty in runs of up to 73, which no
+            # per-frame completion and no RAFT mask-warp can bridge.
+            from src.model.encoder.sam_video_complete import sam_video_complete
+            _m = sam_video_complete(
+                _img, dyn_mask[0].numpy().astype(bool), model_id=args.sam_model,
+                ckpt=args.sam_ckpt, device=str(device),
+                max_anchors=args.sam_anchors,
+                min_seed_area=args.sam_min_seed_area)
+            dyn_mask = torch.from_numpy(_m).unsqueeze(0)
+        elif args.sam_complete:
             _m = sam_complete_masks(
                 _img, dyn_mask[0].numpy(), model_id=args.sam_model,
                 ckpt=args.sam_ckpt, device=str(device), n_points=args.sam_points,

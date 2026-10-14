@@ -50,6 +50,8 @@ CLOSE=${12:-0}; FILL=${13:-0}; MINAREA=${14:-0}; DILATE=${15:-0}
 GLOBAL=${16:-0}
 # Component-level motion gate: drop mask components that do not actually move.
 GATE=${17:-0}
+# SAM=1 per-frame completion; SAM=2 VIDEO propagation (for the sparse flow detector:
+# 42% of its frames carry no seed, in runs up to 73, which per-frame cannot bridge).
 # SAM=1 completes the motion SEED into whole objects with SAM 2. Use it with
 # OTSU=1: those seeds are precise and furniture-free, and SAM grows arm -> person
 # without ever being prompted on a chair. With OTSU=2 the seed already contains
@@ -85,7 +87,8 @@ OUT_DIR="${OUT_ROOT}/output_dyn_masks_precomputed_cs${CHUNK_SIZE}_r${DET_RES}_st
 [ "${DILATE}" != "0" ] && OUT_DIR="${OUT_DIR}_d${DILATE}"
 [ "${GLOBAL}" != "0" ] && OUT_DIR="${OUT_DIR}_glob"
 [ "${GATE}" != "0" ] && OUT_DIR="${OUT_DIR}_mg$(echo ${GATE} | tr '.' 'p')"
-[ "${SAM}" != "0" ] && OUT_DIR="${OUT_DIR}_sam"
+[ "${SAM}" = "1" ] && OUT_DIR="${OUT_DIR}_sam"
+[ "${SAM}" = "2" ] && OUT_DIR="${OUT_DIR}_samvid"
 [ "${PROP}" != "0" ] && OUT_DIR="${OUT_DIR}_prop${PROP}"
 
 mkdir -p "${REPO}/slurm_logs" "${OUT_ROOT}"
@@ -146,7 +149,8 @@ python precompute_dyn_masks.py \
     --frame_stride "${STRIDE}" \
     --pass_margin "${MARGIN}" \
     --mask_normalize "${NORM}" \
-    $( [ "${SAM}" != "0" ] && echo --sam_complete ) \
+    $( [ "${SAM}" = "1" ] && echo --sam_complete ) \
+    $( [ "${SAM}" = "2" ] && echo --sam_video ) \
     --mask_propagate "${PROP}" \
     --mask_aggregate "${AGG}" \
     --mask_n_clusters "${NCLUST}" \
