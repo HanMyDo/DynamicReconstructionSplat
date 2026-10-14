@@ -362,6 +362,12 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
                 precomp_mask = load_precomputed_masks(
                     frame_names, precomputed_mask_dir, h, w, device, dataset_name=ds)
 
+        # Fail loudly: without GT poses in the batch the override is silently None and
+        # the arm reads as "GT poses change nothing" for entirely the wrong reason.
+        if getattr(config, "gt_pose", False) and "gt_extrinsics" not in batch:
+            raise RuntimeError(
+                "--gt_pose was requested but this batch carries no 'gt_extrinsics'. The "
+                "sequence has no GT trajectory loaded, so the oracle would be a no-op.")
         encoder_output = model.encoder(images, global_step=0, dyn_mask_override=precomp_mask,
                                        gt_depth_override=batch.get("gt_depth"),
                                        gt_pose_override=(batch.get("gt_extrinsics")
@@ -1622,6 +1628,7 @@ def main():
         dyn_opacity_gain=args.dyn_opacity_gain,
         dyn_unsup_gain=args.dyn_unsup_gain,
         dyn_scale_mult=args.dyn_scale_mult,
+        gt_pose=args.gt_pose,
         render_max_scale_frac=args.render_max_scale_frac,
         src_window=args.src_window,
     )
@@ -1636,7 +1643,6 @@ def main():
         image_size=config.image_size,
         split=args.split,
         gt_depth=args.gt_depth,
-        gt_pose=args.gt_pose,
     )
     dataloader = torch.utils.data.DataLoader(
         dataset, batch_size=1, shuffle=False,
