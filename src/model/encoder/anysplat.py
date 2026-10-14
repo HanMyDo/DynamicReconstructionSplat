@@ -67,10 +67,6 @@ inf = float("inf")
 
 # bfloat16 requires CUDA compute capability >= 8.0 (Ampere+); fall back to float16
 _AMP_DTYPE = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float16
-
-
-@dataclass
-
 def _umeyama_sim3(src: torch.Tensor, dst: torch.Tensor):
     """Similarity (s, R, t) with dst ~= s * R @ src + t, from Nx3 point sets.
 
@@ -118,6 +114,9 @@ def _align_gt_extrinsics(gt_w2c: torch.Tensor, pred_w2c: torch.Tensor):
     return out, float(rms)
 
 
+
+
+@dataclass
 class OpacityMappingCfg:
     initial: float
     final: float
