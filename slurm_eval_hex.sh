@@ -48,7 +48,7 @@ case "${EXTRA_FLAGS}" in *per_frame_dynamic*) case "${EXTRA_FLAGS}" in *track_dy
   echo "      to pfd alone.)" ;;
 esac ;; esac
 
-REPO="${HOME}/DynamicReconstructionSplat"; cd ${REPO}; mkdir -p slurm_logs
+REPO="${REPO:-${HOME}/DynamicReconstructionSplat}"; cd ${REPO}; mkdir -p slurm_logs
 DATA_ROOT="${HOME}/data/bonn/rgbd_bonn_dataset"
 VGGT4D_CKPT="${REPO}/ckpts/vggt4d_model_tracker_fixed_e20.pt"
 
