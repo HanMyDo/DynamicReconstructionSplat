@@ -363,7 +363,10 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
                     frame_names, precomputed_mask_dir, h, w, device, dataset_name=ds)
 
         encoder_output = model.encoder(images, global_step=0, dyn_mask_override=precomp_mask,
-                                       gt_depth_override=batch.get("gt_depth"))
+                                       gt_depth_override=batch.get("gt_depth"),
+                                       gt_pose_override=(batch.get("gt_extrinsics")
+                                                         if getattr(config, "gt_pose", False)
+                                                         else None))
         gaussians = encoder_output.gaussians
         # DIAGNOSTIC ONLY (--scale_mult): enlarge every Gaussian at render time.
         # Discriminates the two explanations for the static-PSNR collapse under
@@ -1191,6 +1194,13 @@ def main():
                              "--ply_own_frame_only, which made the PLY exports sharp for the "
                              "same reason. Cost: fewer contributors, so the mover is sharper but "
                              "thinner -- raise --dyn_opacity_comp to compensate. Try 1 and 2.")
+    parser.add_argument("--gt_pose", action="store_true",
+                        help="ORACLE POSE (diagnostic). Replace the predicted camera poses "
+                             "with the dataset's GT trajectory, Sim(3)-aligned to the "
+                             "predicted one, BEFORE unprojection. Depth stays predicted, so "
+                             "this isolates the pose half of the geometry the way --gt_depth "
+                             "isolates depth. Needs gt_extrinsics in the batch (Bonn/TUM). "
+                             "Never report a number produced with this.")
     parser.add_argument("--gt_depth", action="store_true",
                         help="ORACLE DEPTH (diagnostic, Bonn only). Replace the predicted depth "
                              "with the dataset's metric GT before unprojecting, keeping the "
@@ -1626,6 +1636,7 @@ def main():
         image_size=config.image_size,
         split=args.split,
         gt_depth=args.gt_depth,
+        gt_pose=args.gt_pose,
     )
     dataloader = torch.utils.data.DataLoader(
         dataset, batch_size=1, shuffle=False,
@@ -1661,6 +1672,7 @@ def main():
             "dyn_opacity_gain": args.dyn_opacity_gain,
             "dyn_unsup_gain": args.dyn_unsup_gain,
             "gt_depth": args.gt_depth,
+            "gt_pose": args.gt_pose,
             "dyn_scale_mult": args.dyn_scale_mult,
             "render_max_scale_frac": args.render_max_scale_frac,
             "src_window": args.src_window,

@@ -70,6 +70,54 @@ _AMP_DTYPE = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_
 
 
 @dataclass
+
+def _umeyama_sim3(src: torch.Tensor, dst: torch.Tensor):
+    """Similarity (s, R, t) with dst ~= s * R @ src + t, from Nx3 point sets.
+
+    Standard trajectory alignment, the same procedure umeyama_ate uses to score poses.
+    Needed because GT trajectories are metric and live in the dataset's world frame while
+    VGGT's reconstruction is up to an unknown similarity -- substituting GT poses without
+    it puts every Gaussian outside the frustum, which is the documented 10 dB failure.
+    """
+    src = src.double(); dst = dst.double()
+    mu_s, mu_d = src.mean(0), dst.mean(0)
+    S, D = src - mu_s, dst - mu_d
+    var = (S ** 2).sum()
+    if src.shape[0] < 3 or var < 1e-12:
+        return None
+    U, Dg, Vt = torch.linalg.svd((D.T @ S) / src.shape[0])
+    E = torch.eye(3, dtype=src.dtype, device=src.device)
+    if torch.det(U @ Vt) < 0:
+        E[2, 2] = -1.0
+    R = U @ E @ Vt
+    s = torch.trace(torch.diag(Dg) @ E) / (var / src.shape[0])
+    return s, R, mu_d - s * (R @ mu_s)
+
+
+def _align_gt_extrinsics(gt_w2c: torch.Tensor, pred_w2c: torch.Tensor):
+    """Express GT world2cam poses in the PREDICTED world frame and scale.
+
+    A world2cam (R_g, t_g) has centre C = -R_g^T t_g. Aligning centres gives
+    X_pred = s R X_gt + t, so the camera becomes R_new = R_g R^T and
+    t_new = s t_g - R_new t (camera coordinates scale with the world).
+    """
+    Rg, tg = gt_w2c[:, :3, :3], gt_w2c[:, :3, 3]
+    Rp, tp = pred_w2c[:, :3, :3], pred_w2c[:, :3, 3]
+    c_gt = -torch.einsum("vij,vi->vj", Rg, tg)      # R^T t == einsum over first index
+    c_pr = -torch.einsum("vij,vi->vj", Rp, tp)
+    sim = _umeyama_sim3(c_gt, c_pr)
+    if sim is None:
+        return None, None
+    s, R, tv = sim
+    s, R, tv = s.to(gt_w2c.dtype), R.to(gt_w2c.dtype), tv.to(gt_w2c.dtype)
+    R_new = Rg @ R.T
+    t_new = s * tg - torch.einsum("vij,j->vi", R_new, tv)
+    out = gt_w2c.clone()
+    out[:, :3, :3], out[:, :3, 3] = R_new, t_new
+    rms = (c_pr - (s * (R @ c_gt.T).T + tv)).norm(dim=-1).mean()
+    return out, float(rms)
+
+
 class OpacityMappingCfg:
     initial: float
     final: float
@@ -772,6 +820,7 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
         visualization_dump: Optional[dict] = None,
         dyn_mask_override: Optional[torch.Tensor] = None,
         gt_depth_override: Optional[torch.Tensor] = None,
+        gt_pose_override: Optional[torch.Tensor] = None,
     ) -> Gaussians:
         # dyn_mask_override: PRECOMPUTED dynamic mask [B,V,H,W] or [V,H,W] (any resolution;
         # resampled to the Gaussian grid). When given, it REPLACES the internally-detected
@@ -920,6 +969,32 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
             extrinsic, intrinsic = pose_encoding_to_extri_intri(
                 last_pred_pose_enc, image.shape[-2:]
             )  # only for debug
+
+            # ORACLE POSE (diagnostic). Substitute GT camera poses for the predicted
+            # ones BEFORE unprojection, so the Gaussians are PLACED with true relative
+            # geometry -- substituting only at render time would place with predicted
+            # poses and render from GT ones, which is worse than doing nothing.
+            # Depth stays predicted, so this isolates the POSE half exactly as
+            # --gt_depth isolates the depth half. GT is metric and in the dataset's
+            # world frame, so it is first aligned to the predicted trajectory by
+            # Sim(3); without that every Gaussian lands outside the frustum.
+            if gt_pose_override is not None:
+                _gt = gt_pose_override.to(extrinsic.device, extrinsic.dtype)
+                if _gt.dim() == 3:
+                    _gt = _gt.unsqueeze(0)
+                _ex4 = extrinsic
+                if _ex4.shape[-2] == 3:                      # [B,V,3,4] -> [B,V,4,4]
+                    _pad = torch.zeros_like(_ex4[..., :1, :])
+                    _pad[..., 0, 3] = 1.0
+                    _ex4 = torch.cat([_ex4, _pad], dim=-2)
+                _aligned, _rms = _align_gt_extrinsics(_gt[0, :, :4, :4], _ex4[0])
+                if _aligned is None:
+                    print("[OraclePose] alignment degenerate -- keeping predicted poses",
+                          flush=True)
+                else:
+                    extrinsic = _aligned.unsqueeze(0)[:, :, :extrinsic.shape[-2], :]
+                    print(f"[OraclePose] substituted {_aligned.shape[0]} GT poses, "
+                          f"Sim3 centre residual {_rms:.4f} (pred-world units)", flush=True)
 
             if self.cfg.pred_head_type == "point":
                 pts_all, pts_conf = self.point_head(
