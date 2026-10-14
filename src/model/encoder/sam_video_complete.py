@@ -94,37 +94,59 @@ def sam_video_complete(
                   flush=True)
             return seeds.astype(bool)
 
+    # SAM 2's video predictor MUST run under autocast: its memory attention stores the
+    # bank in half precision while the projection weights stay float32, so without this
+    # propagation dies with "mat1 and mat2 must have the same dtype, but got BFloat16
+    # and Float". The official demo enters autocast globally for the same reason.
+    if device.startswith("cuda"):
+        _dt = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+        _amp = torch.autocast("cuda", dtype=_dt)
+    else:
+        from contextlib import nullcontext
+        _amp = nullcontext()
+
     # init_state historically wants a directory of JPEGs; newer builds accept frames
     # directly. Try the in-memory form first and fall back to a temporary directory,
     # because writing 439 JPEGs costs disk and a re-encode of every frame.
     state = None
-    try:
-        state = predictor.init_state(video_path=None, images=images)
-    except Exception:
-        import tempfile, os
-        from PIL import Image
-        tmp = tempfile.mkdtemp(prefix="sam2_frames_")
-        for i, im in enumerate(images):
-            Image.fromarray(im).save(os.path.join(tmp, f"{i:06d}.jpg"), quality=95)
-        state = predictor.init_state(video_path=tmp)
+    with _amp:
+        try:
+            state = predictor.init_state(video_path=None, images=images)
+        except Exception:
+            import tempfile, os
+            from PIL import Image
+            tmp = tempfile.mkdtemp(prefix="sam2_frames_")
+            for i, im in enumerate(images):
+                Image.fromarray(im).save(os.path.join(tmp, f"{i:06d}.jpg"), quality=95)
+            state = predictor.init_state(video_path=tmp)
 
     obj = 0
     anchored: List[Tuple[int, int]] = []
-    for f in anchors:
-        for comp in _components(seeds[f], min_seed_area)[:max_objects_per_anchor]:
-            predictor.add_new_mask(state, frame_idx=f, obj_id=obj, mask=comp)
-            anchored.append((f, obj))
-            obj += 1
+    with _amp:
+        for f in anchors:
+            for comp in _components(seeds[f], min_seed_area)[:max_objects_per_anchor]:
+                predictor.add_new_mask(state, frame_idx=f, obj_id=obj, mask=comp)
+                anchored.append((f, obj))
+                obj += 1
     print(f"[sam-video] {len(anchors)} anchor frames, {obj} objects "
           f"(seeds empty on {100.0 * (seeds.reshape(n_frames, -1).sum(1) == 0).mean():.1f}% "
           f"of frames)", flush=True)
 
     out = np.zeros((n_frames, H, W), dtype=bool)
-    with torch.inference_mode():
+    with torch.inference_mode(), _amp:
         for reverse in (False, True):                 # forward, then backward
-            for f_idx, _ids, logits in predictor.propagate_in_video(
-                    state, reverse=reverse):
-                m = (logits > 0).squeeze(1).any(0).cpu().numpy()
+            try:
+                gen = predictor.propagate_in_video(state, reverse=reverse)
+            except TypeError:                         # older builds: forward only
+                if reverse:
+                    break
+                gen = predictor.propagate_in_video(state)
+            for f_idx, _ids, logits in gen:
+                m = (logits > 0).float().squeeze(1).any(0).cpu().numpy().astype(bool)
+                if m.shape != (H, W):                 # predictor may work at its own res
+                    from PIL import Image as _I
+                    m = np.asarray(_I.fromarray(m.astype(np.uint8) * 255)
+                                   .resize((W, H), _I.NEAREST)) > 127
                 out[f_idx] |= m
     # Never lose a detection the propagation missed.
     out |= seeds.astype(bool)
