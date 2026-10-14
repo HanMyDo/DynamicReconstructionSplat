@@ -14,6 +14,32 @@ F="--per_frame_dynamic --track_dynamic --dyn_motion_knn 8 --dyn_motion_strict \
    --dyn_motion_max_disp_mult 3.0 --dyn_opacity_comp 1.0 --bg_color 1 1 1"
 ```
 
+## ⭐ ADOPTED Oct 14 2026 — `--render_max_scale_frac 0.011`
+
+The full current recipe, which is what the horizon ladders use (the `F` above predates the
+compositing knobs and is kept only for the figures in sections 1-3):
+
+```
+F="--per_frame_dynamic --dyn_conf_opacity 4.0 --track_dynamic --dyn_motion_knn 8 \
+   --dyn_motion_strict --dyn_motion_pred_bandwidth 1.5 --dyn_motion_tracker raft \
+   --dyn_motion_max_disp_mult 3.0 --dyn_opacity_comp 1.0 --bg_color 1 1 1 \
+   --eval_loo --image_views 8 --dyn_unsupported static --dyn_opacity_gain 4 \
+   --dyn_unsup_gain 0.25 --render_max_scale_frac 0.011"
+```
+
+`--render_max_scale_frac 0.011` is the ONLY survivor of the Oct 14 seven-arm sweep (crowd @ 6 s,
+removing @ 20 s, TUM walking_xyz @ 6 s). It was never harmful, gained **+0.88 psnr / +1.59 static**
+on crowd, and is the only modified arm that looked more defined rather than less. It applies the
+ceiling `ply_export.py` has used since September to the RENDER path, which had none.
+
+⛔ Rejected in the same sweep: `--src_window` (costs coverage: alpha 0.970 -> 0.885, TUM static
+-1.89), `--dyn_unsupported drop` and low `--dyn_unsup_gain` (white holes -- the masks flag static
+furniture as dynamic, so dropping unrelocatable Gaussians deletes background), and every
+combination of them.
+
+⚠️ **Every number reported before Oct 14 was produced WITHOUT this flag.** Do not mix old and new
+rows in one table; re-run the arm you are quoting, or report the ceiling as an ablation.
+
 `D` is the adopted mask set: whole-sequence detection, chunk 512 (one pass =
 parity with `demo_vggt4d.process_scene`), `--global_post`, otsu 2. The two
 ~1000-frame box sequences do not fit at 512 and use chunk 256; `global_post`
