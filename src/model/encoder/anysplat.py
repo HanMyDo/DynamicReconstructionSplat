@@ -90,6 +90,17 @@ def _umeyama_sim3(src: torch.Tensor, dst: torch.Tensor):
     return s, R, mu_d - s * (R @ mu_s)
 
 
+
+def _angles(A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:
+    """Per-view geodesic angle (degrees) between two stacks of rotations."""
+    cos = ((A * B).sum(dim=(-2, -1)) - 1.0) / 2.0
+    return torch.rad2deg(torch.arccos(cos.clamp(-1.0, 1.0)))
+
+
+def _mean_angle(A: torch.Tensor, B: torch.Tensor) -> float:
+    return float(_angles(A, B).mean())
+
+
 def _align_gt_extrinsics(gt_w2c: torch.Tensor, pred_w2c: torch.Tensor, mode: str = "full"):
     """Express GT world2cam poses in the PREDICTED world frame and scale.
 
@@ -118,6 +129,26 @@ def _align_gt_extrinsics(gt_w2c: torch.Tensor, pred_w2c: torch.Tensor, mode: str
     R_new = Rg @ R.T
     c_new = (s * (R @ c_gt.T).T + tv)               # GT centres in the predicted frame
 
+    # CAMERA-AXIS CONVENTION. Measured on Bonn, the GT and predicted rotations disagree
+    # by 138-179 degrees while the centres agree to a few percent -- that is not pose
+    # error, it is a different camera frame (the OpenCV/OpenGL diag(1,-1,-1) family).
+    # A centre is -R^T t, which is invariant to it, which is why the Sim(3) residual
+    # looked healthy while every rotation was wrong.
+    # Rather than hard-code a guess, estimate the single constant C with
+    # camera_pred = C @ camera_gt by orthogonal Procrustes over all views. C is ONE
+    # shared 3-DOF rotation against 3V degrees of freedom of per-frame error, so it
+    # removes the convention without laundering the pose error this oracle measures:
+    # the residual reported below is taken AFTER C and is the genuine disagreement.
+    M = torch.einsum("vij,vkj->ik", Rp, R_new)      # sum_v R_pred R_new^T
+    Uc, _, Vct = torch.linalg.svd(M.double())
+    C = (Uc @ Vct)
+    if torch.det(C) < 0:                            # keep it a rotation, not a reflection
+        Uc = Uc.clone(); Uc[:, -1] *= -1.0
+        C = Uc @ Vct
+    C = C.to(R_new.dtype)
+    rot_before = _mean_angle(Rp, R_new)
+    R_new = torch.einsum("ij,vjk->vik", C, R_new)
+
     if mode == "rot":
         R_use, c_use = R_new, c_pr
     elif mode == "trans":
@@ -129,11 +160,10 @@ def _align_gt_extrinsics(gt_w2c: torch.Tensor, pred_w2c: torch.Tensor, mode: str
     out[:, :3, 3] = -torch.einsum("vij,vj->vi", R_use, c_use)
 
     # How far the prediction actually is from truth, after alignment.
-    cos = ((torch.einsum("vij,vij->v", Rp, R_new)) - 1.0) / 2.0
-    ang = torch.rad2deg(torch.arccos(cos.clamp(-1.0, 1.0)))
+    ang = _angles(Rp, R_new)
     cerr = (c_pr - c_new).norm(dim=-1)
     span = (c_pr.max(0).values - c_pr.min(0).values).norm().clamp(min=1e-8)
-    stats = dict(rot_mean=float(ang.mean()), rot_max=float(ang.max()),
+    stats = dict(rot_before=rot_before, rot_mean=float(ang.mean()), rot_max=float(ang.max()),
                  ctr_mean=float(cerr.mean()), ctr_frac=float(cerr.mean() / span),
                  scale=float(s))
     return out, stats
@@ -1020,8 +1050,9 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
                 else:
                     extrinsic = _aligned.unsqueeze(0)[:, :, :extrinsic.shape[-2], :]
                     print(f"[OraclePose] mode={gt_pose_mode} n={_aligned.shape[0]} "
-                          f"scale={_st['scale']:.4f} | pred-vs-GT rotation "
-                          f"{_st['rot_mean']:.2f} deg mean, {_st['rot_max']:.2f} max | "
+                          f"scale={_st['scale']:.4f} | rotation {_st['rot_before']:.1f} deg "
+                          f"before the frame fix, {_st['rot_mean']:.2f} mean / "
+                          f"{_st['rot_max']:.2f} max after | "
                           f"centre {_st['ctr_mean']:.4f} "
                           f"({100 * _st['ctr_frac']:.2f}% of trajectory span)", flush=True)
 
