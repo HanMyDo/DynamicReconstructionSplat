@@ -90,12 +90,21 @@ def _umeyama_sim3(src: torch.Tensor, dst: torch.Tensor):
     return s, R, mu_d - s * (R @ mu_s)
 
 
-def _align_gt_extrinsics(gt_w2c: torch.Tensor, pred_w2c: torch.Tensor):
+def _align_gt_extrinsics(gt_w2c: torch.Tensor, pred_w2c: torch.Tensor, mode: str = "full"):
     """Express GT world2cam poses in the PREDICTED world frame and scale.
 
     A world2cam (R_g, t_g) has centre C = -R_g^T t_g. Aligning centres gives
     X_pred = s R X_gt + t, so the camera becomes R_new = R_g R^T and
     t_new = s t_g - R_new t (camera coordinates scale with the world).
+
+    `mode` isolates the two halves, because substituting both at once cannot say which
+    one the reconstruction actually depends on:
+      full  - GT rotation and GT centre
+      rot   - GT rotation, camera held at the PREDICTED centre
+      trans - predicted rotation, camera moved to the GT centre
+    Returns (poses, stats) where stats carries the post-alignment disagreement against
+    the prediction: if those are ~0 the oracle is a no-op and any change downstream is a
+    bug, and if they are large the prediction really is far from truth.
     """
     Rg, tg = gt_w2c[:, :3, :3], gt_w2c[:, :3, 3]
     Rp, tp = pred_w2c[:, :3, :3], pred_w2c[:, :3, 3]
@@ -107,11 +116,27 @@ def _align_gt_extrinsics(gt_w2c: torch.Tensor, pred_w2c: torch.Tensor):
     s, R, tv = sim
     s, R, tv = s.to(gt_w2c.dtype), R.to(gt_w2c.dtype), tv.to(gt_w2c.dtype)
     R_new = Rg @ R.T
-    t_new = s * tg - torch.einsum("vij,j->vi", R_new, tv)
+    c_new = (s * (R @ c_gt.T).T + tv)               # GT centres in the predicted frame
+
+    if mode == "rot":
+        R_use, c_use = R_new, c_pr
+    elif mode == "trans":
+        R_use, c_use = Rp, c_new
+    else:
+        R_use, c_use = R_new, c_new
     out = gt_w2c.clone()
-    out[:, :3, :3], out[:, :3, 3] = R_new, t_new
-    rms = (c_pr - (s * (R @ c_gt.T).T + tv)).norm(dim=-1).mean()
-    return out, float(rms)
+    out[:, :3, :3] = R_use
+    out[:, :3, 3] = -torch.einsum("vij,vj->vi", R_use, c_use)
+
+    # How far the prediction actually is from truth, after alignment.
+    cos = ((torch.einsum("vij,vij->v", Rp, R_new)) - 1.0) / 2.0
+    ang = torch.rad2deg(torch.arccos(cos.clamp(-1.0, 1.0)))
+    cerr = (c_pr - c_new).norm(dim=-1)
+    span = (c_pr.max(0).values - c_pr.min(0).values).norm().clamp(min=1e-8)
+    stats = dict(rot_mean=float(ang.mean()), rot_max=float(ang.max()),
+                 ctr_mean=float(cerr.mean()), ctr_frac=float(cerr.mean() / span),
+                 scale=float(s))
+    return out, stats
 
 
 
@@ -820,6 +845,7 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
         dyn_mask_override: Optional[torch.Tensor] = None,
         gt_depth_override: Optional[torch.Tensor] = None,
         gt_pose_override: Optional[torch.Tensor] = None,
+        gt_pose_mode: str = "full",
     ) -> Gaussians:
         # dyn_mask_override: PRECOMPUTED dynamic mask [B,V,H,W] or [V,H,W] (any resolution;
         # resampled to the Gaussian grid). When given, it REPLACES the internally-detected
@@ -986,14 +1012,18 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
                     _pad = torch.zeros_like(_ex4[..., :1, :])
                     _pad[..., 0, 3] = 1.0
                     _ex4 = torch.cat([_ex4, _pad], dim=-2)
-                _aligned, _rms = _align_gt_extrinsics(_gt[0, :, :4, :4], _ex4[0])
+                _aligned, _st = _align_gt_extrinsics(
+                    _gt[0, :, :4, :4], _ex4[0], mode=gt_pose_mode)
                 if _aligned is None:
                     print("[OraclePose] alignment degenerate -- keeping predicted poses",
                           flush=True)
                 else:
                     extrinsic = _aligned.unsqueeze(0)[:, :, :extrinsic.shape[-2], :]
-                    print(f"[OraclePose] substituted {_aligned.shape[0]} GT poses, "
-                          f"Sim3 centre residual {_rms:.4f} (pred-world units)", flush=True)
+                    print(f"[OraclePose] mode={gt_pose_mode} n={_aligned.shape[0]} "
+                          f"scale={_st['scale']:.4f} | pred-vs-GT rotation "
+                          f"{_st['rot_mean']:.2f} deg mean, {_st['rot_max']:.2f} max | "
+                          f"centre {_st['ctr_mean']:.4f} "
+                          f"({100 * _st['ctr_frac']:.2f}% of trajectory span)", flush=True)
 
             if self.cfg.pred_head_type == "point":
                 pts_all, pts_conf = self.point_head(

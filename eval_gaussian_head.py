@@ -372,7 +372,8 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
                                        gt_depth_override=batch.get("gt_depth"),
                                        gt_pose_override=(batch.get("gt_extrinsics")
                                                          if getattr(config, "gt_pose", False)
-                                                         else None))
+                                                         else None),
+                                       gt_pose_mode=getattr(config, "gt_pose_mode", "full"))
         gaussians = encoder_output.gaussians
         # DIAGNOSTIC ONLY (--scale_mult): enlarge every Gaussian at render time.
         # Discriminates the two explanations for the static-PSNR collapse under
@@ -1200,6 +1201,11 @@ def main():
                              "--ply_own_frame_only, which made the PLY exports sharp for the "
                              "same reason. Cost: fewer contributors, so the mover is sharper but "
                              "thinner -- raise --dyn_opacity_comp to compensate. Try 1 and 2.")
+    parser.add_argument("--gt_pose_mode", choices=["full", "rot", "trans"], default="full",
+                        help="Which half of the GT pose to substitute. 'rot' keeps the "
+                             "predicted camera CENTRE and takes only the GT rotation; "
+                             "'trans' the reverse. Substituting both at once cannot say "
+                             "which half the reconstruction depends on.")
     parser.add_argument("--gt_pose", action="store_true",
                         help="ORACLE POSE (diagnostic). Replace the predicted camera poses "
                              "with the dataset's GT trajectory, Sim(3)-aligned to the "
@@ -1629,6 +1635,7 @@ def main():
         dyn_unsup_gain=args.dyn_unsup_gain,
         dyn_scale_mult=args.dyn_scale_mult,
         gt_pose=args.gt_pose,
+        gt_pose_mode=args.gt_pose_mode,
         render_max_scale_frac=args.render_max_scale_frac,
         src_window=args.src_window,
     )
@@ -1679,6 +1686,7 @@ def main():
             "dyn_unsup_gain": args.dyn_unsup_gain,
             "gt_depth": args.gt_depth,
             "gt_pose": args.gt_pose,
+            "gt_pose_mode": args.gt_pose_mode,
             "dyn_scale_mult": args.dyn_scale_mult,
             "render_max_scale_frac": args.render_max_scale_frac,
             "src_window": args.src_window,

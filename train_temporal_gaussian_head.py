@@ -395,6 +395,7 @@ class TrainingConfig:
     dyn_unsup_gain: float = 1.0
     gt_depth: bool = False
     gt_pose: bool = False
+    gt_pose_mode: str = "full"
     dyn_scale_mult: float = 1.0
     render_max_scale_frac: float = 0.0
     src_window: int = 0
