@@ -237,6 +237,7 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
              per_frame_dynamic=False, leave_one_out=False, precomputed_mask_dir=None,
              track_dynamic=False, gain_correct=False, scale_mult=1.0,
              image_save_every=1, batch_stride=1, images_only=False, image_views=None,
+             image_alpha=False,
              ply_batch=None, ply_per_frame=False, ply_dyn_source=-1, ply_dyn_opacity=1.0,
              ply_own_frame_only=False, ply_max_scale_frac=0.011,
              ply_dyn_scale_mult=1.0, ply_dyn_keep_frac=0.0, ply_dyn_min_disp=0.0, ply_single_frame=False, ply_scale_mult=1.0,
@@ -618,6 +619,15 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
                 if image_error_map:
                     err = (pred_frame - gt_frame).abs().mean(dim=0, keepdim=True)
                     panels.append((err * image_error_gain).clamp(0, 1).repeat(3, 1, 1))
+                # COVERAGE MAP (--image_alpha). Rendered alpha as a picture rather than a
+                # mean. The mean is what misled us about transparency: a cloud spread over
+                # the wrong footprint averages high while reading as faint, and alpha
+                # inside a mask says nothing about the holes outside it. White = fully
+                # covered, dark = transmittance left for the background, which is where a
+                # surface was seen by too few frames to fuse.
+                if image_alpha and getattr(decoder_out, "alpha", None) is not None:
+                    a = decoder_out.alpha[0, v_idx].detach().float().clamp(0, 1)
+                    panels.append(a.unsqueeze(0).repeat(3, 1, 1))
                 comparison = torch.cat(panels, dim=2)  # [3, H, N*W]
                 save_image(comparison, os.path.join(images_dir, f"b{batch_idx:04d}_v{v_idx:02d}.png"))
 
@@ -1201,6 +1211,10 @@ def main():
                              "--ply_own_frame_only, which made the PLY exports sharp for the "
                              "same reason. Cost: fewer contributors, so the mover is sharper but "
                              "thinner -- raise --dyn_opacity_comp to compensate. Try 1 and 2.")
+    parser.add_argument("--image_alpha", action="store_true",
+                        help="Append the rendered ALPHA map as an extra panel. Coverage as "
+                             "a picture, not a mean: dark = transmittance left for the "
+                             "background, i.e. surfaces too few frames saw to fuse.")
     parser.add_argument("--gt_pose_mode", choices=["full", "rot", "trans"], default="full",
                         help="Which half of the GT pose to substitute. 'rot' keeps the "
                              "predicted camera CENTRE and takes only the GT rotation; "
@@ -1734,6 +1748,7 @@ def main():
                           else {int(x) for x in args.image_views.split(",") if x.strip() != ""}),
              max_image_batches=args.max_image_batches,
              image_batch_start=args.image_batch_start,
+             image_alpha=args.image_alpha,
              per_frame_dynamic=args.per_frame_dynamic,
              leave_one_out=args.eval_loo,
              precomputed_mask_dir=args.dyn_mask_dir,
