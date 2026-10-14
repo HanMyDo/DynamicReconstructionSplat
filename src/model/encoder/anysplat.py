@@ -27,7 +27,6 @@ from src.model.encoder.vggt.utils.geometry import (
 from src.model.encoder.vggt.utils.pose_enc import pose_encoding_to_extri_intri
 from src.utils.geometry import get_rel_pos  # used for model hub
 from torch import nn, Tensor
-from torch_scatter import scatter_add, scatter_max
 
 from ..types import Gaussians
 from .backbone import Backbone, BackboneCfg, get_backbone
@@ -89,6 +88,28 @@ def _umeyama_sim3(src: torch.Tensor, dst: torch.Tensor):
     s = torch.trace(torch.diag(Dg) @ E) / (var / src.shape[0])
     return s, R, mu_d - s * (R @ mu_s)
 
+
+
+
+# Segment reductions in pure PyTorch. torch_scatter is an optional native extension and
+# the build in this environment has no CUDA kernels ("RuntimeError: Not compiled with
+# CUDA support" from scatter_max), which silently blocked every voxelized run. These two
+# are exact replacements built on torch.scatter_reduce_/scatter_add_, which have been in
+# PyTorch since 1.12 and run on CUDA, so voxelization no longer depends on a native build.
+def _seg_max(src: torch.Tensor, index: torch.Tensor, n: int) -> torch.Tensor:
+    """Per-segment maximum of a 1-D tensor; mirrors scatter_max(...)[0]."""
+    out = torch.full((n,), float("-inf"), dtype=src.dtype, device=src.device)
+    return out.scatter_reduce_(0, index, src, reduce="amax", include_self=True)
+
+
+def _seg_sum(src: torch.Tensor, index: torch.Tensor, n: int) -> torch.Tensor:
+    """Per-segment sum; mirrors scatter_add for 1-D src or [N, D] src with [N] index."""
+    if src.dim() == 1:
+        out = torch.zeros(n, dtype=src.dtype, device=src.device)
+        return out.scatter_add_(0, index, src)
+    out = torch.zeros((n,) + tuple(src.shape[1:]), dtype=src.dtype, device=src.device)
+    idx = index.view(-1, *([1] * (src.dim() - 1))).expand_as(src)
+    return out.scatter_add_(0, idx, src)
 
 
 def _angles(A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:
@@ -622,13 +643,14 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
         )
         # Confidence-softmax weights within each voxel (same scheme as the
         # upstream fusion, just restricted to the kept points).
-        conf_voxel_max, _ = scatter_max(conf_f, inverse_indices, dim=0)
+        _nvox = int(inverse_indices.max().item()) + 1
+        conf_voxel_max = _seg_max(conf_f, inverse_indices, _nvox)
         conf_exp = torch.exp(conf_f - conf_voxel_max[inverse_indices])
-        voxel_weights = scatter_add(conf_exp, inverse_indices, dim=0)
+        voxel_weights = _seg_sum(conf_exp, inverse_indices, _nvox)
         weights = (conf_exp / (voxel_weights[inverse_indices] + 1e-6)).unsqueeze(-1)
 
-        voxel_pts = scatter_add(pts_f * weights, inverse_indices, dim=0)
-        voxel_feats = scatter_add(feat_f * weights, inverse_indices, dim=0)
+        voxel_pts = _seg_sum(pts_f * weights, inverse_indices, _nvox)
+        voxel_feats = _seg_sum(feat_f * weights, inverse_indices, _nvox)
         return voxel_pts, voxel_feats
 
     def voxelizaton_with_fusion(self, img_feat, pts3d, voxel_size, conf=None):
@@ -647,10 +669,11 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
         anchor_feats_flat = img_feat.permute(0, 2, 3, 1).flatten(0, 2)  # [B*V*N, ...]
 
         # Compute softmax weights per voxel
-        conf_voxel_max, _ = scatter_max(conf_flat, inverse_indices, dim=0)
+        _nvox = int(inverse_indices.max().item()) + 1
+        conf_voxel_max = _seg_max(conf_flat, inverse_indices, _nvox)
         conf_exp = torch.exp(conf_flat - conf_voxel_max[inverse_indices])
-        voxel_weights = scatter_add(
-            conf_exp, inverse_indices, dim=0
+        voxel_weights = _seg_sum(
+            conf_exp, inverse_indices, _nvox
         )  # [num_unique_voxels]
         weights = (conf_exp / (voxel_weights[inverse_indices] + 1e-6)).unsqueeze(
             -1
@@ -661,11 +684,11 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
         weighted_feats = anchor_feats_flat.squeeze(1) * weights
 
         # Aggregate per voxel
-        voxel_pts = scatter_add(
-            weighted_pts, inverse_indices, dim=0
+        voxel_pts = _seg_sum(
+            weighted_pts, inverse_indices, _nvox
         )  # [num_unique_voxels, 3]
-        voxel_feats = scatter_add(
-            weighted_feats, inverse_indices, dim=0
+        voxel_feats = _seg_sum(
+            weighted_feats, inverse_indices, _nvox
         )  # [num_unique_voxels, feat_dim]
 
         return voxel_pts, voxel_feats
