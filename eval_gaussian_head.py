@@ -270,6 +270,12 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
     # artificial black edges into the perceptual network).
     total_lpips = 0.0
     total_lpips_dyn = 0.0
+    # PER-WINDOW record, written to per_window.json. The aggregate alone cannot be
+    # sliced after the fact, so a full-sequence run could not answer "how did we do
+    # where things actually MOVE" without a second, hand-picked run -- and picking
+    # the window after seeing the result is cherry-picking. With this, one run
+    # answers both and the slicing rule can be stated up front.
+    per_window = []
     # RENDERED ALPHA (coverage). The decoder already returns it and eval threw it
     # away, so the one quantity that says whether a region is actually COVERED was
     # never recorded. It is the direct read-out for --dyn_opacity_comp: the
@@ -529,6 +535,9 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
             total_ssim += ssim_val
             total_lpips += lpips_val
             n_frames += 1
+            rec = {"window": int(batch_idx), "view": int(v_idx),
+                   "psnr": psnr_val, "ssim": ssim_val, "lpips": lpips_val}
+            per_window.append(rec)
 
             # --- rendered alpha (coverage), overall and split by the mask -----
             a_frame = None
@@ -558,8 +567,11 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
                 if n_px >= 10:
                     mask3 = mask.unsqueeze(0).expand(3, -1, -1)
                     mse_dyn = ((pred_frame * mask3 - gt_frame * mask3) ** 2).sum() / (3 * n_px)
-                    total_psnr_dyn += -10 * torch.log10(mse_dyn + 1e-8).item()
+                    _pd = -10 * torch.log10(mse_dyn + 1e-8).item()
+                    total_psnr_dyn += _pd
                     n_dyn_frames += 1
+                    rec["psnr_dynamic"] = _pd
+                    rec["dyn_frac"] = float(n_px) / float(mask.numel())
 
                     # Perceptual quality WHERE THE MOVING OBJECT IS: crop both images to
                     # the mask's bounding box (padded, min 32px so VGG has enough support)
@@ -1083,6 +1095,10 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
 
     with open(os.path.join(output_dir, "metrics.json"), "w") as f:
         json.dump(metrics, f, indent=2)
+    # Separate file: one row per scored frame, so a run can be re-sliced (e.g. to the
+    # windows where the mask is actually busy) without re-rendering anything.
+    with open(os.path.join(output_dir, "per_window.json"), "w") as f:
+        json.dump(per_window, f)
 
     print(f"\nOutputs saved to {output_dir}/")
     print(f"  metrics.json, images/, rgb.mp4, depth.mp4, gaussians.ply"
