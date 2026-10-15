@@ -89,6 +89,10 @@ for ROW in "${ROWS[@]}"; do
 done
 
 echo "----"
-echo "submitted ${n_ok} pair(s), skipped ${n_skip}:${SKIPPED:-none}"
+if [ "${DRY}" = "1" ]; then
+  echo "DRY RUN -- nothing submitted. ${n_ok} pair(s) would run, ${n_skip} skipped:${SKIPPED:-none}"
+else
+  echo "submitted ${n_ok} pair(s), skipped ${n_skip}:${SKIPPED:-none}"
+fi
 echo "tag=${TAG}  ->  output_probe_frozen_{old,new}_<seq>_${TAG}/"
 echo "metrics.json for the aggregate, per_window.json to re-slice to busy windows."
