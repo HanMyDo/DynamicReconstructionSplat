@@ -40,7 +40,52 @@ combination of them.
 ⚠️ **Every number reported before Oct 14 was produced WITHOUT this flag.** Do not mix old and new
 rows in one table; re-run the arm you are quoting, or report the ceiling as an ablation.
 
-`D` is the adopted mask set: whole-sequence detection, chunk 512 (one pass =
+## ⭐⭐ ADOPTED Oct 15 2026 — the MASK recipe (`F` is unchanged)
+
+`F` above is still the render config, unchanged. What changed is how the masks are
+made. The adopted mask set is now the **flow detector completed by SAM 2 video
+propagation over the whole sequence**:
+
+```
+sbatch --export=ALL,DATA_ROOT=$HOME/data/bonn/rgbd_bonn_dataset --gres=gpu:1 \
+  slurm_precompute_masks_hex.sh <SEQ> 256 518 3 1 6 per_frame mean 64 flow 2 \
+  0 0 0 0 1 0 2 0 1 16
+#                   ^method ^otsu            ^glob ^sam=2 ^gvid ^anchors
+# -> output_dyn_masks_precomputed_cs256_r518_st3_fs1_m6_flow_otsu2_glob_samvid_gvid_an16
+```
+
+**Why:** the old attention masks mark the table and every chair as dynamic; these mark
+one chair back. Measured on crowd at a window where people actually move (held-out
+304-333), new vs old masks win on all three mask-independent metrics under BOTH the
+neutral and the adopted config: **+0.19 / +0.13 psnr, +0.003 / +0.014 ssim,
+-0.009 / -0.027 lpips**. The renders are the stronger evidence -- people are solid
+instead of faint and scattered. Full record and the two traps that nearly hid this
+result are in the `result-masks-validated-crowd` memory note.
+
+⚠️ **`psnr_dynamic` and `psnr_static` are NOT comparable across mask sets** -- different
+masks define different pixel populations. Only `psnr`, `ssim` and `lpips` compare.
+
+⚠️ **Every number reported before Oct 15 used the OLD attention masks.**
+
+Two fixes landed with it, both correcting a whole-sequence decision that was being taken
+per chunk -- the same class of error `--global_post` fixed for the attention path:
+- `--sam_video_global` (arg 20): propagation ran PER CHUNK, so crowd's four chunks came
+  out at mean masked area 0.060 / 0.319 / 0.179 / 0.116. Balloon's 439 frames fit one
+  chunk of 512, which is why its masks were already good. Empty frames 60.3% -> 5.0%.
+- `--global_flow_thresh` (arg 22): the flow residual's multi-Otsu threshold was per
+  chunk -- 3.303 / 6.999 / **40.034** / 6.295 on crowd. ⏳ committed, NOT yet measured.
+
+⛔ Still rejected: `--dyn_unsupported drop`. But note the Oct 14 sweep rejected it
+*because* "the masks flag static furniture as dynamic, so dropping unrelocatable
+Gaussians deletes background" -- a cause these masks remove. Re-test as its own
+single-variable experiment.
+
+`--sam_anchors` scales with sequence length: 8 was tuned on balloon's 439 frames, 16 for
+~930. Chunk 512 host-OOMs (`Killed`) at 963 frames; 256 fits and takes ~28 min for 928.
+
+### Superseded (pre-Oct-15 mask set)
+
+`D` was: whole-sequence detection, chunk 512 (one pass =
 parity with `demo_vggt4d.process_scene`), `--global_post`, otsu 2. The two
 ~1000-frame box sequences do not fit at 512 and use chunk 256; `global_post`
 still thresholds over the whole sequence, so the part that mattered survives.
