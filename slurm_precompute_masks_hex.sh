@@ -70,6 +70,11 @@ SAMG=${20:-0}
 # Anchor frames for the video predictor. The default 8 was tuned on balloon's 439
 # frames; scale it with length or a 900-frame sequence is prompted half as densely.
 ANCHORS=${21:-8}
+# GTHR=1 takes the flow-residual Otsu threshold over the WHOLE sequence instead of
+# per chunk. --global_post only ever covered the ATTENTION path; the flow detector
+# came later and kept a per-chunk threshold, so on crowd at chunk 256 the chunks
+# used 3.303 / 6.999 / 40.034 / 6.295. Flow method only.
+GTHR=${22:-0}
                       # 1 = original (topmost class only -> a person's arm, not their torso).
                       # 2 = top two classes -> the whole object. THIS is the coverage knob;
                       # the aggregate is not, because the threshold adapts to the scores.
@@ -100,6 +105,7 @@ OUT_DIR="${OUT_ROOT}/output_dyn_masks_precomputed_cs${CHUNK_SIZE}_r${DET_RES}_st
 [ "${PROP}" != "0" ] && OUT_DIR="${OUT_DIR}_prop${PROP}"
 [ "${SAMG}" != "0" ] && OUT_DIR="${OUT_DIR}_gvid"
 [ "${ANCHORS}" != "8" ] && OUT_DIR="${OUT_DIR}_an${ANCHORS}"
+[ "${GTHR}" != "0" ] && OUT_DIR="${OUT_DIR}_gthr"
 
 mkdir -p "${REPO}/slurm_logs" "${OUT_ROOT}"
 cd "${REPO}"
@@ -163,6 +169,7 @@ python precompute_dyn_masks.py \
     $( [ "${SAM}" = "2" ] && echo --sam_video ) \
     $( [ "${SAMG}" != "0" ] && echo --sam_video_global ) \
     --sam_anchors "${ANCHORS}" \
+    $( [ "${GTHR}" != "0" ] && echo --global_flow_thresh ) \
     --mask_propagate "${PROP}" \
     --mask_aggregate "${AGG}" \
     --mask_n_clusters "${NCLUST}" \

@@ -311,6 +311,17 @@ def main():
                     help="How many frames to prompt SAM 2's video predictor with, spread "
                          "over the sequence (best seed per bucket, not the N largest, which "
                          "would all land on the same moment).")
+    ap.add_argument("--global_flow_thresh", action="store_true",
+                    help="Compute the flow-residual multi-Otsu threshold over the WHOLE "
+                         "sequence instead of per chunk. --global_post does this for the "
+                         "ATTENTION path only; the flow detector came later and kept a "
+                         "per-chunk threshold, so on crowd at chunk 256 the four chunks "
+                         "used 3.303 / 6.999 / 40.034 / 6.295 -- a 12x spread that left "
+                         "chunk 3 detecting 1.7%% of pixels against chunk 2's 11.1%%, set "
+                         "by where the boundary fell rather than by the content. The "
+                         "threshold is taken from a strided subsample because "
+                         "adaptive_multiotsu_variance np.digitize()s its whole input, "
+                         "which is several GB of int64 at full sequence length.")
     ap.add_argument("--sam_video_global", action="store_true",
                     help="Propagate ONCE over the whole sequence instead of once per chunk. "
                          "Per-chunk propagation reintroduces exactly the deviation "
@@ -483,6 +494,7 @@ def main():
 
     per_frame_fraction = {}
     deferred_seeds = {}          # frame idx -> seed mask, for --sam_video_global
+    deferred_res = {}            # frame idx -> flow residual, for --global_flow_thresh
     for ci, (idxs, emit_idxs) in enumerate(passes):
         chunk_paths = [frame_paths[i] for i in idxs]
         # Load NATIVELY at the detection long-edge (aspect-preserved crop, /14). Default
@@ -548,6 +560,26 @@ def main():
                     intrinsic_s1[0], depth_conf=None)
                 # Threshold the same way the attention path does, so the two masks are
                 # directly comparable and the multi-Otsu machinery is shared.
+                if args.global_flow_thresh:
+                    if args.mask_method == "union":
+                        raise SystemExit(
+                            "--global_flow_thresh supports --mask_method flow only: union "
+                            "needs the attention mask from this same pass, which the "
+                            "deferred path does not keep.")
+                    _r = res.detach().float().cpu().numpy()
+                    # Per-chunk threshold on a small subsample, for the record ONLY --
+                    # this is the number the old per-chunk path would have used, so the
+                    # log shows the spread the global threshold replaces.
+                    _sub = _r.reshape(-1)[::max(1, _r.size // 2_000_000)]
+                    print(f"[FlowMask/deferred] chunk would have used "
+                          f"{adaptive_multiotsu_variance(_sub, level=args.mask_otsu_level):.3f} "
+                          f"(residual median={float(np.median(_sub)):.2f}px)", flush=True)
+                    _emit_r = set(emit_idxs)
+                    for _i in range(n):
+                        if idxs[_i] in _emit_r:
+                            deferred_res[idxs[_i]] = _r[_i].astype(np.float16)
+                    del _r
+                    continue      # thresholded, completed and saved after the loop
                 thr = adaptive_multiotsu_variance(
                     res.cpu().numpy(), level=args.mask_otsu_level)
                 flow_mask = (res > thr).float().unsqueeze(0)
@@ -662,20 +694,50 @@ def main():
                 save_overlay_png(images[0, i], m, overlays_dir / f"{p.stem}.png")
             per_frame_fraction[p.name] = float((m > 0.5).mean())
 
-    # ---- single whole-sequence propagation (--sam_video_global) ----------------
-    if args.sam_video and args.sam_video_global and deferred_seeds:
-        from src.model.encoder.sam_video_complete import sam_video_complete
+    # ---- one global threshold over every chunk's residuals (--global_flow_thresh) --
+    if deferred_res:
+        order_r = sorted(deferred_res)
+        # Subsample for the threshold: adaptive_multiotsu_variance np.digitize()s its
+        # whole input three times, which at ~190M values is several GB of int64 -- the
+        # same host OOM that killed chunk 512 this morning. A threshold is a statistic
+        # of the VALUE distribution, so a strided sample gives the same answer. The
+        # stride does not align with the row length, so pixels are drawn evenly.
+        _target = 20_000_000
+        _per = max(1, _target // max(len(order_r), 1))
+        _parts = []
+        for _i in order_r:
+            _f = deferred_res[_i].reshape(-1)
+            _parts.append(_f[::max(1, _f.size // max(_per, 1))])
+        _sample = np.concatenate(_parts).astype(np.float32)
+        del _parts
+        thr_g = adaptive_multiotsu_variance(_sample, level=args.mask_otsu_level)
+        print(f"[FlowMask/global] threshold={thr_g:.3f} from {_sample.size} sampled "
+              f"residuals over {len(order_r)} frames (compare the per-chunk values above)",
+              flush=True)
+        del _sample
+        for _i in order_r:
+            deferred_seeds[_i] = (deferred_res[_i].astype(np.float32) > thr_g)
+            deferred_res[_i] = None
+        deferred_res.clear()
+        _sf = np.array([m.mean() for m in deferred_seeds.values()])
+        print(f"[FlowMask/global] seeds cover {100 * _sf.mean():.2f}% of pixels, "
+              f"{100 * float((_sf == 0).mean()):.1f}% of frames empty", flush=True)
+
+    # ---- whole-sequence completion and save for any deferred path ---------------
+    if deferred_seeds:
         order = sorted(deferred_seeds)
         seeds = np.stack([deferred_seeds[i] for i in order])          # [N, H, W] bool
-        print(f"[sam-video/global] one propagation over {len(order)} frames "
-              f"(seeds cover {100 * seeds.mean():.2f}% of pixels, "
-              f"{100 * (seeds.reshape(len(order), -1).sum(1) == 0).mean():.1f}% of frames empty)",
-              flush=True)
-        # Reload the frames as uint8. The whole-sequence uint8 array is ~0.75 GB at
+        _prop = bool(args.sam_video and args.sam_video_global)
+        print(f"[deferred] {len(order)} frames collected over the whole sequence; "
+              f"propagation={'on' if _prop else 'off'}", flush=True)
+        # Reload the frames as uint8 -- needed to PROMPT propagation and to draw
+        # overlays, and for nothing else. The whole-sequence uint8 array is ~0.75 GB at
         # 518 px for 900 frames; a float copy of all of them on the GPU is not, which
         # is why this batches the decode and keeps only uint8.
-        imgs = np.empty((len(order),) + seeds.shape[1:] + (3,), dtype=np.uint8)
-        for st in range(0, len(order), 128):
+        imgs = None
+        if _prop or args.save_overlays:
+            imgs = np.empty((len(order),) + seeds.shape[1:] + (3,), dtype=np.uint8)
+        for st in range(0, len(order) if imgs is not None else 0, 128):
             blk = [str(frame_paths[i]) for i in order[st:st + 128]]
             t = load_and_preprocess_images(blk, mode=args.preprocess_mode,
                                            target_size=args.det_resolution)
@@ -685,10 +747,14 @@ def main():
                     f"{seeds.shape[1:]}; propagation needs them aligned")
             imgs[st:st + len(blk)] = (t.float().clamp(0, 1).numpy()
                                       .transpose(0, 2, 3, 1) * 255).astype(np.uint8)
-        grown = sam_video_complete(
-            imgs, seeds, model_id=args.sam_model, ckpt=args.sam_ckpt,
-            device=str(device), max_anchors=args.sam_anchors,
-            min_seed_area=args.sam_min_seed_area)
+        if _prop:
+            from src.model.encoder.sam_video_complete import sam_video_complete
+            grown = sam_video_complete(
+                imgs, seeds, model_id=args.sam_model, ckpt=args.sam_ckpt,
+                device=str(device), max_anchors=args.sam_anchors,
+                min_seed_area=args.sam_min_seed_area)
+        else:
+            grown = seeds          # --global_flow_thresh alone: seeds ARE the mask
         if (args.mask_close or args.mask_fill or args.mask_min_area or args.mask_dilate):
             grown = complete_masks(grown.astype(np.float32), close=args.mask_close,
                                    fill=args.mask_fill, min_area=args.mask_min_area,
@@ -717,6 +783,7 @@ def main():
         "mask_otsu_level": args.mask_otsu_level,
         "global_post": args.global_post,
         "sam_video_global": args.sam_video_global,
+        "global_flow_thresh": args.global_flow_thresh,
         "mask_motion_gate": args.mask_motion_gate,
         "mask_close": args.mask_close,
         "mask_fill": args.mask_fill,
