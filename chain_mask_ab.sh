@@ -27,6 +27,9 @@ set -uo pipefail
 
 TAG="${EVAL_DATE:-mab}"
 DRY="${DRY:-0}"
+# Refuse a new-mask set whose mean dynamic fraction is implausible. crowd 0.183
+# and TUM xyz 0.192 pass; removing 0.836 and halfsphere 0.436 do not.
+MAX_AREA="${MAX_AREA:-0.35}"
 REPO="${REPO:-${HOME}/DynamicReconstructionSplat}"
 MO="${HOME}/data/mask_out"   # --dyn_mask_dir takes the TOP-LEVEL dir;
                               # eval appends /<sequence>/masks itself.
@@ -74,7 +77,20 @@ for ROW in "${ROWS[@]}"; do
     echo "SKIP ${SEQ}: frames=${NFRAMES} old=${N_OLD} new=${N_NEW}  (need both >= frames)"
     SKIPPED="${SKIPPED} ${SEQ}"; n_skip=$((n_skip + 1)); continue
   fi
-  echo "OK   ${SEQ}: frames=${NFRAMES} old=${N_OLD} new=${N_NEW} chunk=${CHUNK} intr=${INTR}"
+  # AREA GUARD. A mask set can have every frame present and still be unusable:
+  # SAM video propagation with no growth rail took removing_obstructing_box to 0.836
+  # mean dynamic fraction (84% of the image) and TUM halfsphere to 0.436, against
+  # crowd 0.183 and balloon 0.109. Nothing downstream notices -- the arm just scores
+  # a different scene. Read it from the precompute's own meta.json.
+  AREA=$(python3 -c "import json,sys;print('%.4f'%json.load(open(sys.argv[1]))['dyn_fraction_mean'])" \
+           "${MO}/${NEWM}/${SEQ}/meta.json" 2>/dev/null || echo "nan")
+  if python3 -c "import sys;a=sys.argv[1];sys.exit(0 if a!='nan' and float(a)<=${MAX_AREA} else 1)" "${AREA}"; then
+    :
+  else
+    echo "SKIP ${SEQ}: new-mask dyn_fraction_mean=${AREA} > ${MAX_AREA} (propagation ran away)"
+    SKIPPED="${SKIPPED} ${SEQ}"; n_skip=$((n_skip + 1)); continue
+  fi
+  echo "OK   ${SEQ}: frames=${NFRAMES} old=${N_OLD} new=${N_NEW} chunk=${CHUNK} intr=${INTR} area=${AREA}"
   n_ok=$((n_ok + 1))
   [ "${DRY}" = "1" ] && continue
 

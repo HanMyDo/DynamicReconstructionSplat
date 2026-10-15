@@ -322,6 +322,14 @@ def main():
                          "threshold is taken from a strided subsample because "
                          "adaptive_multiotsu_variance np.digitize()s its whole input, "
                          "which is several GB of int64 at full sequence length.")
+    ap.add_argument("--sam_max_frame_frac", type=float, default=0.5,
+                    help="Reject a propagated object whose mask covers more than this "
+                         "fraction of the frame. An object covering half the image is not "
+                         "an object any more, whatever its seed was. The relative cap "
+                         "(--sam_max_growth) cannot catch this alone, because an object "
+                         "seeded on an already-large false positive grows within its "
+                         "budget: removing_obstructing_box reached 0.836 mean area with an "
+                         "object count almost identical to crowd's at 0.183.")
     ap.add_argument("--sam_video_global", action="store_true",
                     help="Propagate ONCE over the whole sequence instead of once per chunk. "
                          "Per-chunk propagation reintroduces exactly the deviation "
@@ -665,7 +673,9 @@ def main():
                 _img, dyn_mask[0].numpy().astype(bool), model_id=args.sam_model,
                 ckpt=args.sam_ckpt, device=str(device),
                 max_anchors=args.sam_anchors,
-                min_seed_area=args.sam_min_seed_area)
+                min_seed_area=args.sam_min_seed_area,
+                max_growth=args.sam_max_growth,
+                max_frame_frac=args.sam_max_frame_frac)
             dyn_mask = torch.from_numpy(_m).unsqueeze(0)
         elif args.sam_complete:
             _m = sam_complete_masks(
@@ -752,7 +762,9 @@ def main():
             grown = sam_video_complete(
                 imgs, seeds, model_id=args.sam_model, ckpt=args.sam_ckpt,
                 device=str(device), max_anchors=args.sam_anchors,
-                min_seed_area=args.sam_min_seed_area)
+                min_seed_area=args.sam_min_seed_area,
+                max_growth=args.sam_max_growth,
+                max_frame_frac=args.sam_max_frame_frac)
         else:
             grown = seeds          # --global_flow_thresh alone: seeds ARE the mask
         if (args.mask_close or args.mask_fill or args.mask_min_area or args.mask_dilate):
@@ -784,6 +796,7 @@ def main():
         "global_post": args.global_post,
         "sam_video_global": args.sam_video_global,
         "global_flow_thresh": args.global_flow_thresh,
+        "sam_max_frame_frac": args.sam_max_frame_frac,
         "mask_motion_gate": args.mask_motion_gate,
         "mask_close": args.mask_close,
         "mask_fill": args.mask_fill,

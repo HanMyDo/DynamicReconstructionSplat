@@ -66,6 +66,8 @@ def sam_video_complete(
     max_anchors: int = 8,
     min_seed_area: int = 40,
     max_objects_per_anchor: int = 3,
+    max_growth: float = 20.0,
+    max_frame_frac: float = 0.5,
 ) -> np.ndarray:
     """images [N,H,W,3] uint8, seeds [N,H,W] bool -> completed masks [N,H,W] bool.
 
@@ -143,17 +145,20 @@ def sam_video_complete(
 
     obj = 0
     anchored: List[Tuple[int, int]] = []
+    anchor_area: dict = {}        # obj id -> seed area, for the growth rail
     with _amp:
         for f in anchors:
             for comp in _components(seeds[f], min_seed_area)[:max_objects_per_anchor]:
                 predictor.add_new_mask(state, frame_idx=f, obj_id=obj, mask=comp)
                 anchored.append((f, obj))
+                anchor_area[obj] = int(comp.sum())
                 obj += 1
     print(f"[sam-video] {len(anchors)} anchor frames, {obj} objects "
           f"(seeds empty on {100.0 * (seeds.reshape(n_frames, -1).sum(1) == 0).mean():.1f}% "
           f"of frames)", flush=True)
 
     out = np.zeros((n_frames, H, W), dtype=bool)
+    n_rej_grow = 0; n_rej_abs = 0
     with torch.inference_mode(), _amp:
         for reverse in (False, True):                 # forward, then backward
             try:
@@ -162,15 +167,42 @@ def sam_video_complete(
                 if reverse:
                     break
                 gen = predictor.propagate_in_video(state)
-            for f_idx, _ids, logits in gen:
-                m = (logits > 0).float().squeeze(1).any(0).cpu().numpy().astype(bool)
-                if m.shape != (H, W):                 # predictor may work at its own res
-                    from PIL import Image as _I
-                    m = np.asarray(_I.fromarray(m.astype(np.uint8) * 255)
-                                   .resize((W, H), _I.NEAREST)) > 127
-                out[f_idx] |= m
+            for f_idx, ids, logits in gen:
+                # PER OBJECT, not collapsed. `.any(0)` over all objects gave a runaway
+                # object no accounting at all, and the per-frame path's own comment calls
+                # its growth cap "the safety rail that matters". Without it,
+                # removing_obstructing_box came out at 0.836 mean area -- 84% of the
+                # image -- with 0.0% empty frames, from an object count (31) almost
+                # identical to crowd's (30) at 0.183.
+                mi = (logits > 0).squeeze(1).cpu().numpy().astype(bool)
+                if mi.ndim == 2:
+                    mi = mi[None]
+                oid_list = list(ids) if ids is not None else list(range(mi.shape[0]))
+                if len(oid_list) != mi.shape[0]:      # unexpected build: no accounting
+                    oid_list = [None] * mi.shape[0]
+                for _k in range(mi.shape[0]):
+                    m = mi[_k]
+                    if m.shape != (H, W):             # predictor may work at its own res
+                        from PIL import Image as _I
+                        m = np.asarray(_I.fromarray(m.astype(np.uint8) * 255)
+                                       .resize((W, H), _I.NEAREST)) > 127
+                    a = int(m.sum())
+                    if a == 0:
+                        continue
+                    # Absolute rail first: an object covering half the frame is not an
+                    # object any more, whatever its seed was.
+                    if a > max_frame_frac * H * W:
+                        n_rej_abs += 1
+                        continue
+                    ref = anchor_area.get(oid_list[_k]) if oid_list[_k] is not None else None
+                    if ref and a > max_growth * ref:
+                        n_rej_grow += 1
+                        continue
+                    out[f_idx] |= m
     # Never lose a detection the propagation missed.
     out |= seeds.astype(bool)
+    print(f"[sam-video] rejected {n_rej_grow} object-frames past {max_growth:g}x their "
+          f"seed and {n_rej_abs} past {100 * max_frame_frac:g}% of the frame", flush=True)
     print(f"[sam-video] completed: empty frames "
           f"{100.0 * (out.reshape(n_frames, -1).sum(1) == 0).mean():.1f}%, "
           f"mean area {out.mean():.4f}", flush=True)
