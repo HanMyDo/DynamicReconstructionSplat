@@ -108,17 +108,38 @@ def sam_video_complete(
     # init_state historically wants a directory of JPEGs; newer builds accept frames
     # directly. Try the in-memory form first and fall back to a temporary directory,
     # because writing 439 JPEGs costs disk and a re-encode of every frame.
+    # A WHOLE-SEQUENCE propagation holds every frame resized to 1024x1024 (~12 MB each)
+    # plus a memory bank that grows with objects x frames, so past a few hundred frames
+    # the offload flags are the difference between fitting and a CUDA OOM. They are
+    # keyword-only and absent from older sam2 builds, hence the widening fallback: a
+    # TypeError means this build does not know the kwarg, so drop it and retry.
+    _init_kwargs = [
+        dict(offload_video_to_cpu=True, offload_state_to_cpu=True),
+        dict(offload_video_to_cpu=True),
+        dict(),
+    ]
+
+    def _init(**fixed):
+        for kw in _init_kwargs:
+            try:
+                return predictor.init_state(**fixed, **kw)
+            except TypeError:
+                continue
+        return None
+
     state = None
     with _amp:
         try:
-            state = predictor.init_state(video_path=None, images=images)
+            state = _init(video_path=None, images=images)
         except Exception:
+            state = None
+        if state is None:
             import tempfile, os
             from PIL import Image
             tmp = tempfile.mkdtemp(prefix="sam2_frames_")
             for i, im in enumerate(images):
                 Image.fromarray(im).save(os.path.join(tmp, f"{i:06d}.jpg"), quality=95)
-            state = predictor.init_state(video_path=tmp)
+            state = _init(video_path=tmp)
 
     obj = 0
     anchored: List[Tuple[int, int]] = []

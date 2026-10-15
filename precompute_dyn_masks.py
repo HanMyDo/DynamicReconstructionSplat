@@ -311,6 +311,16 @@ def main():
                     help="How many frames to prompt SAM 2's video predictor with, spread "
                          "over the sequence (best seed per bucket, not the N largest, which "
                          "would all land on the same moment).")
+    ap.add_argument("--sam_video_global", action="store_true",
+                    help="Propagate ONCE over the whole sequence instead of once per chunk. "
+                         "Per-chunk propagation reintroduces exactly the deviation "
+                         "--global_post removes: on crowd at chunk 256, four chunks of one "
+                         "continuous scene came out with mean masked areas 0.060 / 0.319 / "
+                         "0.179 / 0.116 -- a 5x spread set by where the boundaries fell, "
+                         "because each chunk gets its own --sam_anchors prompts and its own "
+                         "memory bank. Detection stays chunked; only propagation goes global. "
+                         "Raise --sam_anchors with sequence length: 8 over 439 frames is not "
+                         "8 over 928.")
     ap.add_argument("--sam_ckpt", default=None, help="Local SAM 2 checkpoint; omit to use the hub.")
     ap.add_argument("--sam_points", type=int, default=3,
                     help="Prompt points per seed component, spread along its principal axis so an "
@@ -472,6 +482,7 @@ def main():
             torch.cuda.empty_cache()
 
     per_frame_fraction = {}
+    deferred_seeds = {}          # frame idx -> seed mask, for --sam_video_global
     for ci, (idxs, emit_idxs) in enumerate(passes):
         chunk_paths = [frame_paths[i] for i in idxs]
         # Load NATIVELY at the detection long-edge (aspect-preserved crop, /14). Default
@@ -597,6 +608,18 @@ def main():
         # ordering commit 3ff0d87 established: gate first so nothing static is grown,
         # then complete, then let morphology tidy what is left. It replaces what
         # close/fill were reaching for -- an object prior instead of a disk.
+        # WHOLE-SEQUENCE propagation: the chunk loop only COLLECTS seeds here, and a
+        # single pass after the loop grows them. SAM 2's video predictor must see the
+        # whole sequence for its anchors to be spread over it, and its memory bank to
+        # carry an object across a gap the detector lost -- a gap that may be longer
+        # than one chunk. See --sam_video_global for the measurement.
+        if args.sam_video and args.sam_video_global:
+            _emit = set(emit_idxs)
+            for i in range(n):
+                if idxs[i] in _emit:
+                    deferred_seeds[idxs[i]] = (dyn_mask[0, i].numpy() > 0.5)
+            continue
+
         if args.sam_complete or args.sam_video:
             _img = (images[0].detach().float().clamp(0, 1).cpu().numpy()
                     .transpose(0, 2, 3, 1) * 255).astype(np.uint8)   # [V,H,W,3]
@@ -639,6 +662,46 @@ def main():
                 save_overlay_png(images[0, i], m, overlays_dir / f"{p.stem}.png")
             per_frame_fraction[p.name] = float((m > 0.5).mean())
 
+    # ---- single whole-sequence propagation (--sam_video_global) ----------------
+    if args.sam_video and args.sam_video_global and deferred_seeds:
+        from src.model.encoder.sam_video_complete import sam_video_complete
+        order = sorted(deferred_seeds)
+        seeds = np.stack([deferred_seeds[i] for i in order])          # [N, H, W] bool
+        print(f"[sam-video/global] one propagation over {len(order)} frames "
+              f"(seeds cover {100 * seeds.mean():.2f}% of pixels, "
+              f"{100 * (seeds.reshape(len(order), -1).sum(1) == 0).mean():.1f}% of frames empty)",
+              flush=True)
+        # Reload the frames as uint8. The whole-sequence uint8 array is ~0.75 GB at
+        # 518 px for 900 frames; a float copy of all of them on the GPU is not, which
+        # is why this batches the decode and keeps only uint8.
+        imgs = np.empty((len(order),) + seeds.shape[1:] + (3,), dtype=np.uint8)
+        for st in range(0, len(order), 128):
+            blk = [str(frame_paths[i]) for i in order[st:st + 128]]
+            t = load_and_preprocess_images(blk, mode=args.preprocess_mode,
+                                           target_size=args.det_resolution)
+            if tuple(t.shape[-2:]) != seeds.shape[1:]:
+                raise RuntimeError(
+                    f"reloaded frames are {tuple(t.shape[-2:])} but seeds are "
+                    f"{seeds.shape[1:]}; propagation needs them aligned")
+            imgs[st:st + len(blk)] = (t.float().clamp(0, 1).numpy()
+                                      .transpose(0, 2, 3, 1) * 255).astype(np.uint8)
+        grown = sam_video_complete(
+            imgs, seeds, model_id=args.sam_model, ckpt=args.sam_ckpt,
+            device=str(device), max_anchors=args.sam_anchors,
+            min_seed_area=args.sam_min_seed_area)
+        if (args.mask_close or args.mask_fill or args.mask_min_area or args.mask_dilate):
+            grown = complete_masks(grown.astype(np.float32), close=args.mask_close,
+                                   fill=args.mask_fill, min_area=args.mask_min_area,
+                                   dilate=args.mask_dilate)
+        for k, fi in enumerate(order):
+            fp = frame_paths[fi]
+            m = np.asarray(grown[k], dtype=np.float32)
+            save_mask_png(m, masks_dir / f"{fp.stem}.png")
+            if args.save_overlays:
+                save_overlay_png(torch.from_numpy(imgs[k]).permute(2, 0, 1).float() / 255.0,
+                                 m, overlays_dir / f"{fp.stem}.png")
+            per_frame_fraction[fp.name] = float((m > 0.5).mean())
+
     fracs = np.array(list(per_frame_fraction.values()))
     meta = {
         "dataset_name": args.dataset_name,
@@ -653,6 +716,7 @@ def main():
         "mask_method": args.mask_method,
         "mask_otsu_level": args.mask_otsu_level,
         "global_post": args.global_post,
+        "sam_video_global": args.sam_video_global,
         "mask_motion_gate": args.mask_motion_gate,
         "mask_close": args.mask_close,
         "mask_fill": args.mask_fill,

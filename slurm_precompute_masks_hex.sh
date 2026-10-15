@@ -62,6 +62,14 @@ SAM=${18:-0}
 # warping the previous mask with RAFT. The value is the max frames a region may be
 # carried without re-detection. See --mask_propagate for the measurement.
 PROP=${19:-0}
+# SAMG=1 propagates ONCE over the whole sequence instead of once per chunk. Only
+# meaningful with SAM=2. Per-chunk propagation was our own deviation: on crowd at
+# chunk 256 the four chunks of one continuous scene came out at mean masked area
+# 0.060 / 0.319 / 0.179 / 0.116 because each got its own anchors and memory bank.
+SAMG=${20:-0}
+# Anchor frames for the video predictor. The default 8 was tuned on balloon's 439
+# frames; scale it with length or a 900-frame sequence is prompted half as densely.
+ANCHORS=${21:-8}
                       # 1 = original (topmost class only -> a person's arm, not their torso).
                       # 2 = top two classes -> the whole object. THIS is the coverage knob;
                       # the aggregate is not, because the threshold adapts to the scores.
@@ -90,6 +98,8 @@ OUT_DIR="${OUT_ROOT}/output_dyn_masks_precomputed_cs${CHUNK_SIZE}_r${DET_RES}_st
 [ "${SAM}" = "1" ] && OUT_DIR="${OUT_DIR}_sam"
 [ "${SAM}" = "2" ] && OUT_DIR="${OUT_DIR}_samvid"
 [ "${PROP}" != "0" ] && OUT_DIR="${OUT_DIR}_prop${PROP}"
+[ "${SAMG}" != "0" ] && OUT_DIR="${OUT_DIR}_gvid"
+[ "${ANCHORS}" != "8" ] && OUT_DIR="${OUT_DIR}_an${ANCHORS}"
 
 mkdir -p "${REPO}/slurm_logs" "${OUT_ROOT}"
 cd "${REPO}"
@@ -151,6 +161,8 @@ python precompute_dyn_masks.py \
     --mask_normalize "${NORM}" \
     $( [ "${SAM}" = "1" ] && echo --sam_complete ) \
     $( [ "${SAM}" = "2" ] && echo --sam_video ) \
+    $( [ "${SAMG}" != "0" ] && echo --sam_video_global ) \
+    --sam_anchors "${ANCHORS}" \
     --mask_propagate "${PROP}" \
     --mask_aggregate "${AGG}" \
     --mask_n_clusters "${NCLUST}" \
