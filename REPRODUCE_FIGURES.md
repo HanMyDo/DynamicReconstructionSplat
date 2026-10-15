@@ -67,13 +67,39 @@ masks define different pixel populations. Only `psnr`, `ssim` and `lpips` compar
 
 ⚠️ **Every number reported before Oct 15 used the OLD attention masks.**
 
+## ⭐⭐ MEASUREMENT NOISE FLOOR — 0.006 dB (Oct 15 2026)
+
+Two byte-identical configs, crowd, 30 windows at stride 8, `--eval_loo`:
+
+| | psnr | ssim | lpips |
+|---|---|---|---|
+| r1 | 13.8437 | 0.5753 | 0.4944 |
+| r2 | 13.8373 | 0.5755 | 0.4944 |
+| **Δ** | **0.0064** | **0.0002** | **0.0000** |
+
+RAFT is not bit-deterministic, so repeated runs are not identical, but at 30 windows the
+aggregate spread is **~0.006 dB**. Consequences: the Oct 15 mask win (+0.19 / +0.13 psnr)
+is 20-30x the noise and is REAL; `--dyn_conf_opacity` (+0.52) and `--dyn_opacity_comp`
+(+0.87) were far above noise; and anything claimed below ~0.05 dB on a single sequence
+needs this control re-run beside it. ⚠️ The floor is for the 30-window AGGREGATE -- the
+per-window `[DynFlow] moved %` varies several points run to run (72.4 vs 71.1 over 3
+windows), so do not read a single window's diagnostic as exact.
+
 Two fixes landed with it, both correcting a whole-sequence decision that was being taken
 per chunk -- the same class of error `--global_post` fixed for the attention path:
 - `--sam_video_global` (arg 20): propagation ran PER CHUNK, so crowd's four chunks came
   out at mean masked area 0.060 / 0.319 / 0.179 / 0.116. Balloon's 439 frames fit one
   chunk of 512, which is why its masks were already good. Empty frames 60.3% -> 5.0%.
-- `--global_flow_thresh` (arg 22): the flow residual's multi-Otsu threshold was per
-  chunk -- 3.303 / 6.999 / **40.034** / 6.295 on crowd. ⏳ committed, NOT yet measured.
+- ⛔ `--global_flow_thresh` (arg 22): **MEASURED AND REJECTED Oct 15.** The flow
+  residual's multi-Otsu threshold is per chunk (3.281 / 6.998 / **40.034** / 6.406 on
+  crowd) and making it global gives **38.401** -- next to the outlier, not the cluster,
+  because the residual is heavy-tailed and a whole-sequence Otsu is dominated by the
+  tail. Seed coverage 4.39% -> **0.48%**, frames with no seed 60.3% -> **98.6%**, and
+  SAM then grows **0.388** mean area from 13 anchors against 0.183. Per-chunk Otsu is
+  acting as useful LOCAL NORMALISATION. The flag stays in the code, off.
+  ⚠️ Per-chunk Otsu is still unstable (12x thresholds at similar medians: 0.29 / 0.48 /
+  0.42 / 0.31), so the principled fix is a ROBUST statistic -- a residual percentile, or
+  median + k*MAD -- not a global Otsu. Not attempted.
 
 ⛔ Still rejected: `--dyn_unsupported drop`. But note the Oct 14 sweep rejected it
 *because* "the masks flag static furniture as dynamic, so dropping unrelocatable
