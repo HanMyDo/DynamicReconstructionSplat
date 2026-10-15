@@ -964,6 +964,12 @@ def knn_flow_displacement(
     dev = gauss_pts.device
     disp = torch.zeros(N, num_views, 3, device=dev, dtype=gauss_pts.dtype)
     valid = torch.zeros(N, num_views, device=dev, dtype=gauss_pts.dtype)
+    # BINARY companion, for the diagnostic ONLY. With conf_opacity > 0, `valid`
+    # holds frac**conf_opacity rather than 0/1, so summing it answers "mean support
+    # weight", not "what fraction of pairs moved" -- and the moved% it printed was
+    # then 2.7x lower for the same relocations, which is not comparable across
+    # configs. 1 byte per (gaussian, view).
+    valid_bin = torch.zeros(N, num_views, device=dev, dtype=torch.bool)
     _gate_tot = _gate_radius = _gate_vis = 0
     traj_t, ok_t = (predict_tracks_loo(traj, ok, bandwidth=pred_bandwidth)
                     if strict else (traj, ok))
@@ -1096,16 +1102,21 @@ def knn_flow_displacement(
             else:
                 vrow[sel] = good.to(valid.dtype)
             valid[:, j] += vrow
+            brow = torch.zeros(N, device=dev, dtype=torch.bool)
+            brow[sel] = good
+            valid_bin[:, j] |= brow
 
     # --- DIAGNOSTIC: did the mechanism actually DO anything? --------------------
     n_dyn = int(gauss_dyn.sum())
     if n_dyn > 0:
-        v_off = valid.clone()
-        own = gauss_fidx.clamp_min(0).long().unsqueeze(1)      # [N,1]
-        v_off.scatter_(1, own, 0.0)                            # ignore own-frame slots
-        cover = v_off[gauss_dyn].sum() / max(n_dyn * max(num_views - 1, 1), 1)
+        # COUNT pairs, never sum `valid`: under conf_opacity its entries are
+        # fractional support weights, and summing them reports a smaller number for
+        # identical relocations.
+        b_off = valid_bin.clone()
+        b_off[torch.arange(N, device=dev), gauss_fidx.clamp_min(0).long()] = False
+        cover = b_off[gauss_dyn].sum() / max(n_dyn * max(num_views - 1, 1), 1)
         mags = disp[gauss_dyn].norm(dim=-1)
-        mags = mags[v_off[gauss_dyn] > 0]
+        mags = mags[b_off[gauss_dyn]]          # same population as moved%
         if mags.numel() > 0:
             print(f"[DynFlow{'/strict' if strict else ''}] moved {100.0 * float(cover):.1f}% of dynamic "
                   f"(gaussian, target) pairs | displacement "
