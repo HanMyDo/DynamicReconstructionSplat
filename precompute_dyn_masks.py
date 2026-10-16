@@ -574,18 +574,42 @@ def main():
             # pixel moves DIFFERENTLY from what the camera alone would produce, which a
             # slow torso does just as much as a fast arm -- so it covers whole objects.
             if args.mask_method in ("flow", "union"):
-                _dc = None
+                res = flow_residual_map(
+                    images[0], depth_s1[0].squeeze(-1), extrinsic_s2[0],
+                    intrinsic_s1[0], depth_conf=None)
+                # DEPTH-CONFIDENCE GATE, applied as an EXCLUSION rather than a zeroing.
+                # Zeroing the residual at low-confidence pixels (the first attempt) put
+                # 20% zeros INTO the distribution multi-Otsu then thresholds, which drags
+                # the low class down, lowers the threshold and admits MORE pixels: measured
+                # on removing_obstructing_box, mean mask area went 0.466 -> 0.605, i.e. the
+                # gate made the mask bigger. So the suppressed pixels must be excluded from
+                # the threshold estimate and then forced non-dynamic.
+                _ck = None
                 if args.flow_conf_quantile > 0:
                     _dc = depth_conf_s1[0]
                     while _dc.dim() > 3:
                         _dc = _dc.squeeze(-1)
-                res = flow_residual_map(
-                    images[0], depth_s1[0].squeeze(-1), extrinsic_s2[0],
-                    intrinsic_s1[0], depth_conf=_dc,
-                    conf_quantile=args.flow_conf_quantile)
+                    _fq = _dc.flatten().float()
+                    if _fq.numel() > 8_000_000:         # torch.quantile has an element cap
+                        _fq = _fq[:: _fq.numel() // 4_000_000]
+                    _cthr = torch.quantile(_fq, args.flow_conf_quantile)
+                    _ck = (_dc > _cthr)
+                    print(f"[FlowMask/conf] excluding {100.0 * (1.0 - _ck.float().mean().item()):.1f}% "
+                          f"of pixels from the threshold estimate and from the mask "
+                          f"(quantile={args.flow_conf_quantile:g}, conf>{_cthr.item():.4f}); "
+                          f"residual mean {res.mean().item():.3f} px overall vs "
+                          f"{res[_ck].mean().item():.3f} px on kept pixels", flush=True)
                 # Threshold the same way the attention path does, so the two masks are
                 # directly comparable and the multi-Otsu machinery is shared.
                 if args.global_flow_thresh:
+                    if args.flow_conf_quantile > 0:
+                        raise SystemExit(
+                            "--global_flow_thresh and --flow_conf_quantile cannot be "
+                            "combined: the deferred path stores only the residual, so the "
+                            "per-chunk exclusion mask would be lost and the global "
+                            "threshold would be estimated over suppressed pixels -- the "
+                            "exact bug this gate was rewritten to avoid. "
+                            "--global_flow_thresh was measured and rejected anyway.")
                     if args.mask_method == "union":
                         raise SystemExit(
                             "--global_flow_thresh supports --mask_method flow only: union "
@@ -605,9 +629,13 @@ def main():
                             deferred_res[idxs[_i]] = _r[_i].astype(np.float16)
                     del _r
                     continue      # thresholded, completed and saved after the loop
+                _rv = (res[_ck] if _ck is not None else res)
                 thr = adaptive_multiotsu_variance(
-                    res.cpu().numpy(), level=args.mask_otsu_level)
-                flow_mask = (res > thr).float().unsqueeze(0)
+                    _rv.cpu().numpy(), level=args.mask_otsu_level)
+                _fm = (res > thr)
+                if _ck is not None:
+                    _fm = _fm & _ck      # a low-confidence pixel is never evidence of motion
+                flow_mask = _fm.float().unsqueeze(0)
                 print(f"[FlowMask] residual threshold={thr:.3f}, "
                       f"dynamic pixels={flow_mask.mean()*100:.1f}% "
                       f"(attention gave {dyn_mask.mean()*100:.1f}%)", flush=True)
