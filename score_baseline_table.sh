@@ -32,12 +32,14 @@ conda activate dynrec
 
 A512="output_dyn_masks_precomputed_cs512_r518_st3_fs1_m6_flow_otsu2_glob_samvid_gvid"
 A256="output_dyn_masks_precomputed_cs256_r518_st3_fs1_m6_flow_otsu2_glob_samvid_gvid_an16"
+A128="output_dyn_masks_precomputed_cs128_r518_st3_fs1_m6_flow_otsu2_glob_samvid_gvid_an16"
 
 ROWS=(
 "rgbd_bonn_balloon|balloon|dense|4 8 12 16 20|${BONN}|${A512}"
 "rgbd_bonn_synchronous2|sync2|dense|4 8 12 16 20|${BONN}|${A512}"
 "rgbd_bonn_crowd|crowd|plain|4 12 20 30 40|${BONN}|${A256}"
 "rgbd_dataset_freiburg3_walking_xyz|tum_xyz|plain|4 8 12 16 20|${TUM}|${A256}"
+"rgbd_dataset_freiburg3_walking_halfsphere|tum_halfsphere|plain|4 8 12 16 20|${TUM}|${A128}"
 )
 
 for ROW in "${ROWS[@]}"; do
@@ -104,7 +106,11 @@ out = [f"# Baseline table ({tag})", "",
        "Ours vs MoVieS and NeoVerse. 16-frame window, leave-one-out on every view,",
        "both arms scored under the SAME (new) masks. Seconds = stride / 2 at 30 Hz.",
        "LPIPS and SSIM are on the dynamic-region crop. `A - B` is ours minus theirs,",
-       "so positive is better for PSNR and SSIM, negative is better for LPIPS.", ""]
+       "so positive is better for PSNR and SSIM, negative is better for LPIPS.", "",
+       "⚠️ tum_halfsphere's masks have known false positives (people covered, but the",
+       "ceiling and sometimes the table also marked). The comparison is still fair --",
+       "both arms are scored under the same masks -- and overall/LPIPS/SSIM are",
+       "mask-independent, but read its dynamic and static columns with that in mind.", ""]
 for base, label in (("neoverse", "NeoVerse"), ("movies", "MoVieS")):
     out += [f"## vs {label}", "",
             "| sequence | s | sec | overall | dynamic | static | LPIPS | SSIM |",

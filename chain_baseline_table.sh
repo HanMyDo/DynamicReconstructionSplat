@@ -48,6 +48,7 @@ F="--per_frame_dynamic --dyn_conf_opacity 4.0 --track_dynamic --dyn_motion_knn 8
 
 A512="output_dyn_masks_precomputed_cs512_r518_st3_fs1_m6_flow_otsu2_glob_samvid_gvid"
 A256="output_dyn_masks_precomputed_cs256_r518_st3_fs1_m6_flow_otsu2_glob_samvid_gvid_an16"
+A128="output_dyn_masks_precomputed_cs128_r518_st3_fs1_m6_flow_otsu2_glob_samvid_gvid_an16"
 
 # seq | baseline key | dense? | stride:batch_stride,... | data root | intrinsics | mask set
 ROWS=(
@@ -55,6 +56,12 @@ ROWS=(
 "rgbd_bonn_synchronous2|sync2|dense|4:5,8:5,12:5,16:2,20:2|${BONN}|bonn|${A512}"
 "rgbd_bonn_crowd|crowd|plain|4:5,12:5,20:5,30:5,40:5|${BONN}|bonn|${A256}"
 "rgbd_dataset_freiburg3_walking_xyz|tum_xyz|plain|4:5,8:5,12:5,16:5,20:5|${TUM}|tum_fr3|${A256}"
+# ⚠️ halfsphere's masks have KNOWN false positives (people covered, but the ceiling
+# and sometimes the table also marked). Included at the user's request Oct 16: the
+# ours-vs-baseline comparison stays FAIR because both arms are scored under the same
+# masks, and `overall` PSNR / LPIPS / SSIM are mask-independent. Only its dynamic and
+# static columns are weakened, because the "dynamic" region contains background.
+"rgbd_dataset_freiburg3_walking_halfsphere|tum_halfsphere|plain|4:5,8:5,12:5,16:5,20:5|${TUM}|tum_fr3|${A128}"
 )
 
 IDS=""; n_sub=0; n_skip=0
