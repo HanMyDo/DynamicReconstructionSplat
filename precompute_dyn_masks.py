@@ -311,6 +311,17 @@ def main():
                     help="How many frames to prompt SAM 2's video predictor with, spread "
                          "over the sequence (best seed per bucket, not the N largest, which "
                          "would all land on the same moment).")
+    ap.add_argument("--flow_conf_quantile", type=float, default=0.0,
+                    help="0 = off (previous behaviour). >0 zeroes the flow residual wherever "
+                         "VGGT's DEPTH CONFIDENCE falls in this lowest quantile. The residual is "
+                         "measured flow minus the flow the CAMERA ALONE would induce THROUGH "
+                         "PREDICTED DEPTH, so where depth is wrong the prediction is wrong and a "
+                         "large residual says nothing about motion -- it says the depth was bad. "
+                         "That error scales with camera translation, which is why the two "
+                         "sequences with the largest camera motion produced unusable masks "
+                         "(mean dynamic fraction 0.836 and 0.436 against crowd's 0.183) while the "
+                         "near-static ones were fine. flow_residual_map has always accepted "
+                         "depth_conf and implemented this; it was called with None.")
     ap.add_argument("--global_flow_thresh", action="store_true",
                     help="Compute the flow-residual multi-Otsu threshold over the WHOLE "
                          "sequence instead of per chunk. --global_post does this for the "
@@ -539,7 +550,7 @@ def main():
             with torch.amp.autocast("cuda", enabled=False):
                 pose1 = encoder.camera_head(tokens1)
                 _, intrinsic_s1 = pose_encoding_to_extri_intri(pose1[-1], images.shape[-2:])
-                depth_s1, _ = encoder.depth_head(
+                depth_s1, depth_conf_s1 = encoder.depth_head(
                     tokens1, images=images, patch_start_idx=patch_start1)
             del tokens1
             if device.type == "cuda":
@@ -563,9 +574,15 @@ def main():
             # pixel moves DIFFERENTLY from what the camera alone would produce, which a
             # slow torso does just as much as a fast arm -- so it covers whole objects.
             if args.mask_method in ("flow", "union"):
+                _dc = None
+                if args.flow_conf_quantile > 0:
+                    _dc = depth_conf_s1[0]
+                    while _dc.dim() > 3:
+                        _dc = _dc.squeeze(-1)
                 res = flow_residual_map(
                     images[0], depth_s1[0].squeeze(-1), extrinsic_s2[0],
-                    intrinsic_s1[0], depth_conf=None)
+                    intrinsic_s1[0], depth_conf=_dc,
+                    conf_quantile=args.flow_conf_quantile)
                 # Threshold the same way the attention path does, so the two masks are
                 # directly comparable and the multi-Otsu machinery is shared.
                 if args.global_flow_thresh:
@@ -629,8 +646,15 @@ def main():
             if args.stages < 3:
                 print("[MotionGate] needs --stages 3 (Stage-1 depth + Stage-2 poses); skipping")
             else:
+                _gdc = None
+                if args.flow_conf_quantile > 0:
+                    _gdc = depth_conf_s1[0]
+                    while _gdc.dim() > 3:
+                        _gdc = _gdc.squeeze(-1)
                 _res = flow_residual_map(images[0], depth_s1[0].squeeze(-1),
-                                         extrinsic_s2[0], intrinsic_s1[0]).cpu().numpy()
+                                         extrinsic_s2[0], intrinsic_s1[0],
+                                         depth_conf=_gdc,
+                                         conf_quantile=args.flow_conf_quantile).cpu().numpy()
                 _before = float(dyn_mask.mean())
                 _g = motion_gate_masks(dyn_mask[0].numpy(), _res,
                                        mult=args.mask_motion_gate)
@@ -797,6 +821,7 @@ def main():
         "sam_video_global": args.sam_video_global,
         "global_flow_thresh": args.global_flow_thresh,
         "sam_max_frame_frac": args.sam_max_frame_frac,
+        "flow_conf_quantile": args.flow_conf_quantile,
         "mask_motion_gate": args.mask_motion_gate,
         "mask_close": args.mask_close,
         "mask_fill": args.mask_fill,

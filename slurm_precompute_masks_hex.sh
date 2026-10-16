@@ -75,6 +75,12 @@ ANCHORS=${21:-8}
 # came later and kept a per-chunk threshold, so on crowd at chunk 256 the chunks
 # used 3.303 / 6.999 / 40.034 / 6.295. Flow method only.
 GTHR=${22:-0}
+# CONFQ>0 zeroes the flow residual where VGGT's depth confidence is in this lowest
+# quantile. The residual is measured-minus-camera-induced flow THROUGH PREDICTED
+# DEPTH, so bad depth manufactures residual -- and that error scales with camera
+# translation, which is why the two highest-camera-motion sequences produced
+# unusable masks. flow_residual_map always supported this and was passed None.
+CONFQ=${23:-0}
                       # 1 = original (topmost class only -> a person's arm, not their torso).
                       # 2 = top two classes -> the whole object. THIS is the coverage knob;
                       # the aggregate is not, because the threshold adapts to the scores.
@@ -106,6 +112,7 @@ OUT_DIR="${OUT_ROOT}/output_dyn_masks_precomputed_cs${CHUNK_SIZE}_r${DET_RES}_st
 [ "${SAMG}" != "0" ] && OUT_DIR="${OUT_DIR}_gvid"
 [ "${ANCHORS}" != "8" ] && OUT_DIR="${OUT_DIR}_an${ANCHORS}"
 [ "${GTHR}" != "0" ] && OUT_DIR="${OUT_DIR}_gthr"
+[ "${CONFQ}" != "0" ] && OUT_DIR="${OUT_DIR}_dc$(echo ${CONFQ} | tr '.' 'p')"
 
 mkdir -p "${REPO}/slurm_logs" "${OUT_ROOT}"
 cd "${REPO}"
@@ -170,6 +177,7 @@ python precompute_dyn_masks.py \
     $( [ "${SAMG}" != "0" ] && echo --sam_video_global ) \
     --sam_anchors "${ANCHORS}" \
     $( [ "${GTHR}" != "0" ] && echo --global_flow_thresh ) \
+    --flow_conf_quantile "${CONFQ}" \
     --mask_propagate "${PROP}" \
     --mask_aggregate "${AGG}" \
     --mask_n_clusters "${NCLUST}" \

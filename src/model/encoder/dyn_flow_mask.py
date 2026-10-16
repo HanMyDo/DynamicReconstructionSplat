@@ -220,9 +220,19 @@ def flow_residual_map(images: torch.Tensor, depth: torch.Tensor,
             res[i] = torch.minimum(res[i], (measured - pred).norm(dim=-1))
     res = torch.where(torch.isinf(res), torch.zeros_like(res), res)
 
-    if depth_conf is not None:
+    if depth_conf is not None and conf_quantile > 0:
         # Where depth is unreliable the prediction is unreliable too, so a large
         # residual says nothing about motion. Zero those out rather than trusting them.
-        thr = torch.quantile(depth_conf.flatten().float(), conf_quantile)
-        res = res * (depth_conf > thr).float()
+        # torch.quantile has an element-cap, so sample on long sequences.
+        _f = depth_conf.flatten().float()
+        if _f.numel() > 8_000_000:
+            _f = _f[:: _f.numel() // 4_000_000]
+        thr = torch.quantile(_f, conf_quantile)
+        keep = (depth_conf > thr)
+        print(f"[FlowResidual] depth-confidence gate: suppressed "
+              f"{100.0 * (1.0 - keep.float().mean().item()):.1f}% of pixels "
+              f"(conf_quantile={conf_quantile:g}, thr={thr.item():.4f}); "
+              f"residual mean {res.mean().item():.3f} -> "
+              f"{(res * keep.float()).mean().item():.3f} px", flush=True)
+        res = res * keep.float()
     return res
