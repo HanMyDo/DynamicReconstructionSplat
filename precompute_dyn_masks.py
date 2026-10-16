@@ -312,8 +312,16 @@ def main():
                          "over the sequence (best seed per bucket, not the N largest, which "
                          "would all land on the same moment).")
     ap.add_argument("--flow_conf_quantile", type=float, default=0.0,
-                    help="0 = off (previous behaviour). >0 zeroes the flow residual wherever "
-                         "VGGT's DEPTH CONFIDENCE falls in this lowest quantile. The residual is "
+                    help="0 = off (previous behaviour). >0 EXCLUDES pixels whose VGGT DEPTH "
+                         "CONFIDENCE falls in this lowest quantile -- from the multi-Otsu "
+                         "threshold estimate AND from the mask. (It used to ZERO them, which put "
+                         "the zeros into the distribution being thresholded, lowered the threshold "
+                         "and made masks BIGGER: 0.466 -> 0.605 on removing_obstructing_box.) "
+                         "⛔ MEASURED NEUTRAL Oct 16 2026 and the hypothesis is DISCONFIRMED: the "
+                         "excluded pixels carry the same residual as the kept ones (0.351 vs 0.352 "
+                         "px on removing), and VGGT's confidence is badly scaled across chunks "
+                         "(thresholds 13.12 / 3.43 / 1.00 / 1.00, two at a floor). Kept for the "
+                         "record; do not expect it to help. The residual is "
                          "measured flow minus the flow the CAMERA ALONE would induce THROUGH "
                          "PREDICTED DEPTH, so where depth is wrong the prediction is wrong and a "
                          "large residual says nothing about motion -- it says the depth was bad. "
