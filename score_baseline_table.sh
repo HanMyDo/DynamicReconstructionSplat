@@ -63,10 +63,18 @@ for ROW in "${ROWS[@]}"; do
       [ -d "${SRC}" ] || { echo "MISSING baseline: ${SRC}"; continue; }
 
       OUT="cmp_${TAG}/${KEY}_${B}_s${S}"
+      rm -rf "${OUT}"          # start clean: a half-paired run leaves files behind
       echo "=== PAIR ${KEY} s${S} vs ${LABEL}"
+      # --ours_offset IS REQUIRED and is 8*stride. Our renders are named by their
+      # WINDOW-START frame (b{start}_v08), while both baselines hold out frames//2 = view
+      # 8, i.e. absolute frame start + 8*stride. Without the offset the two index spaces
+      # do not overlap and the pairing silently reports `paired 0` -- or worse, a handful
+      # of ACCIDENTAL collisions: measured, crowd s20 paired 94 (= (625-160)/5+1) and
+      # crowd s40 paired 2 (= {320,325}), which still produced a plausible-looking table.
       python tools/build_movies_comparison.py \
         --movies_dir "${SRC}" --ours_images "${OURS}" \
         --bonn_rgb "${ROOT}/${SEQ}/rgb" \
+        --ours_offset $(( 8 * S )) \
         --mask_dir "${MO}/${MASK}/${SEQ}/masks" \
         --out "${OUT}" 2>&1 | grep -E "paired|SKIPPED|indexed" || true
 
@@ -124,9 +132,21 @@ for base, label in (("neoverse", "NeoVerse"), ("movies", "MoVieS")):
         out.append(f"| {key} | {s} | {s/2:.1f} | {d('overall')} | {d('dynamic')} | "
                    f"{d('static')} | {d('LPIPS',4)} | {d('SSIM',4)} |")
     out.append("")
-missing = [k for k in recs if not recs[k]]
 out += [f"Rows parsed: {len(recs)}. Any stride absent above had no log, i.e. its render "
-        f"or its baseline was missing — check the job output before reading the trend.", ""]
+        f"or its baseline was missing — check the job output before reading the trend.", "",
+        "## Pairing counts (read these FIRST)", "",
+        "A row is only meaningful if it paired close to the baseline's frame count.",
+        "", "| row | paired |", "|---|---|"]
+import subprocess
+for f in sorted(glob.glob("slurm_logs/btscore_*.out")):
+    for line in open(f, errors="replace"):
+        if line.startswith("=== PAIR"):
+            cur = line.split("=== PAIR ")[1].strip()
+        elif "paired" in line and "frames" in line:
+            n = re.search(r'paired (\d+) frames', line)
+            if n:
+                out.append(f"| {cur} | {n.group(1)} |")
+out.append("")
 path = f"baseline_table_{tag}.md"
 open(path, "w").write("\n".join(out))
 print("\n".join(out))
