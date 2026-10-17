@@ -138,7 +138,9 @@ out += [f"Rows parsed: {len(recs)}. Any stride absent above had no log, i.e. its
         "A row is only meaningful if it paired close to the baseline's frame count.",
         "", "| row | paired |", "|---|---|"]
 import subprocess
-for f in sorted(glob.glob("slurm_logs/btscore_*.out")):
+# NEWEST log only. Globbing all of them replays every earlier attempt, so a failed
+# run's "paired 0" rows reappear beside the good ones in the same table.
+for f in sorted(glob.glob("slurm_logs/btscore_*.out"), key=os.path.getmtime)[-1:]:
     for line in open(f, errors="replace"):
         if line.startswith("=== PAIR"):
             cur = line.split("=== PAIR ")[1].strip()
