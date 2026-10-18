@@ -40,6 +40,29 @@ combination of them.
 ⚠️ **Every number reported before Oct 14 was produced WITHOUT this flag.** Do not mix old and new
 rows in one table; re-run the arm you are quoting, or report the ceiling as an ablation.
 
+## ⭐⭐ ADOPTED Oct 18 2026 — `--image_size 392 518` (the aspect squash)
+
+`--image_size` defaults to 448 448, but Bonn and TUM are 640x480 = 4:3, so the default
+grid squashes the scene 25% horizontally AND is off VGGT's training distribution — the
+help for that flag says so. An off-distribution input degrades the depth and poses every
+frame contributes, which is what blurs STATIC content, since static sharpness depends on
+15 frames' geometry agreeing.
+
+`392 518` is 4:3, divisible by 14 and the SAME pixel count as 448², isolating the squash
+at zero cost. Crowd @ stride 8, 3 windows, `F` otherwise verbatim:
+
+| | psnr | ssim | lpips | static | alpha_static |
+|---|---|---|---|---|---|
+| 448x448 | 14.214 | 0.5566 | 0.5101 | 14.884 | 0.884 |
+| **392x518** | 14.193 | **0.5912** | **0.4793** | **15.025** | **0.9054** |
+
++0.035 ssim / −0.031 lpips at flat psnr — the signature of a sharper image, and as large
+as the whole SAM2-mask adoption. ⚠️ The RENDERS show little visible change, so this is
+adopted as a CORRECTNESS fix with perceptual support, not a visible win.
+⚠️⚠️ `--image_size` CHANGES EVERY METRIC: the 5-sequence baseline table predates it and
+cannot absorb it. Adopting means re-running OUR 25 arms; the baselines' renders are fixed
+and do not need redoing.
+
 ## ⭐⭐ ADOPTED Oct 15 2026 — the MASK recipe (`F` is unchanged)
 
 `F` above is still the render config, unchanged. What changed is how the masks are
