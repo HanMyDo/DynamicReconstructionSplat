@@ -239,6 +239,16 @@ RESULT_*/
 /playback/
 /ply_*/
 /renders_*/
+# Added Oct 18 2026: 72 fig_*/ directories plus stills/, clip_*/ and gt_ns/ were
+# sitting untracked in the cluster checkout and showed up on every `git status`,
+# which is how an accidental `git add -A` reaches the 2 GiB failure described above.
+# compare_methods.py --out writes fig_<name>/, and the slide/figure helpers write
+# the rest. Anchored and prefixed, per the convention of this block.
+/fig_*/
+/clip_*/
+/stills/
+/gt_*/
+/metrics_summary.txt
 
 # The same outputs in transit. A figure directory is usually tarred before scp, so
 # the archive lands next to the directory it was made from -- cmp_otsu.tgz was 26 MB.
