@@ -36,8 +36,12 @@ A1_OLD = """    # Initialize current tracking UV (on GPU)
     current_uv_map = uv_coords_init.clone().float()"""
 A1_NEW = """    # Initialize current tracking UV (on GPU)
     current_uv_map = uv_coords_init.clone().float()
-    # [{mark}] accumulates one [H,W] int32 pixel -> point-index map per frame.
-    _uv_index_maps = []""".replace("{mark}", MARK)
+    # [{mark}] one [H,W] int32 pixel -> point-index map per frame, PRE-ALLOCATED
+    # and written by t_start. The loop has five `continue` paths, so appending to a
+    # list silently drops frames and misaligns every later index against
+    # trajectory_all_pointmap -- measured on cat.mp4: 85 maps for 87 frames. A
+    # skipped frame keeps -1, which is the truthful answer for it.
+    _uv_index_maps = torch.full((NumFrames, H, W), -1, dtype=torch.int32)""".replace("{mark}", MARK)
 
 # Anchor 2: the end of the per-frame loop body. The `torch.cat` is inside
 # `if uv_rest.shape[0] > 0:`, and the dedent to `logger.info` is where the loop
@@ -62,7 +66,7 @@ A2_NEW = """            current_uv_map = torch.cat([current_uv_map, uv_rest], di
                   & (_uvl[:, 1] >= 0) & (_uvl[:, 1] < H)
         _pid = torch.arange(_uv.shape[0], dtype=torch.int32)
         _idx[_uvl[_ok, 1], _uvl[_ok, 0]] = _pid[_ok]
-        _uv_index_maps.append(_idx)
+        _uv_index_maps[t_start] = _idx
 
     logger.info(f"Saved {NumFrames} frames to {save_dir}")"""
 A2_NEW = A2_NEW.replace("{mark}", MARK)
@@ -73,14 +77,15 @@ A2_NEW = A2_NEW.replace("{mark}", MARK)
 A3_ANCHOR_BEFORE = "trajectory_all_pointmap_dyn_mask.npy"
 A3_OLD = """    np.save(f"{save_dir}/c2w.npy", camera_poses.cpu().numpy())"""
 A3_NEW = """    np.save(f"{save_dir}/c2w.npy", camera_poses.cpu().numpy())
-    # [{mark}] [T,H,W] int32: point index visible at (t,y,x), or -1.
-    if _uv_index_maps:
-        np.save(f"{save_dir}/uv_index_map.npy",
-                torch.stack(_uv_index_maps).numpy())
-        logger.info(
-            f"[{mark}] uv_index_map "
-            f"{tuple(torch.stack(_uv_index_maps).shape)} -> {save_dir}"
-        )""".replace("{mark}", MARK)
+    # [{mark}] [T,H,W] int32: point index visible at (t,y,x), or -1. Index-aligned
+    # with trajectory_all_pointmap by construction; an all -1 frame is one the loop
+    # skipped via `continue`.
+    np.save(f"{save_dir}/uv_index_map.npy", _uv_index_maps.numpy())
+    _cov = (_uv_index_maps >= 0).flatten(1).any(1)
+    logger.info(
+        f"[{mark}] uv_index_map {tuple(_uv_index_maps.shape)}; "
+        f"{int(_cov.sum())}/{_cov.numel()} frames populated"
+    )""".replace("{mark}", MARK)
 
 
 def main():
@@ -89,6 +94,9 @@ def main():
     ap.add_argument("--repo", default="~/Track4World", help="Track4World checkout")
     ap.add_argument("--check", action="store_true",
                     help="report whether the patch is applied; change nothing")
+    ap.add_argument("--repatch", action="store_true",
+                    help="restore demo.py.orig first, then apply -- for updating an "
+                         "already-patched checkout to a newer version of this patch")
     args = ap.parse_args()
 
     demo = Path(os.path.expanduser(args.repo)) / "demo.py"
@@ -102,8 +110,15 @@ def main():
         return
 
     if MARK in s:
-        print(f"{demo}: already patched, nothing to do")
-        return
+        if not args.repatch:
+            print(f"{demo}: already patched, nothing to do (--repatch to update)")
+            return
+        backup = demo.with_suffix(".py.orig")
+        if not backup.exists():
+            raise SystemExit(f"--repatch needs {backup}, which is missing")
+        s = backup.read_text()
+        demo.write_text(s)
+        print(f"restored {demo} from {backup}")
 
     for name, old in (("init", A1_OLD), ("loop", A2_OLD)):
         if s.count(old) != 1:

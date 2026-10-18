@@ -55,6 +55,19 @@ def main():
 
     # --- the join -----------------------------------------------------------
     if uv is not None:
+        # The uv maps MUST be index-aligned with the trajectory. An earlier version
+        # of the patch appended to a list, and the loop's five `continue` paths
+        # silently dropped frames: 85 maps for 87 frames, misaligning everything
+        # after the first skip. Refuse rather than report numbers off by a frame.
+        if uv.shape[0] != T:
+            raise SystemExit(
+                f"uv_index_map has {uv.shape[0]} frames but the trajectory has {T}. "
+                f"They are not index-aligned, so any lookup would be wrong. Re-apply "
+                f"the patch with --repatch and re-run the demo.")
+        empty = [t for t in range(T) if not bool((np.asarray(uv[t]) >= 0).any())]
+        if empty:
+            print(f"⚠️  {len(empty)} frame(s) have NO points at all "
+                  f"(loop skipped them): {empty[:12]}{' ...' if len(empty) > 12 else ''}")
         for t in (0, T // 2, T - 1):
             m = np.asarray(uv[t])
             print(f"frame {t:3d}: {100.0 * (m >= 0).mean():5.1f}% of pixels have a "
