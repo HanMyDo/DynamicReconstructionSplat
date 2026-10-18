@@ -399,6 +399,7 @@ class TrainingConfig:
     dyn_scale_mult: float = 1.0
     render_max_scale_frac: float = 0.0
     src_window: int = 0
+    src_window_dyn: int = -1
     # KMeans clusters for the mask refinement. Fewer clusters group a person into
     # one region, so a p90/max aggregate can recruit all of them from a moving arm.
     dynamic_n_clusters: int = 64
@@ -850,6 +851,7 @@ def compute_rendering_loss(
     dyn_scale_mult: float = 1.0,
     render_max_scale_frac: float = 0.0,
     src_window: int = 0,
+    src_window_dyn: int = -1,
 ) -> tuple:
     """
     Compute MSE rendering loss by rendering predicted Gaussians with given poses.
@@ -917,6 +919,7 @@ def compute_rendering_loss(
         dyn_scale_mult=dyn_scale_mult,
         render_max_scale_frac=render_max_scale_frac,
         src_window=src_window,
+        src_window_dyn=src_window_dyn,
     )
 
     pred_rgb = output.color  # [B, V, 3, H, W]

@@ -473,6 +473,7 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
             dyn_scale_mult=getattr(config, "dyn_scale_mult", 1.0),
             render_max_scale_frac=getattr(config, "render_max_scale_frac", 0.0),
             src_window=getattr(config, "src_window", 0),
+            src_window_dyn=getattr(config, "src_window_dyn", -1),
         )
         if infos.get("dyn_group_pred") is not None:
             n_group_motion += 1
@@ -1269,6 +1270,16 @@ def main():
                              "ply_export has used since September (0.011), which removes "
                              "1.9%% of Gaussians and 31%% of the visible haze -- but that "
                              "one never touched a rendered metric. 0 disables.")
+    parser.add_argument("--src_window_dyn", type=int, default=-1,
+                        help="Source-frame window for DYNAMIC gaussians only; static "
+                             "keeps --src_window. <0 = follow --src_window (previous "
+                             "behaviour), 0 = unrestricted. Measured on crowd: static and "
+                             "dynamic want OPPOSITE K -- static is sharpest with FEW "
+                             "contributors (K=8: static +0.71, ssim +0.016, lpips -0.020 vs "
+                             "the full window) because fewer frames disagree, while dynamic "
+                             "wants MANY because a mover is only covered by the copies other "
+                             "frames supply (K=8 costs dynamic -0.72, K=6 -1.11). A single "
+                             "global K must pick one; this does not.")
     parser.add_argument("--src_window", type=int, default=0,
                         help="A Gaussian contributes only to targets within K frames of "
                              "its own source frame. Cross-frame pose/depth error puts V "
@@ -1668,6 +1679,7 @@ def main():
         gt_pose_mode=args.gt_pose_mode,
         render_max_scale_frac=args.render_max_scale_frac,
         src_window=args.src_window,
+        src_window_dyn=args.src_window_dyn,
     )
 
     print(f"\nLoading {args.split} dataset...")
@@ -1720,6 +1732,7 @@ def main():
             "dyn_scale_mult": args.dyn_scale_mult,
             "render_max_scale_frac": args.render_max_scale_frac,
             "src_window": args.src_window,
+            "src_window_dyn": args.src_window_dyn,
             "backbone": "vggt" if args.no_vggt4d else "vggt4d",
             "mode": "finetuned" if args.checkpoint else "baseline",
             "per_frame_dynamic": args.per_frame_dynamic,

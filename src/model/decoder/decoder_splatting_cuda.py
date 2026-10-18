@@ -76,6 +76,7 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
         dyn_scale_mult: float = 1.0,
         render_max_scale_frac: float = 0.0,
         src_window: int = 0,
+        src_window_dyn: int = -1,
     ) -> DecoderOutput:
         B, V, _, _  = intrinsics.shape
         H, W = image_shape
@@ -179,7 +180,23 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
                     # coverage, and thin coverage is what makes moving objects
                     # transparent -- sweep K against the opacity knobs, not alone.
                     if src_window > 0:
-                        gate = gate * ((fidx_i - j).abs() <= src_window).float()
+                        near = ((fidx_i - j).abs() <= src_window).float()
+                        # SPLIT WINDOW (--src_window_dyn). Static and dynamic want
+                        # OPPOSITE K, measured on crowd: static is sharpest with FEW
+                        # contributors (less cross-frame disagreement -- K=8 gives
+                        # static +0.71, ssim +0.016, lpips -0.020) while dynamic wants
+                        # MANY, because a mover is only covered at all by the copies
+                        # other frames supply (K=8 costs dynamic -0.72, K=6 -1.11).
+                        # A single global K has to pick one; this lets static take the
+                        # small window while dynamic keeps the full one. <0 = follow
+                        # src_window (previous behaviour), 0 = unrestricted for dynamic.
+                        if (src_window_dyn >= 0 and src_window_dyn != src_window
+                                and gaussian_dyn_flag is not None):
+                            dyn_i = gaussian_dyn_flag[i].to(opacity_i.device) > 0.5
+                            near_d = (torch.ones_like(near) if src_window_dyn == 0
+                                      else ((fidx_i - j).abs() <= src_window_dyn).float())
+                            near = torch.where(dyn_i, near_d, near)
+                        gate = gate * near
 
                     # DISTANCE-GATED RESCUE (--dyn_far_static M). The radius gate
                     # rejects two populations that want OPPOSITE treatment:
@@ -612,6 +629,7 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
         dyn_scale_mult: float = 1.0,
         render_max_scale_frac: float = 0.0,
         src_window: int = 0,
+        src_window_dyn: int = -1,
     ) -> DecoderOutput:
 
         return self.rendering_fn(gaussians, extrinsics, intrinsics, near, far, image_shape, depth_mode, cam_rot_delta, cam_trans_delta,
@@ -630,7 +648,7 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
                                  dyn_unsup_gain=dyn_unsup_gain,
                                  dyn_scale_mult=dyn_scale_mult,
                                  render_max_scale_frac=render_max_scale_frac,
-                                 src_window=src_window,
+                                 src_window=src_window, src_window_dyn=src_window_dyn,
                                  per_frame_compositing=per_frame_compositing,
                                  dyn_opacity_comp=dyn_opacity_comp)
 
