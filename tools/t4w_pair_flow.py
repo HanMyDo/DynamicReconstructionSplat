@@ -64,6 +64,8 @@ def main():
     ap.add_argument("--image_size", type=int, default=640)
     ap.add_argument("--iters", type=int, default=4)
     ap.add_argument("--out", default=None, help="write an .npz of the flows")
+    ap.add_argument("--inspect", action="store_true",
+                    help="print every key and shape the model returns")
     args = ap.parse_args()
 
     repo = Path(os.path.expanduser(args.t4w_repo))
@@ -111,29 +113,73 @@ def main():
                 res = model.infer_pair(t, iters=args.iters, sw=None,
                                        is_training=False, tracking3d=True,
                                        force_projection=True)
-            motion = res[1]
-            f3 = motion["flow_3d"]                                # (T-1,3,H,W)
-            vc = motion.get("visconf_maps_e")
-            f3 = f3[0].float().cpu().numpy() if f3.dim() == 4 else f3.float().cpu().numpy()
-            mag = np.linalg.norm(f3, axis=0)
-            geo = res[0]
+            geo, motion = res[0], res[1]
+            if args.inspect:
+                for nm, dd in (("geometry res[0]", geo), ("motion res[1]", motion)):
+                    print(f"\n--- {nm} ---")
+                    for k, v in dd.items():
+                        shp = tuple(v.shape) if hasattr(v, "shape") else type(v).__name__
+                        print(f"   {k:22s} {shp}")
+
+            def hw3(x):
+                # -> [H,W,3], whatever leading batch/time axes it arrived with.
+                a = x.float().cpu().numpy()
+                while a.ndim > 3:
+                    a = a[0]
+                if a.ndim == 3 and a.shape[0] == 3 and a.shape[-1] != 3:
+                    a = np.transpose(a, (1, 2, 0))
+                return a
+
+            f3 = hw3(motion["flow_3d"])
             cam = geo.get("camera_poses")
             cam_step = float("nan")
             if cam is not None:
-                c = cam[0].float().cpu().numpy() if cam.dim() == 4 else cam.float().cpu().numpy()
+                c = cam.float().cpu().numpy()
+                while c.ndim > 3:
+                    c = c[0]
                 if c.shape[0] >= 2 and c.shape[-1] == 4:
                     cam_step = float(np.linalg.norm(c[1][:3, 3] - c[0][:3, 3]))
-            print(f"\npair {i}->{j}   flow_3d {f3.shape}  (metres)")
-            for q in (50, 75, 90, 99):
-                print(f"   p{q:<3d} {np.percentile(mag, q):8.4f}")
-            print(f"   max  {mag.max():8.4f}   |   camera step {cam_step:.4f}")
-            med = float(np.median(mag))
-            print(f"   p90/median {np.percentile(mag, 90) / med if med > 1e-9 else float('nan'):.2f}"
-                  f"   <- >>1 means a static floor plus a moving tail")
+
+            # flow_3d is ABSOLUTE, not an offset: their flow_2d is documented as
+            # "absolute optical flow" and the demo adds a pixel grid to convert
+            # offsets into absolute coordinates. Measured here, |flow_3d| has a
+            # median around 1 m and a max around 4 m on a room scene -- those are
+            # POSITIONS. So the displacement is flow_3d minus the SOURCE position,
+            # and which source (camera-frame `points` or `world_points`) has to
+            # match flow_3d's own frame. Both are measured and the static floor
+            # decides: scene flow excludes camera motion, so the correct pairing is
+            # the one whose median sits near zero.
+            print(f"\npair {i}->{j}   flow_3d {f3.shape}   camera step {cam_step:.4f}")
+            print(f"   |flow_3d| p50 {np.percentile(np.linalg.norm(f3, axis=-1), 50):7.3f}"
+                  f"  <- ~scene depth means these are POSITIONS, not offsets")
+            best = None
+            for src_key in ("points", "world_points"):
+                if src_key not in geo:
+                    continue
+                sp = geo[src_key].float().cpu().numpy()
+                while sp.ndim > 4:
+                    sp = sp[0]
+                s0 = sp[0] if sp.shape[0] <= max(i, j) else sp[i]
+                if s0.shape[0] == 3 and s0.shape[-1] != 3:
+                    s0 = np.transpose(s0, (1, 2, 0))
+                if s0.shape[:2] != f3.shape[:2]:
+                    print(f"   {src_key:14s} {s0.shape} vs flow {f3.shape}: skipped")
+                    continue
+                mag = np.linalg.norm(f3 - s0, axis=-1)
+                med = float(np.median(mag)); p90 = float(np.percentile(mag, 90))
+                print(f"   flow_3d - {src_key:14s} p50 {med:7.4f}  p90 {p90:7.4f}  "
+                      f"max {mag.max():7.3f}  p90/p50 "
+                      f"{p90 / med if med > 1e-9 else float(chr(110)+chr(97)+chr(110)):6.2f}")
+                if best is None or med < best[1]:
+                    best = (src_key, med, mag)
+            if best is not None:
+                print(f"   => smallest static floor: flow_3d - {best[0]} "
+                      f"(median {best[1]:.4f} m vs camera step {cam_step:.4f} m)")
+                out[f"dispmag_{i}_{j}"] = best[2].astype(np.float16)
             out[f"flow3d_{i}_{j}"] = f3.astype(np.float16)
+            vc = motion.get("visconf_maps_e")
             if vc is not None:
-                v = vc[0].float().cpu().numpy() if vc.dim() == 4 else vc.float().cpu().numpy()
-                out[f"visconf_{i}_{j}"] = v.astype(np.float16)
+                out[f"visconf_{i}_{j}"] = hw3(vc).astype(np.float16)
 
     if args.out:
         out["shape"] = np.array([H, W])
