@@ -41,7 +41,12 @@ A1_NEW = """    # Initialize current tracking UV (on GPU)
     # list silently drops frames and misaligns every later index against
     # trajectory_all_pointmap -- measured on cat.mp4: 85 maps for 87 frames. A
     # skipped frame keeps -1, which is the truthful answer for it.
-    _uv_index_maps = torch.full((NumFrames, H, W), -1, dtype=torch.int32)""".replace("{mark}", MARK)
+    _uv_index_maps = torch.full((NumFrames, H, W), -1, dtype=torch.int32)
+    # Frame 0 is the init branch: it writes its positions and then `continue`s, so
+    # the loop never reaches the recorder for it. Its uv map is known analytically
+    # -- current_uv_map starts as uv_coords_init, the raster grid -- so fill it here
+    # rather than leaving the anchor frame unusable.
+    _uv_index_maps[0] = torch.arange(H * W, dtype=torch.int32).reshape(H, W)""".replace("{mark}", MARK)
 
 # Anchor 2: the end of the per-frame loop body. The `torch.cat` is inside
 # `if uv_rest.shape[0] > 0:`, and the dedent to `logger.info` is where the loop

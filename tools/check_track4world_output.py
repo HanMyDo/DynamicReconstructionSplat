@@ -108,9 +108,30 @@ def main():
     print(f"camera centre moved {cam_step:.4f} between frames {i} and {j}")
 
     # --- the decisive statistic --------------------------------------------
-    a = np.asarray(traj[i], dtype=np.float64)
-    b = np.asarray(traj[j], dtype=np.float64)
-    ok = np.isfinite(a).all(1) & np.isfinite(b).all(1)
+    # Measured BOTH WAYS, because --coordinate world_depthanythingv3 does not
+    # guarantee the saved trajectory is world-centric; on cat.mp4 the raw median
+    # came out at 1.09x the camera motion, which is what camera-centric positions
+    # look like. Applying c2w is the hypothesis, so test it instead of assuming.
+    a_raw = np.asarray(traj[i], dtype=np.float64)
+    b_raw = np.asarray(traj[j], dtype=np.float64)
+    ok = np.isfinite(a_raw).all(1) & np.isfinite(b_raw).all(1)
+
+    def to_world(p, t):
+        M = c2w[t].astype(np.float64)
+        return p @ M[:3, :3].T + M[:3, 3]
+
+    variants = {
+        "raw (as saved)": (a_raw, b_raw),
+        "after c2w": (to_world(a_raw, i), to_world(b_raw, j)),
+    }
+    print()
+    for name, (aa, bb) in variants.items():
+        dd = np.linalg.norm(bb[ok] - aa[ok], axis=1)
+        if dd.size:
+            print(f"{name:16s} median {pct(dd, 50):8.4f}  p90 {pct(dd, 90):8.4f}  "
+                  f"ratio-to-camera {pct(dd, 50) / cam_step if cam_step > 1e-9 else float('nan'):.2f}")
+    print()
+    a, b = a_raw, b_raw
     disp = np.linalg.norm(b[ok] - a[ok], axis=1)
     print(f"{ok.sum()} of {N} points live at BOTH frames "
           f"({100.0 * ok.mean():.1f}%)")
