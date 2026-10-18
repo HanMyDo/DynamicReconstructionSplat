@@ -152,29 +152,57 @@ def main():
             print(f"\npair {i}->{j}   flow_3d {f3.shape}   camera step {cam_step:.4f}")
             print(f"   |flow_3d| p50 {np.percentile(np.linalg.norm(f3, axis=-1), 50):7.3f}"
                   f"  <- ~scene depth means these are POSITIONS, not offsets")
+            # EVERY candidate, because two documented facts have already been wrong
+            # (channel order, and "flow" being absolute). flow_3d - points and
+            # flow_3d - world_points both gave a ~0.8 m median with p90/p50 = 1.13 --
+            # a structureless offset against a 0.12 m camera step, which is a frame
+            # or SCALE mismatch, not motion. Both dicts carry a scalar metric_scale.
+            ms_g = geo.get("metric_scale"); ms_m = motion.get("metric_scale")
+            def scalar(x):
+                try:
+                    return float(x.float().cpu().numpy().reshape(-1)[0])
+                except Exception:
+                    return float("nan")
+            print(f"   metric_scale: geometry {scalar(ms_g):.6f}  motion {scalar(ms_m):.6f}")
+
+            def frames_of(key):
+                if key not in geo:
+                    return None
+                x = geo[key].float().cpu().numpy()
+                while x.ndim > 4:
+                    x = x[0]
+                if x.shape[-1] != 3 and x.shape[1] == 3:
+                    x = np.transpose(x, (0, 2, 3, 1))
+                return x                      # [2,H,W,3]: 0 = src, 1 = dst
+
+            cands = {}
+            for key in ("points", "world_points"):
+                fr = frames_of(key)
+                if fr is None or fr.shape[1:3] != f3.shape[:2]:
+                    continue
+                cands[f"{key}[src]"] = fr[0]
+                cands[f"{key}[dst]"] = fr[1]
+            print("   how close is flow_3d to each map? (near 0 identifies its frame)")
             best = None
-            for src_key in ("points", "world_points"):
-                if src_key not in geo:
-                    continue
-                sp = geo[src_key].float().cpu().numpy()
-                while sp.ndim > 4:
-                    sp = sp[0]
-                s0 = sp[0] if sp.shape[0] <= max(i, j) else sp[i]
-                if s0.shape[0] == 3 and s0.shape[-1] != 3:
-                    s0 = np.transpose(s0, (1, 2, 0))
-                if s0.shape[:2] != f3.shape[:2]:
-                    print(f"   {src_key:14s} {s0.shape} vs flow {f3.shape}: skipped")
-                    continue
-                mag = np.linalg.norm(f3 - s0, axis=-1)
-                med = float(np.median(mag)); p90 = float(np.percentile(mag, 90))
-                print(f"   flow_3d - {src_key:14s} p50 {med:7.4f}  p90 {p90:7.4f}  "
-                      f"max {mag.max():7.3f}  p90/p50 "
-                      f"{p90 / med if med > 1e-9 else float(chr(110)+chr(97)+chr(110)):6.2f}")
+            for nm, ref in cands.items():
+                d = np.linalg.norm(f3 - ref, axis=-1)
+                med = float(np.median(d))
+                print(f"      |flow_3d - {nm:20s}| p50 {med:8.4f}  p90 "
+                      f"{np.percentile(d, 90):8.4f}  p90/p50 "
+                      f"{np.percentile(d,90)/med if med>1e-9 else -1:6.2f}")
                 if best is None or med < best[1]:
-                    best = (src_key, med, mag)
+                    best = (nm, med, d)
+            # And the reference displacement that needs no flow at all: the two
+            # position maps differenced directly. If THAT has a static floor and a
+            # tail, the geometry is usable even if flow_3d cannot be placed.
+            if "world_points[src]" in cands and "world_points[dst]" in cands:
+                d = np.linalg.norm(cands["world_points[dst]"] - cands["world_points[src]"], axis=-1)
+                med = float(np.median(d))
+                print(f"      [control] |world_points[dst]-world_points[src]| p50 {med:8.4f}"
+                      f"  p90 {np.percentile(d,90):8.4f}  p90/p50 "
+                      f"{np.percentile(d,90)/med if med>1e-9 else -1:6.2f}")
             if best is not None:
-                print(f"   => smallest static floor: flow_3d - {best[0]} "
-                      f"(median {best[1]:.4f} m vs camera step {cam_step:.4f} m)")
+                print(f"   => flow_3d sits closest to {best[0]} (median {best[1]:.4f} m)")
                 out[f"dispmag_{i}_{j}"] = best[2].astype(np.float16)
             out[f"flow3d_{i}_{j}"] = f3.astype(np.float16)
             vc = motion.get("visconf_maps_e")
