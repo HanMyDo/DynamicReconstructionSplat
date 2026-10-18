@@ -33,7 +33,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--dir", required=True, help="a 3d_efep_output directory")
-    ap.add_argument("--src", type=int, default=0, help="source frame i")
+    ap.add_argument("--src", type=int, default=-1,
+                    help="source frame i (-1 = first frame that has positions)")
     ap.add_argument("--dst", type=int, default=-1,
                     help="target frame j (-1 = last)")
     args = ap.parse_args()
@@ -45,8 +46,27 @@ def main():
     uv = np.load(uvp, mmap_mode="r") if os.path.exists(uvp) else None
 
     T, N, _ = traj.shape
-    i = args.src
-    j = (T - 1) if args.dst < 0 else args.dst
+    # WHICH FRAMES ARE USABLE. The loop skips frames via `continue` -- measured on
+    # cat.mp4 it skips the FIRST and LAST, which are also the obvious defaults for
+    # a src/dst pair, so defaulting to 0 and T-1 compares two empty frames and
+    # every statistic comes back NaN. Find the populated range instead.
+    live = np.array([bool(np.isfinite(np.asarray(traj[t])).all(1).any())
+                     for t in range(T)])
+    usable = np.nonzero(live)[0]
+    if usable.size == 0:
+        raise SystemExit("no frame has any finite position -- the run produced nothing")
+    print(f"frames with positions: {usable[0]}..{usable[-1]} "
+          f"({usable.size}/{T}); empty: {list(np.nonzero(~live)[0])[:12]}")
+    i = args.src if args.src >= 0 else int(usable[0])
+    if args.src >= 0 and not live[args.src]:
+        print(f"⚠️  requested src frame {args.src} has no positions; "
+              f"using {usable[0]} instead")
+        i = int(usable[0])
+    j = int(usable[-1]) if args.dst < 0 else args.dst
+    if not live[j]:
+        print(f"⚠️  requested dst frame {j} has no positions; "
+              f"using {usable[-1]} instead")
+        j = int(usable[-1])
     print(f"trajectory  {traj.shape} {traj.dtype}")
     print(f"c2w         {c2w.shape}")
     print(f"uv_index_map {uv.shape if uv is not None else 'MISSING'}"
@@ -104,6 +124,12 @@ def main():
     # are camera-centric and c2w has NOT been applied.
     med = pct(disp, 50)
     print()
+    if disp.size == 0 or not np.isfinite(med):
+        raise SystemExit(
+            "no point is live at BOTH frames, so there is nothing to conclude. "
+            "An earlier version of this script printed a ✅ here from a NaN "
+            "comparison -- a verdict from no data. Pick frames inside the "
+            "populated range reported above.")
     if cam_step > 1e-6 and med > 0.5 * cam_step:
         print(f"⚠️  median displacement {med:.4f} is {med / cam_step:.2f}x the camera "
               f"motion {cam_step:.4f}")
