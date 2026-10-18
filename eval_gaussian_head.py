@@ -1392,6 +1392,15 @@ def main():
                              "target and extrapolates it unbounded, so one bad tracker hop can "
                              "throw a Gaussian near the camera where it washes the frame. "
                              "0 = off (reproduces every measured result); 3.0 is generous.")
+    parser.add_argument("--dyn_t4w_cache", type=str, default=None,
+                        help="Path to a Track4World pairwise displacement cache from "
+                             "tools/t4w_precompute_window.py. Replaces the sparse-track "
+                             "scene flow with a DENSE per-pixel field: every gaussian gets "
+                             "its own displacement, so --dyn_motion_gate_mult, "
+                             "--dyn_unsupported and the unsupported population stop "
+                             "applying. A Sim(3) is fitted per frame pair against our own "
+                             "means, because Track4World estimates metric_scale per pair "
+                             "(2.28-3.19 across one window). Requires --track_dynamic.")
     parser.add_argument("--dyn_motion_gate_mult", type=float, default=3.0,
                         help="Scene-flow mode: trust radius = mult x median track NN spacing; "
                              "Gaussians farther than this from every track do not move.")
@@ -1643,6 +1652,7 @@ def main():
         dyn_motion_n_query=args.dyn_motion_n_query,
         dyn_motion_query_all=not args.dyn_motion_query_first_only,
         dyn_motion_gate_mult=args.dyn_motion_gate_mult,
+        dyn_t4w_cache=args.dyn_t4w_cache,
         dyn_motion_max_disp_mult=args.dyn_motion_max_disp_mult,
         dyn_conf_opacity=args.dyn_conf_opacity,
         dyn_same_object=args.dyn_same_object,
@@ -1728,6 +1738,7 @@ def main():
             "dyn_motion_knn": args.dyn_motion_knn if args.track_dynamic else 0,
             "dyn_motion_n_query": args.dyn_motion_n_query,
             "dyn_motion_gate_mult": args.dyn_motion_gate_mult,
+            "dyn_t4w_cache": args.dyn_t4w_cache,
             "dyn_motion_max_disp_mult": args.dyn_motion_max_disp_mult,
             "dyn_conf_opacity": args.dyn_conf_opacity,
             "dyn_same_object": args.dyn_same_object,

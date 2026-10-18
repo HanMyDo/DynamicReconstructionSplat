@@ -359,6 +359,7 @@ class TrainingConfig:
     dyn_motion_n_query: int = 1024
     dyn_motion_query_all: bool = True
     dyn_motion_gate_mult: float = 3.0
+    dyn_t4w_cache: str | None = None
     dyn_motion_max_disp_mult: float = 0.0
     dyn_conf_opacity: float = 0.0
     dyn_same_object: float = 0.0
@@ -685,6 +686,7 @@ def create_model(config: TrainingConfig) -> AnySplat:
         dyn_motion_n_query=config.dyn_motion_n_query,
         dyn_motion_query_all=config.dyn_motion_query_all,
         dyn_motion_gate_mult=config.dyn_motion_gate_mult,
+        dyn_t4w_cache=config.dyn_t4w_cache,
         dyn_motion_max_disp_mult=config.dyn_motion_max_disp_mult,
         dyn_conf_opacity=getattr(config, "dyn_conf_opacity", 0.0),
         dyn_same_object=getattr(config, "dyn_same_object", 0.0),

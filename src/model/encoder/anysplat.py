@@ -276,6 +276,10 @@ class EncoderAnySplatCfg:
     dyn_motion_n_query: int = 1024   # total tracker query budget (split across query frames)
     dyn_motion_query_all: bool = True  # queries from every frame's dynamic pixels (not just frame 0)
     dyn_motion_gate_mult: float = 3.0  # trust radius = mult x median track NN spacing
+    # Path to a Track4World pairwise displacement cache (tools/t4w_precompute_window.py).
+    # When set, the DENSE per-pixel field replaces the sparse-track interpolation
+    # entirely: no trust radius, no unsupported population. None = off.
+    dyn_t4w_cache: str | None = None
     dyn_motion_max_disp_mult: float = 0.0  # cap |displacement| at mult x median track motion (0=off)
     dyn_conf_opacity: float = 0.0  # soften the flow gate by track support^gamma (0=off)
     dyn_same_object: float = 0.0   # restrict the kNN to one object; link radius x track spacing (0=off)
@@ -1284,6 +1288,7 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
         disp_list, disp_valid_list, track_dist_list = [], [], []
         track_frame_idx = not self.cfg.voxelize
         only_view_list = []
+        pix_idx_list = []          # per-Gaussian linear pixel index, for --dyn_t4w_cache
         use_hybrid = (self.cfg.hybrid_voxelize and not self.cfg.voxelize
                       and dyn_mask is not None)
         if use_hybrid:
@@ -1293,12 +1298,16 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
             fidx_vhw = (
                 torch.arange(v, device=pts_all.device).view(v, 1, 1).expand(v, h, w)
             )
+            pix_vhw = (
+                torch.arange(h * w, device=pts_all.device).view(1, h, w).expand(v, h, w)
+            )
             dm_dev = dyn_mask.to(pts_all.device)
             for b_i in range(b):
                 stat_m = conf_valid_mask[b_i] & (dm_dev[b_i] <= 0.5)
                 dyn_m = conf_valid_mask[b_i] & (dm_dev[b_i] > 0.5)
                 pts_b = pts_all[b_i].permute(0, 3, 1, 2).contiguous()
                 feats_b, pts_parts, fidx_parts, dyn_parts, ov_parts = [], [], [], [], []
+                pix_parts = []
                 for j in range(v):
                     vp, vf = self.voxelize_static_hybrid(
                         anchor_feats[b_i], pts_b, self.voxel_size, conf[b_i],
@@ -1309,6 +1318,9 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
                     # fused voxels have no single source frame -> -1 (never own-frame)
                     fidx_parts.append(torch.full((vp.shape[0],), -1,
                                                  device=vp.device, dtype=torch.long))
+                    # a fused voxel has no single source pixel either
+                    pix_parts.append(torch.full((vp.shape[0],), -1,
+                                                device=vp.device, dtype=torch.long))
                     dyn_parts.append(torch.zeros(vp.shape[0], device=vp.device))
                     ov_parts.append(torch.full((vp.shape[0],), j,
                                                device=vp.device, dtype=torch.long))
@@ -1316,6 +1328,7 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
                 pts_parts.append(pts_all[b_i][dyn_m])
                 feats_b.append(anchor_feats[b_i].permute(0, 2, 3, 1)[dyn_m])
                 fidx_parts.append(fidx_vhw[dyn_m])
+                pix_parts.append(pix_vhw[dyn_m])
                 dyn_parts.append(torch.ones(int(dyn_m.sum()), device=pts_all.device))
                 ov_parts.append(torch.full((int(dyn_m.sum()),), -1,
                                            device=pts_all.device, dtype=torch.long))
@@ -1323,6 +1336,7 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
                 neural_pts_list.append(torch.cat(pts_parts, 0))
                 neural_feats_list.append(torch.cat(feats_b, 0))
                 frame_idx_list.append(torch.cat(fidx_parts, 0))
+                pix_idx_list.append(torch.cat(pix_parts, 0))
                 dyn_flag_list.append(torch.cat(dyn_parts, 0))
                 only_view_list.append(torch.cat(ov_parts, 0))
             _tot = neural_pts_list[0].shape[0]
@@ -1351,12 +1365,20 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
             fidx_vhw = (
                 torch.arange(v, device=pts_all.device).view(v, 1, 1).expand(v, h, w)
             )
+            # LINEAR PIXEL index y*w+x, carried through the SAME conf mask so entry i
+            # is Gaussian i's own pixel. Needed by --dyn_t4w_cache, whose field is
+            # dense per pixel; index//w would be wrong because conf_valid_mask drops
+            # pixels before they become Gaussians.
+            pix_vhw = (
+                torch.arange(h * w, device=pts_all.device).view(1, h, w).expand(v, h, w)
+            )
             for b_i in range(b):
                 neural_feats_list.append(
                     anchor_feats[b_i].permute(0, 2, 3, 1)[conf_valid_mask[b_i]]
                 )
                 neural_pts_list.append(pts_all[b_i][conf_valid_mask[b_i]])
                 frame_idx_list.append(fidx_vhw[conf_valid_mask[b_i]])
+                pix_idx_list.append(pix_vhw[conf_valid_mask[b_i]])
                 if dyn_mask is not None:
                     dyn_flag_list.append(
                         dyn_mask[b_i].to(pts_all.device).float()[conf_valid_mask[b_i]]
@@ -1378,19 +1400,35 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
                         # tracks, which counts as "far".
                         _nn = torch.full((_n_b,), float("inf"),
                                          device=pts_all.device, dtype=pts_all.dtype)
-                        _d, _dv = knn_flow_displacement(
-                            _tr[0], _tr[1],
-                            neural_pts_list[-1], frame_idx_list[-1],
-                            dyn_flag_list[-1] > 0.5, v,
-                            k=getattr(self.cfg, "dyn_motion_knn", 8),
-                            gate_mult=getattr(self.cfg, "dyn_motion_gate_mult", 3.0),
-                            max_disp_mult=getattr(self.cfg, "dyn_motion_max_disp_mult", 0.0),
-                            conf_opacity=getattr(self.cfg, "dyn_conf_opacity", 0.0),
-                            same_object=getattr(self.cfg, "dyn_same_object", 0.0),
-                            strict=getattr(self.cfg, "dyn_motion_strict", False),
-                            pred_bandwidth=getattr(self.cfg, "dyn_motion_pred_bandwidth", 0.0),
-                            nn_dist_out=_nn,
-                        )
+                        # DENSE field from Track4World instead of interpolating a
+                        # sparse track scaffold. Structural, not a tuning change:
+                        # every Gaussian gets its own displacement, so there is no
+                        # trust radius and no unsupported population -- the knobs
+                        # measured as saturated on Oct 16. See encoder/dyn_t4w.py.
+                        _t4w_cache = getattr(self.cfg, "dyn_t4w_cache", None)
+                        if _t4w_cache:
+                            from src.model.encoder.dyn_t4w import t4w_displacement
+                            _pix = (pix_idx_list[-1] if pix_idx_list
+                                    else torch.full_like(frame_idx_list[-1], -1))
+                            _d, _dv = t4w_displacement(
+                                _t4w_cache,
+                                neural_pts_list[-1], frame_idx_list[-1], _pix, v,
+                                gauss_dyn=(dyn_flag_list[-1] > 0.5),
+                            )
+                        else:
+                            _d, _dv = knn_flow_displacement(
+                                _tr[0], _tr[1],
+                                neural_pts_list[-1], frame_idx_list[-1],
+                                dyn_flag_list[-1] > 0.5, v,
+                                k=getattr(self.cfg, "dyn_motion_knn", 8),
+                                gate_mult=getattr(self.cfg, "dyn_motion_gate_mult", 3.0),
+                                max_disp_mult=getattr(self.cfg, "dyn_motion_max_disp_mult", 0.0),
+                                conf_opacity=getattr(self.cfg, "dyn_conf_opacity", 0.0),
+                                same_object=getattr(self.cfg, "dyn_same_object", 0.0),
+                                strict=getattr(self.cfg, "dyn_motion_strict", False),
+                                pred_bandwidth=getattr(self.cfg, "dyn_motion_pred_bandwidth", 0.0),
+                                nn_dist_out=_nn,
+                            )
                     else:
                         _d = torch.zeros(_n_b, v, 3, device=pts_all.device,
                                          dtype=pts_all.dtype)
