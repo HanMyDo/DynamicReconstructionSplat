@@ -179,19 +179,22 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
                     # previous behaviour. TRADE-OFF: fewer contributors also means less
                     # coverage, and thin coverage is what makes moving objects
                     # transparent -- sweep K against the opacity knobs, not alone.
-                    if src_window > 0:
-                        near = ((fidx_i - j).abs() <= src_window).float()
-                        # SPLIT WINDOW (--src_window_dyn). Static and dynamic want
-                        # OPPOSITE K, measured on crowd: static is sharpest with FEW
-                        # contributors (less cross-frame disagreement -- K=8 gives
-                        # static +0.71, ssim +0.016, lpips -0.020) while dynamic wants
-                        # MANY, because a mover is only covered at all by the copies
-                        # other frames supply (K=8 costs dynamic -0.72, K=6 -1.11).
-                        # A single global K has to pick one; this lets static take the
-                        # small window while dynamic keeps the full one. <0 = follow
-                        # src_window (previous behaviour), 0 = unrestricted for dynamic.
-                        if (src_window_dyn >= 0 and src_window_dyn != src_window
-                                and gaussian_dyn_flag is not None):
+                    if src_window > 0 or src_window_dyn >= 0:
+                        near = (torch.ones_like(opacity_i) if src_window <= 0
+                                else ((fidx_i - j).abs() <= src_window).float())
+                        # SEPARATE WINDOW FOR MOVERS (--src_window_dyn). The thing a
+                        # global src_window actually fixes is NOT static-vs-static
+                        # disagreement: it is FAR-FRAME DYNAMIC gaussians splattering
+                        # across the BACKGROUND. Measured on crowd (3 windows, one
+                        # variable): protecting the movers from the window while
+                        # clipping static made psnr_static WORSE, 15.53 -> 13.74, which
+                        # only makes sense if the movers were the pollution. Clipping
+                        # ONLY the movers and leaving static untouched gives, at K=4,
+                        # psnr +1.19, ssim +0.054, lpips -0.060, static +2.66, with
+                        # static coverage unchanged (0.907 -> 0.881) -- where a global
+                        # K bought the same sharpness by throwing coverage away.
+                        # <0 = follow src_window, 0 = movers unrestricted.
+                        if src_window_dyn >= 0 and gaussian_dyn_flag is not None:
                             dyn_i = gaussian_dyn_flag[i].to(opacity_i.device) > 0.5
                             near_d = (torch.ones_like(near) if src_window_dyn == 0
                                       else ((fidx_i - j).abs() <= src_window_dyn).float())
