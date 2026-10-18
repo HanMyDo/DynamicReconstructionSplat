@@ -120,16 +120,41 @@ def main():
         M = c2w[t].astype(np.float64)
         return p @ M[:3, :3].T + M[:3, 3]
 
+    def to_world_inv(p, t):
+        # If the saved matrix is world2cam rather than cam2world, the correct
+        # inverse is R^T (p - t). This project has already been bitten by a pose
+        # convention that leaves camera CENTRES looking right while every rotation
+        # is wrong, so both directions are measured rather than assumed.
+        M = c2w[t].astype(np.float64)
+        return (p - M[:3, 3]) @ M[:3, :3]
+
     variants = {
         "raw (as saved)": (a_raw, b_raw),
         "after c2w": (to_world(a_raw, i), to_world(b_raw, j)),
+        "after inv(c2w)": (to_world_inv(a_raw, i), to_world_inv(b_raw, j)),
     }
     print()
+    best, best_med = None, float("inf")
     for name, (aa, bb) in variants.items():
-        dd = np.linalg.norm(bb[ok] - aa[ok], axis=1)
-        if dd.size:
-            print(f"{name:16s} median {pct(dd, 50):8.4f}  p90 {pct(dd, 90):8.4f}  "
-                  f"ratio-to-camera {pct(dd, 50) / cam_step if cam_step > 1e-9 else float('nan'):.2f}")
+        v = bb[ok] - aa[ok]
+        dd = np.linalg.norm(v, axis=1)
+        if not dd.size:
+            continue
+        med = pct(dd, 50)
+        # SYSTEMATIC vs RANDOM. A magnitude cannot tell a mis-transform from noise,
+        # but a direction can: if the residual is one shared drift, the mean VECTOR
+        # is as long as the typical displacement; if it is noise, the mean cancels.
+        bulk = v[dd <= np.percentile(dd, 75)]          # exclude the mover's tail
+        mean_len = float(np.linalg.norm(bulk.mean(axis=0))) if bulk.size else float("nan")
+        bulk_med = float(np.median(np.linalg.norm(bulk, axis=1))) if bulk.size else float("nan")
+        share = mean_len / bulk_med if bulk_med > 1e-12 else float("nan")
+        print(f"{name:16s} median {med:8.4f}  p90 {pct(dd, 90):8.4f}  "
+              f"ratio-to-cam {med / cam_step if cam_step > 1e-9 else float('nan'):5.2f}  "
+              f"| static-bulk |mean|/median {share:5.2f} "
+              f"({'SYSTEMATIC drift' if share > 0.5 else 'random, i.e. noise'})")
+        if med < best_med:
+            best, best_med = name, med
+    print(f"\nsmallest residual: {best} ({best_med:.4f})")
     print()
     a, b = a_raw, b_raw
     disp = np.linalg.norm(b[ok] - a[ok], axis=1)
