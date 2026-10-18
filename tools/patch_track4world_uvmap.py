@@ -93,6 +93,25 @@ A3_NEW = """    np.save(f"{save_dir}/c2w.npy", camera_poses.cpu().numpy())
     )""".replace("{mark}", MARK)
 
 
+# Anchor 4: the setup step archives the input video with shutil.copy. We feed an
+# image SEQUENCE ("dir/%06d.png") so cv2.VideoCapture reads the original PNGs
+# losslessly -- re-encoding to H.264 would put compression artifacts into a
+# flow/geometry estimator. A pattern is not a real file, so the copy raises
+# FileNotFoundError during setup, before anything runs.
+A4_OLD = """        dst_path = os.path.join(args.save_base_dir, "input_copy.mp4")
+        shutil.copy(args.mp4_path, dst_path)
+        logger.info(f"Copied input video to {dst_path}")"""
+A4_NEW = """        dst_path = os.path.join(args.save_base_dir, "input_copy.mp4")
+        # [{mark}] An image-sequence path ("dir/%06d.png") is not a file, so skip
+        # the archival copy rather than dying in setup. cv2.VideoCapture accepts
+        # the pattern; shutil.copy does not.
+        if os.path.isfile(args.mp4_path):
+            shutil.copy(args.mp4_path, dst_path)
+            logger.info(f"Copied input video to {dst_path}")
+        else:
+            logger.info(f"Input is not a single file, not archiving: {args.mp4_path}")""".replace("{mark}", MARK)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -125,7 +144,7 @@ def main():
         demo.write_text(s)
         print(f"restored {demo} from {backup}")
 
-    for name, old in (("init", A1_OLD), ("loop", A2_OLD)):
+    for name, old in (("init", A1_OLD), ("loop", A2_OLD), ("inputcopy", A4_OLD)):
         if s.count(old) != 1:
             raise SystemExit(
                 f"anchor '{name}' matched {s.count(old)} times, expected 1 -- "
@@ -150,11 +169,12 @@ def main():
     s = s[:a3_at] + A3_NEW + s[a3_at + len(A3_OLD):]
     s = s.replace(A1_OLD, A1_NEW, 1)
     s = s.replace(A2_OLD, A2_NEW, 1)
+    s = s.replace(A4_OLD, A4_NEW, 1)
     demo.write_text(s)
 
     import ast
     ast.parse(s)                      # refuse to leave their file unparseable
-    print(f"{demo}: patched (3 anchors), syntax OK")
+    print(f"{demo}: patched (4 anchors), syntax OK")
     print("re-run the demo; expect a new uv_index_map.npy of shape [T,H,W] int32")
 
 
