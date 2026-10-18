@@ -40,6 +40,30 @@ combination of them.
 ⚠️ **Every number reported before Oct 14 was produced WITHOUT this flag.** Do not mix old and new
 rows in one table; re-run the arm you are quoting, or report the ceiling as an ablation.
 
+## ⭐⭐⭐ ADOPTED Oct 18 2026 — `--src_window_dyn 4`
+
+The largest single improvement measured this week. Add `--src_window_dyn 4` to `F`
+(it works alone; `--src_window` stays 0, i.e. static keeps every contributor).
+
+**What it fixes.** Far-frame DYNAMIC gaussians splatter across the BACKGROUND. A global
+`--src_window` removes them, which is why it looked like a sharpness-for-coverage trade
+and was rejected in October; clipping ONLY the movers gets the same benefit with static
+coverage intact. Proof it is the movers and not static-vs-static disagreement: protecting
+the movers while clipping static made psnr_static WORSE, 15.53 -> 13.74.
+
+| | psnr | ssim | lpips | dyn | static | alpha_static |
+|---|---|---|---|---|---|---|
+| crowd, full window | 14.123 | 0.5938 | 0.4783 | 14.016 | 14.773 | 0.907 |
+| **crowd, dyn 4** | **15.315** | **0.6481** | **0.4179** | 13.166 | **17.433** | 0.881 |
+| TUM xyz, full | 16.468 | 0.6335 | 0.3530 | 13.737 | 17.109 | 0.946 |
+| **TUM xyz, dyn 4** | **16.625** | **0.6460** | **0.3379** | 13.492 | **17.514** | 0.942 |
+
+2/2 sequences, two datasets, same signs; TUM is ~1/5 the magnitude, the usual transfer
+ratio. Renders on crowd prefer `dyn 4` over `dyn 8` and over the full window. Cost is
+dynamic −0.85 (crowd) / −0.25 (TUM), not visible in the renders.
+⚠️ `--src_window_dyn 8` is the conservative alternative: crowd psnr +1.09, static +1.60,
+dynamic FLAT (−0.045). Use it if a figure must not touch the movers at all.
+
 ## ⭐⭐ ADOPTED Oct 18 2026 — `--image_size 392 518` (the aspect squash)
 
 `--image_size` defaults to 448 448, but Bonn and TUM are 640x480 = 4:3, so the default
