@@ -58,6 +58,11 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--cmp", default="cmp_bt", help="directory of paired comparisons")
     ap.add_argument("--out", default="figs_bt", help="output directory for the PNGs")
+    ap.add_argument("--strides", default=None,
+                    help="comma-separated strides to include, e.g. '4' for the 2 s row "
+                         "only (seconds = stride / 2). Default: all available.")
+    ap.add_argument("--order", default="gt,ours,neoverse,movies",
+                    help="column order, from gt,ours,neoverse,movies")
     ap.add_argument("--pick", type=float, default=0.5,
                     help="which paired frame to show, as a fraction through the "
                          "available ones (0.5 = middle)")
@@ -82,6 +87,13 @@ def main():
 
     for key, by_stride in sorted(rows.items()):
         strides = sorted(by_stride)
+        if args.strides:
+            want = {int(x) for x in args.strides.split(",")}
+            strides = [S for S in strides if S in want]
+            if not strides:
+                print(f"  {key}: none of strides {sorted(want)} available "
+                      f"({sorted(by_stride)}), skipped")
+                continue
         panels = []
         for S in strides:
             srcs = by_stride[S]
@@ -99,11 +111,16 @@ def main():
 
             cells, labels = [], []
             base_for_gt = srcs.get("neoverse") or srcs.get("movies")
-            cells.append(cell(base_for_gt / "gt" / fname));       labels.append("ground truth")
-            cells.append(cell(base_for_gt / "ours" / fname, True)); labels.append("ours")
-            for b, lab in (("neoverse", "NeoVerse"), ("movies", "MoVieS")):
-                if b in srcs:
-                    cells.append(cell(srcs[b] / "movies" / fname)); labels.append(lab)
+            for col in [c.strip() for c in args.order.split(",")]:
+                if col == "gt":
+                    cells.append(cell(base_for_gt / "gt" / fname))
+                    labels.append("ground truth")
+                elif col == "ours":
+                    cells.append(cell(base_for_gt / "ours" / fname, True))
+                    labels.append("ours")
+                elif col in srcs:
+                    cells.append(cell(srcs[col] / "movies" / fname))
+                    labels.append({"neoverse": "NeoVerse", "movies": "MoVieS"}[col])
 
             w = len(cells) * CELL_W + (len(cells) + 1) * PAD + ROWLAB_W
             row = np.full((CELL_H + 2 * PAD + LABEL_H, w, 3), 24, np.uint8)
