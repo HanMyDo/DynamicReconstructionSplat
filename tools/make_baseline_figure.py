@@ -24,6 +24,7 @@ USAGE
 """
 import argparse
 import os
+import pathlib
 import re
 from collections import defaultdict
 from pathlib import Path
@@ -63,6 +64,12 @@ def main():
                          "only (seconds = stride / 2). Default: all available.")
     ap.add_argument("--order", default="gt,ours,neoverse,movies",
                     help="column order, from gt,ours,neoverse,movies")
+    ap.add_argument("--cmp_alt", default=None,
+                    help="a SECOND pairing directory supplying one more column, for an arm "
+                         "paired separately -- e.g. the plain AnySplat + vanilla VGGT "
+                         "baseline in cmp_van alongside the adopted config in cmp_bt3. "
+                         "Referenced as `alt` in --order.")
+    ap.add_argument("--alt_label", default="alt", help="label for the --cmp_alt column")
     ap.add_argument("--ours_label", default="ours",
                     help="label for the `ours` column -- the pairing tool always writes "
                          "that directory name, whatever arm was paired into it.")
@@ -121,6 +128,22 @@ def main():
                 elif col == "ours":
                     cells.append(cell(base_for_gt / "ours" / fname, True))
                     labels.append(args.ours_label)
+                elif col == "alt":
+                    # Same key/baseline/stride under the second pairing directory. Both
+                    # pairings used --batch_stride 5, so the window starts and therefore
+                    # the held-out frames coincide and `fname` means the same instant.
+                    ad = None
+                    if args.cmp_alt:
+                        for b in ("neoverse", "movies"):
+                            cand = pathlib.Path(args.cmp_alt) / f"{key}_{b}_s{S}" / "ours" / fname
+                            if cand.is_file():
+                                ad = cand
+                                break
+                    if ad is None:
+                        print(f"  {key} s{S}: no alt frame {fname} under {args.cmp_alt}")
+                        continue
+                    cells.append(cell(ad, True))
+                    labels.append(args.alt_label)
                 elif col in srcs:
                     cells.append(cell(srcs[col] / "movies" / fname))
                     labels.append({"neoverse": "NeoVerse", "movies": "MoVieS"}[col])
