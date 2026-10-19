@@ -165,6 +165,54 @@ def save_mask_png(mask_hw: np.ndarray, path: Path):
     Image.fromarray(arr, mode="L").save(path)
 
 
+def save_residual_panel(img_chw, res_hw, depth_hw, thr, path: Path, vmax: float = 10.0):
+    """RGB | flow residual | depth edges | seeds, side by side.
+
+    WHY THIS EXISTS. The flow detector seeds on BACKGROUND on some sequences, and
+    three explanations have been proposed with two already dead: depth CONFIDENCE
+    was disconfirmed (the excluded pixels carry the same residual as the kept
+    ones) and "textureless surfaces" was wrong on its premise (the ceiling that
+    gets falsely marked has cables hanging from it). The residual map is computed
+    per pixel and thrown away after thresholding, so nobody has ever looked at
+    WHERE the spurious residual actually sits. This stops the guessing.
+
+    The depth-edge panel tests the remaining concrete hypothesis directly: VGGT's
+    depth is accurate but its EDGES bleed, so a thin structure or an object
+    boundary makes the induced flow wrong there. If the false-positive residual
+    lines up with depth discontinuities, that is the answer and the fix is a
+    depth-GRADIENT gate; if it does not, the suspect is pose error, whose
+    signature is residual growing with distance from the principal point.
+
+    vmax is an ABSOLUTE scale in pixels so frames and sequences are comparable --
+    a per-frame normalisation would hide exactly the variation we are looking for.
+    """
+    import cv2
+    rgb = (img_chw.detach().float().clamp(0, 1).cpu().numpy().transpose(1, 2, 0) * 255)
+    rgb = rgb.astype(np.uint8)[:, :, ::-1]                      # -> BGR for cv2
+    r = np.asarray(res_hw, dtype=np.float32)
+    heat = cv2.applyColorMap(
+        (np.clip(r / max(vmax, 1e-6), 0, 1) * 255).astype(np.uint8), cv2.COLORMAP_INFERNO)
+    d = np.asarray(depth_hw, dtype=np.float32)
+    gy, gx = np.gradient(d)
+    ge = np.sqrt(gx ** 2 + gy ** 2)
+    # Relative to the local depth: a 5 cm step at 1 m matters, at 8 m it does not.
+    ge = ge / np.clip(np.abs(d), 1e-3, None)
+    edge = cv2.applyColorMap(
+        (np.clip(ge / 0.05, 0, 1) * 255).astype(np.uint8), cv2.COLORMAP_VIRIDIS)
+    seed = np.repeat(((r > thr).astype(np.uint8) * 255)[:, :, None], 3, axis=2)
+    lab = [("rgb", rgb), (f"residual 0-{vmax:g}px", heat),
+           ("depth edges", edge), (f"seeds thr={thr:.2f}", seed)]
+    out = []
+    for name, im in lab:
+        im = im.copy()
+        cv2.putText(im, name, (6, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.45,
+                    (0, 0, 0), 3, cv2.LINE_AA)
+        cv2.putText(im, name, (6, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.45,
+                    (255, 255, 255), 1, cv2.LINE_AA)
+        out.append(im)
+    cv2.imwrite(str(path), np.concatenate(out, axis=1))
+
+
 def save_overlay_png(img_chw: torch.Tensor, mask_hw: np.ndarray, path: Path):
     """Red overlay of the mask on the RGB frame, for quick visual inspection."""
     img = (img_chw.detach().float().cpu().clamp(0, 1).numpy().transpose(1, 2, 0) * 255).astype(np.uint8)
@@ -311,6 +359,15 @@ def main():
                     help="How many frames to prompt SAM 2's video predictor with, spread "
                          "over the sequence (best seed per bucket, not the N largest, which "
                          "would all land on the same moment).")
+    ap.add_argument("--save_residual", action="store_true",
+                    help="Write residual/<frame>.png: RGB | flow residual | depth edges | "
+                         "seeds. The residual is computed per pixel and discarded after "
+                         "thresholding, so WHERE the false-positive seeds come from has "
+                         "never been looked at -- two of the three hypotheses are already "
+                         "dead and both died on a number rather than a picture.")
+    ap.add_argument("--residual_vis_max", type=float, default=10.0,
+                    help="Absolute pixel scale for the residual colourmap. Absolute, not "
+                         "per-frame, so frames and sequences stay comparable.")
     ap.add_argument("--flow_conf_quantile", type=float, default=0.0,
                     help="0 = off (previous behaviour). >0 EXCLUDES pixels whose VGGT DEPTH "
                          "CONFIDENCE falls in this lowest quantile -- from the multi-Otsu "
@@ -637,6 +694,22 @@ def main():
                             deferred_res[idxs[_i]] = _r[_i].astype(np.float16)
                     del _r
                     continue      # thresholded, completed and saved after the loop
+                if args.save_residual:
+                    _rd = out_dir / "residual"
+                    _rd.mkdir(parents=True, exist_ok=True)
+                    _thr_pre = adaptive_multiotsu_variance(
+                        res.detach().float().cpu().numpy().reshape(-1)[::997],
+                        level=args.mask_otsu_level)
+                    _emit_v = set(emit_idxs)
+                    _dep = depth_s1[0].squeeze(-1).detach().float().cpu().numpy()
+                    _res_np = res.detach().float().cpu().numpy()
+                    for _i in range(n):
+                        if idxs[_i] not in _emit_v:
+                            continue
+                        save_residual_panel(images[0, _i], _res_np[_i], _dep[_i],
+                                            _thr_pre, _rd / f"{chunk_paths[_i].stem}.png",
+                                            vmax=args.residual_vis_max)
+                    print(f"[Residual] wrote {len(_emit_v)} panels to {_rd}", flush=True)
                 _rv = (res[_ck] if _ck is not None else res)
                 thr = adaptive_multiotsu_variance(
                     _rv.cpu().numpy(), level=args.mask_otsu_level)
