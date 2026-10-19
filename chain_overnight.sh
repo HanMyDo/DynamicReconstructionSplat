@@ -19,9 +19,13 @@
 #   --sam_support_frac    drop a propagated object-frame that was seeded nowhere
 #                         nearby; worth 0.2447 -> 0.1920 mean area on halfsphere.
 #
-# TWO LANES, never more: the hex box has 4 cards and we do not take them all.
-# Each lane is a shared job name plus --dependency=singleton, which is what
-# actually serialises them -- cancelling queued jobs does not cap anything.
+# ONE LANE, and that is deliberate. The first attempt ran two lanes and the two
+# chunk-512 sequences (balloon, synchronous2) landed on the node together: both
+# were Killed inside three minutes by the HOST OOM killer, not the GPU. The
+# adopted recipe had only ever run these one at a time, so the limit had never
+# been hit. Host memory scales with chunk size, and we cannot predict the
+# headroom for a 512 beside a 256, so the lane is serial: five hours instead of
+# three, against a failed night costing a day. The second GPU stays free.
 #
 # Stage 2 is a tiny CPU job that waits for all five and then runs
 # chain_baseline_table.sh with the new mask sets exported. It runs INSIDE a job
@@ -62,14 +66,18 @@ IDS=""; n=0
 for ROW in "${ROWS[@]}"; do
   IFS='|' read -r SEQ CHUNK ANCH ROOT <<< "${ROW}"
   [ -d "${ROOT}/${SEQ}/rgb" ] || { echo "SKIP ${SEQ}: no rgb/ under ${ROOT}"; continue; }
-  LANE=$(( n % 2 ))                    # alternate the two lanes
   n=$((n+1))
-  echo "precompute ${SEQ}  chunk=${CHUNK} anchors=${ANCH} lane=pc${LANE}"
+  echo "precompute ${SEQ}  chunk=${CHUNK} anchors=${ANCH}"
   [ "${DRY}" = "1" ] && continue
-  J=$(sbatch --parsable --job-name="pc${LANE}" --dependency=singleton \
+  J=$(sbatch --parsable --job-name=pcn --dependency=singleton \
       --export=ALL,DATA_ROOT="${ROOT}" \
       slurm_precompute_masks_hex.sh "${SEQ}" "${CHUNK}" 518 3 1 6 per_frame mean 64 \
-        flow 2 0 0 0 0 1 0 2 0 1 "${ANCH}" 0 0 1 4 10 0.03 2.0)
+        flow 2 0 0 0 0 1 0 2 0 1 "${ANCH}" 0 0 0 4 10 0.03 2.0)
+  #                                                    ^ --save_residual OFF. The
+  # panels settled the threshold question today, and at chunk 512 they hold a
+  # full-chunk copy of both the residual and the depth on the host (~400MB each),
+  # which helped push the first attempt into the OOM killer. Re-run one sequence
+  # with arg 24 = 1 if a mask set looks wrong in the morning.
   IDS="${IDS}:${J}"
 done
 
