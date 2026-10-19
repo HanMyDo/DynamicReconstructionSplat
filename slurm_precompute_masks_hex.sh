@@ -84,6 +84,10 @@ CONFQ=${23:-0}
 # RESID=1 writes residual/<frame>.png -- RGB | flow residual | depth edges | seeds --
 # so the SOURCE of the false-positive seeds can be looked at instead of inferred.
 RESID=${24:-0}
+# MADK>0 replaces multi-Otsu with median + K*1.4826*MAD on the flow residual. Otsu
+# assumes a multi-modal histogram; the residual is heavy-tailed and unimodal, and on
+# one sequence its threshold ranged 0.413..14.344 while the people sit at 3-7 px.
+MADK=${25:-0}
                       # 1 = original (topmost class only -> a person's arm, not their torso).
                       # 2 = top two classes -> the whole object. THIS is the coverage knob;
                       # the aggregate is not, because the threshold adapts to the scores.
@@ -116,6 +120,7 @@ OUT_DIR="${OUT_ROOT}/output_dyn_masks_precomputed_cs${CHUNK_SIZE}_r${DET_RES}_st
 [ "${ANCHORS}" != "8" ] && OUT_DIR="${OUT_DIR}_an${ANCHORS}"
 [ "${GTHR}" != "0" ] && OUT_DIR="${OUT_DIR}_gthr"
 [ "${CONFQ}" != "0" ] && OUT_DIR="${OUT_DIR}_dc$(echo ${CONFQ} | tr '.' 'p')"
+[ "${MADK}" != "0" ] && OUT_DIR="${OUT_DIR}_mad$(echo ${MADK} | tr '.' 'p')"
 # the panels are a diagnostic, not a different mask set -- no suffix
 
 mkdir -p "${REPO}/slurm_logs" "${OUT_ROOT}"
@@ -182,6 +187,7 @@ python precompute_dyn_masks.py \
     --sam_anchors "${ANCHORS}" \
     $( [ "${GTHR}" != "0" ] && echo --global_flow_thresh ) \
     --flow_conf_quantile "${CONFQ}" \
+    --mask_thresh_mad "${MADK}" \
     $( [ "${RESID}" != "0" ] && echo --save_residual ) \
     --mask_propagate "${PROP}" \
     --mask_aggregate "${AGG}" \

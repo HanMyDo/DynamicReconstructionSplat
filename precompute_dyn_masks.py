@@ -359,6 +359,18 @@ def main():
                     help="How many frames to prompt SAM 2's video predictor with, spread "
                          "over the sequence (best seed per bucket, not the N largest, which "
                          "would all land on the same moment).")
+    ap.add_argument("--mask_thresh_mad", type=float, default=0.0,
+                    help="0 = multi-Otsu (previous behaviour). >0 thresholds the flow "
+                         "residual at median + K*1.4826*MAD instead. WHY: the residual is "
+                         "heavy-tailed and UNIMODAL -- mostly near-zero background with a "
+                         "thin tail of real motion -- which is not what Otsu assumes, so "
+                         "its split lands wherever that tail happens to fall. Measured on "
+                         "TUM halfsphere, one sequence, ten chunks: level 2 gave 7.47 and "
+                         "6.99 px while the PEOPLE sit at 3-7 (the residual panels show "
+                         "them bright and the background dark), and level 3 gave 0.413 to "
+                         "14.344 -- a 35x spread, with dynamic pixels from 3.0%% to 56.5%%. "
+                         "The background IS the bulk, so a robust centre and spread adapt "
+                         "per scene without being hostage to the tail. Try K=3-6.")
     ap.add_argument("--save_residual", action="store_true",
                     help="Write residual/<frame>.png: RGB | flow residual | depth edges | "
                          "seeds. The residual is computed per pixel and discarded after "
@@ -711,8 +723,23 @@ def main():
                                             vmax=args.residual_vis_max)
                     print(f"[Residual] wrote {len(_emit_v)} panels to {_rd}", flush=True)
                 _rv = (res[_ck] if _ck is not None else res)
-                thr = adaptive_multiotsu_variance(
-                    _rv.cpu().numpy(), level=args.mask_otsu_level)
+                if args.mask_thresh_mad > 0:
+                    # Robust: the background is the bulk, so the median sits in it and the
+                    # MAD measures its spread; anything K sigma above that is motion.
+                    _f = _rv.reshape(-1).float()
+                    if _f.numel() > 4_000_000:
+                        _f = _f[:: _f.numel() // 2_000_000]
+                    _med = _f.median()
+                    _mad = (_f - _med).abs().median() * 1.4826
+                    thr = float(_med + args.mask_thresh_mad * _mad)
+                    print(f"[FlowMask] robust threshold={thr:.3f} "
+                          f"(median {float(_med):.3f} + {args.mask_thresh_mad:g} x "
+                          f"{float(_mad):.3f}); multi-Otsu would have said "
+                          f"{adaptive_multiotsu_variance(_f.cpu().numpy(), level=args.mask_otsu_level):.3f}",
+                          flush=True)
+                else:
+                    thr = adaptive_multiotsu_variance(
+                        _rv.cpu().numpy(), level=args.mask_otsu_level)
                 _fm = (res > thr)
                 if _ck is not None:
                     _fm = _fm & _ck      # a low-confidence pixel is never evidence of motion
@@ -931,6 +958,7 @@ def main():
         "global_flow_thresh": args.global_flow_thresh,
         "sam_max_frame_frac": args.sam_max_frame_frac,
         "flow_conf_quantile": args.flow_conf_quantile,
+        "mask_thresh_mad": args.mask_thresh_mad,
         "mask_motion_gate": args.mask_motion_gate,
         "mask_close": args.mask_close,
         "mask_fill": args.mask_fill,
