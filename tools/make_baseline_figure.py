@@ -63,6 +63,9 @@ def main():
                          "only (seconds = stride / 2). Default: all available.")
     ap.add_argument("--order", default="gt,ours,neoverse,movies",
                     help="column order, from gt,ours,neoverse,movies")
+    ap.add_argument("--ours_label", default="ours",
+                    help="label for the `ours` column -- the pairing tool always writes "
+                         "that directory name, whatever arm was paired into it.")
     ap.add_argument("--pick", type=float, default=0.5,
                     help="which paired frame to show, as a fraction through the "
                          "available ones (0.5 = middle)")
@@ -117,7 +120,7 @@ def main():
                     labels.append("ground truth")
                 elif col == "ours":
                     cells.append(cell(base_for_gt / "ours" / fname, True))
-                    labels.append("ours")
+                    labels.append(args.ours_label)
                 elif col in srcs:
                     cells.append(cell(srcs[col] / "movies" / fname))
                     labels.append({"neoverse": "NeoVerse", "movies": "MoVieS"}[col])
