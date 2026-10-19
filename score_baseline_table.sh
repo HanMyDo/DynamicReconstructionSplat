@@ -30,9 +30,9 @@ mkdir -p "cmp_${TAG}" slurm_logs
 source /opt/miniforge3/etc/profile.d/conda.sh
 conda activate dynrec
 
-A512="output_dyn_masks_precomputed_cs512_r518_st3_fs1_m6_flow_otsu2_glob_samvid_gvid"
-A256="output_dyn_masks_precomputed_cs256_r518_st3_fs1_m6_flow_otsu2_glob_samvid_gvid_an16"
-A128="output_dyn_masks_precomputed_cs128_r518_st3_fs1_m6_flow_otsu2_glob_samvid_gvid_an16"
+A512="${A512:-output_dyn_masks_precomputed_cs512_r518_st3_fs1_m6_flow_otsu2_glob_samvid_gvid}"
+A256="${A256:-output_dyn_masks_precomputed_cs256_r518_st3_fs1_m6_flow_otsu2_glob_samvid_gvid_an16}"
+A128="${A128:-output_dyn_masks_precomputed_cs128_r518_st3_fs1_m6_flow_otsu2_glob_samvid_gvid_an16}"
 
 ROWS=(
 "rgbd_bonn_balloon|balloon|dense|4 8 12 16 20|${BONN}|${A512}"

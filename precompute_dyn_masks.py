@@ -359,6 +359,20 @@ def main():
                     help="How many frames to prompt SAM 2's video predictor with, spread "
                          "over the sequence (best seed per bucket, not the N largest, which "
                          "would all land on the same moment).")
+    ap.add_argument("--mask_thresh_min", type=float, default=0.0,
+                    help="absolute floor, in px, under --mask_thresh_mad: the threshold "
+                         "is max(median + K*MAD, this). WHY: a fast object CLOSE to the "
+                         "camera carries a halo of intermediate residual around it "
+                         "(motion blur plus bad depth at the occlusion boundary). That "
+                         "halo has an absolute magnitude, so where a chunk's background "
+                         "is unusually quiet the adaptive threshold drops under it and "
+                         "the seed spills onto the wall -- seen on crowd's quiet chunks "
+                         "at 1.12 and 1.22, while the same K is correct at 2.30 on a "
+                         "close walker and leaves an empty room near-black at 1.12. The "
+                         "bound is RAFT's own accuracy, about 1-2 px: below it a "
+                         "residual cannot be told from flow-estimator noise. One "
+                         "constant for every sequence, tied to resolution, not tuned "
+                         "per scene.")
     ap.add_argument("--sam_support_window", type=int, default=0,
                     help="half-width, in frames, of the window a propagated object may "
                          "draw seed support from. Used with --sam_support_frac.")
@@ -733,6 +747,12 @@ def main():
                     _med = _f.median()
                     _mad = (_f - _med).abs().median() * 1.4826
                     thr = float(_med + args.mask_thresh_mad * _mad)
+                    if thr < args.mask_thresh_min:
+                        print(f"[FlowMask] floor: {thr:.3f} -> "
+                              f"{args.mask_thresh_min:.3f} px (quiet background; below "
+                              f"the flow estimator's own error the residual is noise)",
+                              flush=True)
+                        thr = float(args.mask_thresh_min)
                     print(f"[FlowMask] robust threshold={thr:.3f} "
                           f"(median {float(_med):.3f} + {args.mask_thresh_mad:g} x "
                           f"{float(_mad):.3f}); multi-Otsu would have said "
@@ -982,6 +1002,7 @@ def main():
         "sam_max_frame_frac": args.sam_max_frame_frac,
         "flow_conf_quantile": args.flow_conf_quantile,
         "mask_thresh_mad": args.mask_thresh_mad,
+        "mask_thresh_min": args.mask_thresh_min,
         "sam_support_window": args.sam_support_window,
         "sam_support_frac": args.sam_support_frac,
         "mask_motion_gate": args.mask_motion_gate,

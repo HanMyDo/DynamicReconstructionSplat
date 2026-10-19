@@ -32,6 +32,7 @@ set -uo pipefail
 
 TAG="${EVAL_DATE:-bt}"
 DRY="${DRY:-0}"
+MAX_AREA="${MAX_AREA:-0.35}"
 REPO="${REPO:-${HOME}/DynamicReconstructionSplat}"
 MO="${HOME}/data/mask_out"
 BONN="${HOME}/data/bonn/rgbd_bonn_dataset"
@@ -55,9 +56,9 @@ F="--per_frame_dynamic --dyn_conf_opacity 4.0 --track_dynamic --dyn_motion_knn 8
 --dyn_unsup_gain 0.25 --render_max_scale_frac 0.011 --image_size 392 518 \
 --src_window_dyn 4"
 
-A512="output_dyn_masks_precomputed_cs512_r518_st3_fs1_m6_flow_otsu2_glob_samvid_gvid"
-A256="output_dyn_masks_precomputed_cs256_r518_st3_fs1_m6_flow_otsu2_glob_samvid_gvid_an16"
-A128="output_dyn_masks_precomputed_cs128_r518_st3_fs1_m6_flow_otsu2_glob_samvid_gvid_an16"
+A512="${A512:-output_dyn_masks_precomputed_cs512_r518_st3_fs1_m6_flow_otsu2_glob_samvid_gvid}"
+A256="${A256:-output_dyn_masks_precomputed_cs256_r518_st3_fs1_m6_flow_otsu2_glob_samvid_gvid_an16}"
+A128="${A128:-output_dyn_masks_precomputed_cs128_r518_st3_fs1_m6_flow_otsu2_glob_samvid_gvid_an16}"
 
 # seq | baseline key | dense? | stride:batch_stride,... | data root | intrinsics | mask set
 ROWS=(
@@ -80,6 +81,19 @@ for ROW in "${ROWS[@]}"; do
   N_MASK=$(ls "${MO}/${MASK}/${SEQ}/masks"/*.png 2>/dev/null | wc -l)
   if [ "${NFRAMES}" -eq 0 ] || [ "${N_MASK}" -lt "${NFRAMES}" ]; then
     echo "SKIP ${SEQ}: frames=${NFRAMES} masks=${N_MASK}"; n_skip=$((n_skip+1)); continue
+  fi
+  # AREA GUARD, same rule as chain_mask_ab.sh. A mask set can be complete and still be
+  # unusable: crowd at K=4 with no floor came out at 0.653 mean dynamic fraction, 65% of
+  # the image, against a known-good 0.183. Nothing downstream notices -- the row is just
+  # scored over a different scene -- so a runaway set costs five GPU jobs and is only
+  # found in the morning. Skipping the SEQUENCE here leaves the other four intact.
+  AREA=$(python3 -c "import json,sys;print('%.4f'%json.load(open(sys.argv[1]))['dyn_fraction_mean'])" \
+           "${MO}/${MASK}/${SEQ}/meta.json" 2>/dev/null || echo "nan")
+  if python3 -c "import sys;a=sys.argv[1];sys.exit(0 if a!='nan' and float(a)<=${MAX_AREA} else 1)" "${AREA}"; then
+    :
+  else
+    echo "SKIP ${SEQ}: dyn_fraction_mean=${AREA} > ${MAX_AREA} (mask set unusable)"
+    n_skip=$((n_skip+1)); continue
   fi
 
   for P in ${PAIRS//,/ }; do
@@ -120,4 +134,12 @@ if [ -n "${IDS}" ]; then
   SJ=$(EVAL_DATE="${TAG}" sbatch --parsable --dependency="afterany${IDS}" \
        score_baseline_table.sh)
   echo "scoring job ${SJ} queued behind them -> baseline_table_${TAG}.md"
+  # The five-column figure, once the pairings exist. `.` not `source`: --wrap runs
+  # under sh, where `source` is not a builtin -- that silently skipped conda activation
+  # in every Track4World job before it was caught.
+  FJ=$(sbatch --parsable --dependency="afterany:${SJ}" --job-name=btfig \
+       --partition=gpu --cpus-per-task=4 --time=01:00:00 \
+       --output=slurm_logs/btfig_%j.out --error=slurm_logs/btfig_%j.err \
+       --wrap ". /opt/miniforge3/etc/profile.d/conda.sh && conda activate dynrec && cd ${REPO} && python tools/make_baseline_figure.py --cmp cmp_${TAG} --cmp_alt cmp_van --alt_label 'AnySplat + VGGT' --order gt,alt,ours,movies,neoverse --out figs_${TAG} && tar czf ${HOME}/figs_${TAG}.tgz figs_${TAG}")
+  echo "figure job ${FJ} behind it -> figs_${TAG}/ and ~/figs_${TAG}.tgz"
 fi
