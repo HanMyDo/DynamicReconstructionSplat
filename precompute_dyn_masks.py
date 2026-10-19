@@ -706,22 +706,6 @@ def main():
                             deferred_res[idxs[_i]] = _r[_i].astype(np.float16)
                     del _r
                     continue      # thresholded, completed and saved after the loop
-                if args.save_residual:
-                    _rd = out_dir / "residual"
-                    _rd.mkdir(parents=True, exist_ok=True)
-                    _thr_pre = adaptive_multiotsu_variance(
-                        res.detach().float().cpu().numpy().reshape(-1)[::997],
-                        level=args.mask_otsu_level)
-                    _emit_v = set(emit_idxs)
-                    _dep = depth_s1[0].squeeze(-1).detach().float().cpu().numpy()
-                    _res_np = res.detach().float().cpu().numpy()
-                    for _i in range(n):
-                        if idxs[_i] not in _emit_v:
-                            continue
-                        save_residual_panel(images[0, _i], _res_np[_i], _dep[_i],
-                                            _thr_pre, _rd / f"{chunk_paths[_i].stem}.png",
-                                            vmax=args.residual_vis_max)
-                    print(f"[Residual] wrote {len(_emit_v)} panels to {_rd}", flush=True)
                 _rv = (res[_ck] if _ck is not None else res)
                 if args.mask_thresh_mad > 0:
                     # Robust: the background is the bulk, so the median sits in it and the
@@ -740,6 +724,24 @@ def main():
                 else:
                     thr = adaptive_multiotsu_variance(
                         _rv.cpu().numpy(), level=args.mask_otsu_level)
+                if args.save_residual:
+                    # Drawn with the threshold this chunk ACTUALLY used. It used to
+                    # recompute its own Otsu estimate here, so under --mask_thresh_mad
+                    # the seed column showed a threshold no mask was ever built from --
+                    # a diagnostic that cannot disagree with the run is the whole point.
+                    _rd = out_dir / "residual"
+                    _rd.mkdir(parents=True, exist_ok=True)
+                    _emit_v = set(emit_idxs)
+                    _dep = depth_s1[0].squeeze(-1).detach().float().cpu().numpy()
+                    _res_np = res.detach().float().cpu().numpy()
+                    for _i in range(n):
+                        if idxs[_i] not in _emit_v:
+                            continue
+                        save_residual_panel(images[0, _i], _res_np[_i], _dep[_i],
+                                            thr, _rd / f"{chunk_paths[_i].stem}.png",
+                                            vmax=args.residual_vis_max)
+                    print(f"[Residual] wrote {len(_emit_v)} panels to {_rd} "
+                          f"(seeds at the threshold used: {thr:.3f})", flush=True)
                 _fm = (res > thr)
                 if _ck is not None:
                     _fm = _fm & _ck      # a low-confidence pixel is never evidence of motion
