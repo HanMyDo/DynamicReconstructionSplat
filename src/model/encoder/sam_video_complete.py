@@ -68,6 +68,8 @@ def sam_video_complete(
     max_objects_per_anchor: int = 3,
     max_growth: float = 20.0,
     max_frame_frac: float = 0.5,
+    support_window: int = 0,
+    support_frac: float = 0.0,
 ) -> np.ndarray:
     """images [N,H,W,3] uint8, seeds [N,H,W] bool -> completed masks [N,H,W] bool.
 
@@ -157,8 +159,30 @@ def sam_video_complete(
           f"(seeds empty on {100.0 * (seeds.reshape(n_frames, -1).sum(1) == 0).mean():.1f}% "
           f"of frames)", flush=True)
 
+    # SEED-SUPPORT GATE. The growth rails ask "is this object too big?"; they cannot
+    # ask "is this object MOVING?", which is the question that matters once the seeds
+    # are clean. Measured on TUM halfsphere with the robust threshold: the seed panels
+    # were a clean person on black, yet the overlays still covered the ceiling, a wall,
+    # a monitor and a desk -- none of them seeded IN THAT FRAME. They are objects
+    # seeded badly somewhere else and then carried across the whole sequence by the
+    # video predictor, which is precisely what whole-sequence propagation is for and
+    # also how it fails. So require a propagated object-frame to overlap a real
+    # detection somewhere in a window around it, and drop it where it does not.
+    #
+    # The window IS the hysteresis: a person whose arm stops moving for a moment keeps
+    # the support of nearby frames, while a wall never had any. The fraction is small
+    # on purpose -- a seated person is seeded by their ARM, a few percent of the mask
+    # SAM grows from it -- so this tests "contains a detection", not "is mostly one".
+    seed_win = None
+    if support_window >= 0 and support_frac > 0:
+        seed_win = np.empty_like(seeds, dtype=bool)
+        for _f in range(n_frames):
+            lo = max(0, _f - support_window)
+            hi = min(n_frames, _f + support_window + 1)
+            seed_win[_f] = seeds[lo:hi].any(0)
+
     out = np.zeros((n_frames, H, W), dtype=bool)
-    n_rej_grow = 0; n_rej_abs = 0
+    n_rej_grow = 0; n_rej_abs = 0; n_rej_sup = 0; area_rej_sup = 0
     with torch.inference_mode(), _amp:
         for reverse in (False, True):                 # forward, then backward
             try:
@@ -198,11 +222,22 @@ def sam_video_complete(
                     if ref and a > max_growth * ref:
                         n_rej_grow += 1
                         continue
+                    if seed_win is not None:
+                        sup = int((m & seed_win[f_idx]).sum())
+                        if sup < support_frac * a:
+                            n_rej_sup += 1
+                            area_rej_sup += a
+                            continue
                     out[f_idx] |= m
     # Never lose a detection the propagation missed.
     out |= seeds.astype(bool)
     print(f"[sam-video] rejected {n_rej_grow} object-frames past {max_growth:g}x their "
           f"seed and {n_rej_abs} past {100 * max_frame_frac:g}% of the frame", flush=True)
+    if seed_win is not None:
+        print(f"[sam-video] seed-support gate dropped {n_rej_sup} object-frames "
+              f"({area_rej_sup / max(1, n_frames * H * W):.4f} of total pixel volume) "
+              f"with under {100 * support_frac:g}% of their area seeded within "
+              f"+-{support_window} frames", flush=True)
     print(f"[sam-video] completed: empty frames "
           f"{100.0 * (out.reshape(n_frames, -1).sum(1) == 0).mean():.1f}%, "
           f"mean area {out.mean():.4f}", flush=True)

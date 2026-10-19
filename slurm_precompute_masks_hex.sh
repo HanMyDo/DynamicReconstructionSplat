@@ -88,6 +88,12 @@ RESID=${24:-0}
 # assumes a multi-modal histogram; the residual is heavy-tailed and unimodal, and on
 # one sequence its threshold ranged 0.413..14.344 while the people sit at 3-7 px.
 MADK=${25:-0}
+# SUPW/SUPF: drop a PROPAGATED object-frame unless SUPF of its area was seeded within
+# +-SUPW frames. The growth rails cap size; this asks whether the thing is moving.
+# Halfsphere with the robust threshold had clean person-only seeds and overlays that
+# still covered the ceiling, a wall and a monitor, none of them seeded nearby.
+SUPW=${26:-10}
+SUPF=${27:-0}
                       # 1 = original (topmost class only -> a person's arm, not their torso).
                       # 2 = top two classes -> the whole object. THIS is the coverage knob;
                       # the aggregate is not, because the threshold adapts to the scores.
@@ -121,6 +127,7 @@ OUT_DIR="${OUT_ROOT}/output_dyn_masks_precomputed_cs${CHUNK_SIZE}_r${DET_RES}_st
 [ "${GTHR}" != "0" ] && OUT_DIR="${OUT_DIR}_gthr"
 [ "${CONFQ}" != "0" ] && OUT_DIR="${OUT_DIR}_dc$(echo ${CONFQ} | tr '.' 'p')"
 [ "${MADK}" != "0" ] && OUT_DIR="${OUT_DIR}_mad$(echo ${MADK} | tr '.' 'p')"
+[ "${SUPF}" != "0" ] && OUT_DIR="${OUT_DIR}_sup$(echo ${SUPF} | tr '.' 'p')w${SUPW}"
 # the panels are a diagnostic, not a different mask set -- no suffix
 
 mkdir -p "${REPO}/slurm_logs" "${OUT_ROOT}"
@@ -188,6 +195,8 @@ python precompute_dyn_masks.py \
     $( [ "${GTHR}" != "0" ] && echo --global_flow_thresh ) \
     --flow_conf_quantile "${CONFQ}" \
     --mask_thresh_mad "${MADK}" \
+    --sam_support_window "${SUPW}" \
+    --sam_support_frac "${SUPF}" \
     $( [ "${RESID}" != "0" ] && echo --save_residual ) \
     --mask_propagate "${PROP}" \
     --mask_aggregate "${AGG}" \

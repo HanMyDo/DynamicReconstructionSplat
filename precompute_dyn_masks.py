@@ -359,6 +359,23 @@ def main():
                     help="How many frames to prompt SAM 2's video predictor with, spread "
                          "over the sequence (best seed per bucket, not the N largest, which "
                          "would all land on the same moment).")
+    ap.add_argument("--sam_support_window", type=int, default=0,
+                    help="half-width, in frames, of the window a propagated object may "
+                         "draw seed support from. Used with --sam_support_frac.")
+    ap.add_argument("--sam_support_frac", type=float, default=0.0,
+                    help="0 = off. >0 drops a propagated object-frame unless this "
+                         "fraction of its area was actually SEEDED within "
+                         "+-sam_support_window frames. WHY: with the robust threshold "
+                         "the seeds on TUM halfsphere are a clean person on black, but "
+                         "the overlays still covered a ceiling, a wall, a monitor and a "
+                         "desk that were seeded in NO frame nearby -- objects seeded "
+                         "badly elsewhere and carried across the sequence. The growth "
+                         "rails ask whether an object is too big; this asks whether it "
+                         "is MOVING. Keep it small (0.02-0.05): a seated person is "
+                         "seeded by their arm alone, so this must test 'contains a "
+                         "detection', not 'is mostly one'. Seeds themselves are always "
+                         "re-ORed in afterwards, so the gate can never drop a real "
+                         "detection, only propagation around it.")
     ap.add_argument("--mask_thresh_mad", type=float, default=0.0,
                     help="0 = multi-Otsu (previous behaviour). >0 thresholds the flow "
                          "residual at median + K*1.4826*MAD instead. WHY: the residual is "
@@ -837,7 +854,9 @@ def main():
                 max_anchors=args.sam_anchors,
                 min_seed_area=args.sam_min_seed_area,
                 max_growth=args.sam_max_growth,
-                max_frame_frac=args.sam_max_frame_frac)
+                max_frame_frac=args.sam_max_frame_frac,
+                support_window=args.sam_support_window,
+                support_frac=args.sam_support_frac)
             dyn_mask = torch.from_numpy(_m).unsqueeze(0)
         elif args.sam_complete:
             _m = sam_complete_masks(
@@ -926,7 +945,9 @@ def main():
                 device=str(device), max_anchors=args.sam_anchors,
                 min_seed_area=args.sam_min_seed_area,
                 max_growth=args.sam_max_growth,
-                max_frame_frac=args.sam_max_frame_frac)
+                max_frame_frac=args.sam_max_frame_frac,
+                support_window=args.sam_support_window,
+                support_frac=args.sam_support_frac)
         else:
             grown = seeds          # --global_flow_thresh alone: seeds ARE the mask
         if (args.mask_close or args.mask_fill or args.mask_min_area or args.mask_dilate):
@@ -961,6 +982,8 @@ def main():
         "sam_max_frame_frac": args.sam_max_frame_frac,
         "flow_conf_quantile": args.flow_conf_quantile,
         "mask_thresh_mad": args.mask_thresh_mad,
+        "sam_support_window": args.sam_support_window,
+        "sam_support_frac": args.sam_support_frac,
         "mask_motion_gate": args.mask_motion_gate,
         "mask_close": args.mask_close,
         "mask_fill": args.mask_fill,
