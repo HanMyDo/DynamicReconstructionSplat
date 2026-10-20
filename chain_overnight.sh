@@ -1,5 +1,34 @@
 #!/bin/bash
 # =============================================================================
+# ⛔ MEASURED AND REJECTED, Oct 20 2026. Run as `bt5` over all five sequences:
+# it FIXED tum_halfsphere (mean dynamic fraction 0.436 -> 0.169, whose masks
+# really were broken) but REGRESSED balloon (0.109 -> 0.343, renders visibly
+# worse: a mottled white wall where background gaussians took the dynamic path)
+# and tum_xyz (0.192 -> 0.323). The adopted masks remain the Oct 15 set, which
+# is what chain_baseline_table.sh and score_baseline_table.sh DEFAULT to; this
+# script only overrides them through the environment, so the default path is
+# unaffected and nothing here needs reverting.
+#
+# WHY IT CANNOT BE FIXED BY PICKING A BETTER STATISTIC. MAD measures the bulk
+# and is blind to the tail by construction -- which is exactly what made it
+# immune to real motion and fixed halfsphere. But balloon's false positives LIVE
+# in that tail: a textureless white wall gives unreliable depth, so the
+# camera-induced flow computed through it is wrong and the residual is large
+# with nothing moving. No statistic over the raw residual separates "moving
+# person" from "depth error on a blank wall". Balloon got 2.000 px where Otsu
+# said 4.387. A fix would have to normalise the residual by the LOCAL
+# camera-induced flow, which is what the false positives scale with.
+#
+# AND THE TOLERANCE IS GONE ANYWAY: completion multiplies seeds into final area
+# by 2.7x (halfsphere), 3.8x (crowd), 5.7x (balloon), so a 2x threshold error
+# becomes a 3-6x mask error. That is the argument for replacing the completion
+# stage, and the reason tuning the threshold above it cannot work.
+#
+# Kept runnable because the precompute wiring is correct and reusable; set a
+# different recipe before using it.
+# =============================================================================
+
+# =============================================================================
 # ONE NIGHT: new masks on all five sequences -> the 25-arm table -> the figure.
 #
 # Stage 1, five mask precomputes. The recipe is the adopted one plus the two
