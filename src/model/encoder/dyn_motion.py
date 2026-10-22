@@ -913,6 +913,13 @@ def _q(t: torch.Tensor, q: float) -> float:
     return float(t.quantile(q))
 
 
+# Donor-set cap and recipient chunk for the motion fill. Product bounds the
+# distance matrix at ~134 MB of float32, which is what keeps a crowded frame from
+# allocating tens of GB.
+_FILL_MAX_DONORS = 4096
+_FILL_CHUNK = 8192
+
+
 def knn_flow_displacement(
     traj: torch.Tensor,
     ok: torch.Tensor,
@@ -926,6 +933,7 @@ def knn_flow_displacement(
     max_disp_mult: float = 0.0,
     conf_opacity: float = 0.0,
     same_object: float = 0.0,
+    fill_link: float = 0.0,
     strict: bool = False,
     pred_bandwidth: float = 0.0,
     nn_dist_out: Optional[torch.Tensor] = None,
@@ -940,6 +948,23 @@ def knn_flow_displacement(
     nearest track than gate_mult x (median track NN spacing) gets NO motion —
     moving by a far-away object's flow scatters Gaussians into the background,
     the measured failure of the rigid modes.
+
+    `fill_link` > 0 DONATES motion within an object: a dynamic Gaussian the gates
+    rejected takes the displacement of the nearest ACCEPTED dynamic Gaussian in the
+    same 3D-connected component (link radius = fill_link x track spacing, the same
+    scale-free unit as same_object). WHY IT IS NOT THE SAME AS RAISING gate_mult:
+    the donor must be a dynamic Gaussian that tracking ALREADY supports, not a
+    track. A person's fast arm loses its correspondences first and is currently
+    faded out by --dyn_unsup_gain -- a hole -- while the torso beside it is tracked
+    fine, so the arm can borrow from the body it belongs to. A mask false positive
+    on a wall has NO supported Gaussian anywhere in its component, so it receives
+    nothing and stays put: static is protected by construction, which is what the
+    coverage gate could not do (opening the radius let background reach a distant
+    track, measured dyn +1.67 but SSIM and LPIPS worse 2/2). 3D connectivity rather
+    than the 2D mask matters here: SAM fuses a wall into the person's mask, but the
+    wall is metres away in depth and so falls in a different component.
+    A filled Gaussian inherits its donor's support fraction, so under conf_opacity
+    it renders as confidently as the neighbour it borrowed from, not at zero.
 
     `strict` swaps the OBSERVED target-frame track positions for leave-one-out
     predictions (see predict_tracks_loo), so frame j is never read. The source
@@ -970,7 +995,7 @@ def knn_flow_displacement(
     # then 2.7x lower for the same relocations, which is not comparable across
     # configs. 1 byte per (gaussian, view).
     valid_bin = torch.zeros(N, num_views, device=dev, dtype=torch.bool)
-    _gate_tot = _gate_radius = _gate_vis = 0
+    _gate_tot = _gate_radius = _gate_vis = _gate_fill = 0
     traj_t, ok_t = (predict_tracks_loo(traj, ok, bandwidth=pred_bandwidth)
                     if strict else (traj, ok))
 
@@ -1031,6 +1056,13 @@ def knn_flow_displacement(
         _gate_tot += n_pairs_i
         _gate_radius += int((~spatial_ok).sum()) * max(num_views - 1, 1)
 
+        # Components for motion donation, computed ONCE per source frame (not per
+        # target): the geometry at i does not depend on j.
+        lab_fill = None
+        if fill_link > 0:
+            lab_fill = _label_objects_3d(
+                G, float((fill_link * spacing).clamp_min(1e-5)))
+
         tr_i = traj[:, mi]                           # [V, M, 3] observed
         tr_t = traj_t[:, mi]                         # [V, M, 3] target lookup (LOO if strict)
         ok_t_i = ok_t[:, mi]                         # [V, M]
@@ -1080,6 +1112,41 @@ def knn_flow_displacement(
                     # supports, remove what it does not.
                     good = good & (d_ij.norm(dim=-1) <= lim)
                     d_ij = d_ij * good.unsqueeze(-1).float()
+            # Support fraction, needed by conf_opacity below AND by the fill, so a
+            # donated Gaussian can inherit its donor's confidence instead of the
+            # zero it would compute for itself (it has no neighbours of its own).
+            frac_all = (w > 0).to(valid.dtype).sum(dim=1) / max(kk, 1)
+
+            if lab_fill is not None and bool(good.any()) and bool((~good).any()):
+                _dn = good.nonzero(as_tuple=True)[0]
+                _rc = (~good).nonzero(as_tuple=True)[0]
+                # Cap the donor set for the distance matrix: a displacement field is
+                # smooth within one object, so a strided sample answers "nearest
+                # donor" to well under the track spacing, and the full matrix would
+                # be tens of GB on a crowded frame.
+                if _dn.numel() > _FILL_MAX_DONORS:
+                    _dn = _dn[:: (_dn.numel() + _FILL_MAX_DONORS - 1) // _FILL_MAX_DONORS]
+                _Gd, _dd, _ld = G[_dn], d_ij[_dn], lab_fill[_dn]
+                _fd = frac_all[_dn]
+                _n_filled = 0
+                for _s0 in range(0, _rc.numel(), _FILL_CHUNK):
+                    _r = _rc[_s0:_s0 + _FILL_CHUNK]
+                    _D = torch.cdist(G[_r], _Gd)
+                    # Same component only. An infinity here is the whole safeguard:
+                    # a Gaussian with no supported donor in its own object keeps no
+                    # motion at all rather than borrowing across objects.
+                    _D = torch.where(lab_fill[_r].unsqueeze(1) == _ld.unsqueeze(0),
+                                     _D, torch.full_like(_D, float("inf")))
+                    _nnd, _nn = _D.min(dim=1)
+                    _take = torch.isfinite(_nnd)
+                    if bool(_take.any()):
+                        _t = _r[_take]
+                        d_ij[_t] = _dd[_nn[_take]]
+                        frac_all[_t] = _fd[_nn[_take]]
+                        good[_t] = True
+                        _n_filled += int(_take.sum())
+                _gate_fill += _n_filled
+
             d_ij = d_ij * good.unsqueeze(-1).float()
             row = torch.zeros(N, 3, device=dev, dtype=disp.dtype)
             row[sel] = d_ij.to(disp.dtype)
@@ -1097,8 +1164,8 @@ def knn_flow_displacement(
                 # it never revives a rejected one. Reviving them would put a Gaussian
                 # at a position tracking could not support, which is the ghosting the
                 # gate exists to prevent.
-                frac = (w > 0).to(valid.dtype).sum(dim=1) / max(kk, 1)
-                vrow[sel] = good.to(valid.dtype) * frac.clamp(0, 1).pow(conf_opacity)
+                vrow[sel] = (good.to(valid.dtype)
+                             * frac_all.clamp(0, 1).pow(conf_opacity))
             else:
                 vrow[sel] = good.to(valid.dtype)
             valid[:, j] += vrow
@@ -1128,6 +1195,7 @@ def knn_flow_displacement(
             print("[DynFlow] NO usable displacement (gates removed everything)")
         if _gate_tot > 0:
             print(f"[DynFlow/gates] of {_gate_tot} (gaussian, target) pairs: "
+                  f"filled {100.0 * _gate_fill / _gate_tot:.1f}%, "
                   f"radius rejected {100.0 * _gate_radius / _gate_tot:.1f}%, "
                   f"target-frame visibility rejected {100.0 * _gate_vis / _gate_tot:.1f}%",
                   flush=True)

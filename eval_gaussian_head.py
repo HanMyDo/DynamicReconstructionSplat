@@ -1375,6 +1375,19 @@ def main():
                              "strict no-look variant is the groups mode; report both.")
     parser.add_argument("--dyn_motion_n_query", type=int, default=1024,
                         help="Scene-flow mode: total tracker query budget, split across query frames.")
+    parser.add_argument("--dyn_motion_fill", type=float, default=0.0,
+                        help="With --dyn_motion_knn: donate motion WITHIN an object. A dynamic "
+                             "Gaussian the gates rejected takes the displacement of the nearest "
+                             "ACCEPTED dynamic Gaussian in the same 3D-connected component; the "
+                             "value is the link radius in multiples of the track spacing (same "
+                             "unit as --dyn_same_object; try 2-4). 0 = off. NOT the same as "
+                             "raising the gate: the donor must be a Gaussian tracking already "
+                             "supports, so a fast arm borrows from the torso it belongs to, "
+                             "while a mask false positive on a wall has no supported Gaussian in "
+                             "its component and receives nothing. That is what makes it safe for "
+                             "static, where opening the radius was not (dyn +1.67 but SSIM and "
+                             "LPIPS worse 2/2). Addresses holes: an unsupported arm is currently "
+                             "faded out by --dyn_unsup_gain rather than moved.")
     parser.add_argument("--dyn_same_object", type=float, default=0.0,
                         help="Restrict each gaussian's kNN to tracks on the SAME object, as a "
                              "link radius in multiples of the track spacing (0 = off). The "
@@ -1656,6 +1669,7 @@ def main():
         dyn_motion_gate_mult=args.dyn_motion_gate_mult,
         dyn_motion_max_disp_mult=args.dyn_motion_max_disp_mult,
         dyn_conf_opacity=args.dyn_conf_opacity,
+        dyn_motion_fill=args.dyn_motion_fill,
         dyn_same_object=args.dyn_same_object,
         dyn_motion_strict=args.dyn_motion_strict,
         dyn_motion_pred_bandwidth=args.dyn_motion_pred_bandwidth,
@@ -1743,6 +1757,7 @@ def main():
             "dyn_motion_gate_mult": args.dyn_motion_gate_mult,
             "dyn_motion_max_disp_mult": args.dyn_motion_max_disp_mult,
             "dyn_conf_opacity": args.dyn_conf_opacity,
+            "dyn_motion_fill": args.dyn_motion_fill,
             "dyn_same_object": args.dyn_same_object,
             "dyn_motion_query_all": not args.dyn_motion_query_first_only,
             "dyn_motion_strict": args.dyn_motion_strict,

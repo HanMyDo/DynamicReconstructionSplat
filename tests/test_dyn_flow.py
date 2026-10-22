@@ -623,6 +623,43 @@ def main() -> int:
     if not t21:
         fails.append(21)
 
+    # 22. MOTION DONATION (--dyn_motion_fill). The point of the mechanism is that a
+    #     Gaussian the radius gate rejected may borrow from an ACCEPTED Gaussian in
+    #     its OWN 3D component, and from nowhere else -- that asymmetry is what makes
+    #     it safe for static where simply opening the gate was not. Geometry: five
+    #     tracks spanning x 0..0.2 (spacing 0.05, so the gate reaches 0.15), a chain
+    #     of Gaussians running out to x 0.8 that the gate rejects but that links back
+    #     to the tracked end, and one isolated Gaussian at x 50 standing for a mask
+    #     false positive on a wall.
+    _tr0 = torch.tensor([[x, 0.0, 0.0] for x in (0.0, 0.05, 0.10, 0.15, 0.20)])
+    _traj = torch.stack([_tr0, _tr0 + torch.tensor([1.0, 0.0, 0.0])])   # [2,5,3]
+    _okk = torch.ones(2, 5, dtype=torch.bool)
+    _near = [0.0, 0.1, 0.2]            # inside the gate -> accepted
+    _chain = [0.4, 0.6, 0.8]           # outside the gate, but linked back to _near
+    _far = [50.0]                      # its own component, no donor anywhere
+    _gp = torch.tensor([[x, 0.0, 0.0] for x in _near + _chain + _far])
+    _gf = torch.zeros(len(_near) + len(_chain) + len(_far), dtype=torch.long)
+    _gd = torch.ones_like(_gf, dtype=torch.bool)
+    _n_near, _n_chain = len(_near), len(_chain)
+
+    def _moved(fill):
+        d, _v = dyn_motion.knn_flow_displacement(
+            _traj, _okk, _gp, _gf, _gd, 2, k=4, gate_mult=3.0, fill_link=fill)
+        return d[:, 1, 0]              # x-displacement toward frame 1
+
+    _off, _on = _moved(0.0), _moved(5.0)
+    t22a = bool((_off[:_n_near] > 0.9).all())                       # tracked end moves
+    t22b = bool((_off[_n_near:_n_near + _n_chain].abs() < 1e-6).all())   # chain rejected
+    t22c = bool((_on[_n_near:_n_near + _n_chain] > 0.9).all())      # chain now donated to
+    t22d = bool(_on[-1].abs() < 1e-6)                               # isolated: never
+    t22e = bool(torch.allclose(_off[:_n_near], _on[:_n_near]))      # accepted set untouched
+    t22 = t22a and t22b and t22c and t22d and t22e
+    print(f"[22] motion donation within a component: {'PASS' if t22 else 'FAIL'} "
+          f"(gate rejects chain={t22b}, fill revives it={t22c}, "
+          f"isolated false-positive stays put={t22d}, accepted unchanged={t22e})")
+    if not t22:
+        fails.append(22)
+
     print(f"\n{'ALL TESTS PASS' if not fails else f'FAILED: tests {fails}'}")
     return 1 if fails else 0
 
