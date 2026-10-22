@@ -451,7 +451,11 @@ def main() -> int:
     #     knob means touching the encoder cfg, TrainingConfig and the argparse
     #     block; miss the middle one and the failure is a TypeError raised AFTER
     #     model load, i.e. a job that burns an allocation and dies with no output.
-    #     That has now happened twice (dynamic_n_clusters, dyn_motion_max_disp_mult).
+    #     That has now happened three times (dynamic_n_clusters,
+    #     dyn_motion_max_disp_mult, dyn_motion_fill). The third slipped through
+    #     because this test only ever checked the TrainingConfig half while its own
+    #     comment named the encoder cfg -- so it now checks BOTH ends of the chain:
+    #     eval -> TrainingConfig, and create_model -> EncoderAnySplatCfg.
     #     Pure ast, so it costs nothing and needs no torch.
     import ast as _ast
     _root = Path(__file__).resolve().parents[1]
@@ -469,10 +473,31 @@ def main() -> int:
                 and _n.func.id == "TrainingConfig"):
             _passed |= {k.arg for k in _n.keywords if k.arg}
     _missing = sorted(_passed - _fields)
-    t16 = bool(_fields) and bool(_passed) and not _missing
-    print(f"[16] eval's TrainingConfig kwargs all exist as fields: "
-          f"{'PASS' if t16 else 'FAIL'} ({len(_passed)} passed, {len(_fields)} fields"
-          + (f", MISSING {_missing}" if _missing else "") + ")")
+
+    # The other end: create_model builds EncoderAnySplatCfg, a plain dataclass with
+    # no bases, so an undeclared kwarg is a TypeError at model load -- exactly how
+    # dyn_motion_fill failed, after the queue wait and before any output.
+    _an = _ast.parse((_root / "src" / "model" / "encoder" / "anysplat.py").read_text())
+    _efields = set()
+    for _n in _ast.walk(_an):
+        if isinstance(_n, _ast.ClassDef) and _n.name == "EncoderAnySplatCfg":
+            for _st in _n.body:
+                if isinstance(_st, _ast.AnnAssign) and isinstance(_st.target, _ast.Name):
+                    _efields.add(_st.target.id)
+    _epassed = set()
+    for _n in _ast.walk(_tc):
+        if (isinstance(_n, _ast.Call) and isinstance(_n.func, _ast.Name)
+                and _n.func.id == "EncoderAnySplatCfg"):
+            _epassed |= {k.arg for k in _n.keywords if k.arg}
+    _emissing = sorted(_epassed - _efields)
+
+    t16 = (bool(_fields) and bool(_passed) and not _missing
+           and bool(_efields) and bool(_epassed) and not _emissing)
+    print(f"[16] config kwargs all exist as fields: {'PASS' if t16 else 'FAIL'} "
+          f"(TrainingConfig {len(_passed)}/{len(_fields)}"
+          + (f" MISSING {_missing}" if _missing else "")
+          + f", EncoderAnySplatCfg {len(_epassed)}/{len(_efields)}"
+          + (f" MISSING {_emissing}" if _emissing else "") + ")")
     if not t16:
         fails.append(16)
 

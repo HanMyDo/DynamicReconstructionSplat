@@ -279,6 +279,10 @@ class EncoderAnySplatCfg:
     dyn_motion_max_disp_mult: float = 0.0  # cap |displacement| at mult x median track motion (0=off)
     dyn_conf_opacity: float = 0.0  # soften the flow gate by track support^gamma (0=off)
     dyn_same_object: float = 0.0   # restrict the kNN to one object; link radius x track spacing (0=off)
+    # Donate motion WITHIN an object: a gate-rejected dynamic gaussian takes the
+    # displacement of the nearest ACCEPTED one in its own 3D component. Link radius
+    # x track spacing, same unit as dyn_same_object (0=off).
+    dyn_motion_fill: float = 0.0
     # STRICT control: predict each track's target-frame position from the OTHER frames
     # instead of observing it, so frame j is never read (see predict_tracks_loo).
     dyn_motion_strict: bool = False
