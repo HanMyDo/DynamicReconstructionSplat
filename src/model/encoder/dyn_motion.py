@@ -996,6 +996,8 @@ def knn_flow_displacement(
     # configs. 1 byte per (gaussian, view).
     valid_bin = torch.zeros(N, num_views, device=dev, dtype=torch.bool)
     _gate_tot = _gate_radius = _gate_vis = _gate_fill = 0
+    _fill_logged = False
+    print(f"[DynFlow/fill] fill_link={fill_link}", flush=True)
     traj_t, ok_t = (predict_tracks_loo(traj, ok, bandwidth=pred_bandwidth)
                     if strict else (traj, ok))
 
@@ -1060,8 +1062,13 @@ def knn_flow_displacement(
         # target): the geometry at i does not depend on j.
         lab_fill = None
         if fill_link > 0:
-            lab_fill = _label_objects_3d(
-                G, float((fill_link * spacing).clamp_min(1e-5)))
+            _flink = float((fill_link * spacing).clamp_min(1e-5))
+            lab_fill = _label_objects_3d(G, _flink)
+            if not _fill_logged:
+                print(f"[DynFlow/fill] link={_flink:.4f} world units, "
+                      f"{int(lab_fill.max()) + 1} components over "
+                      f"{lab_fill.numel()} dynamic gaussians at frame {i}", flush=True)
+                _fill_logged = True
 
         tr_i = traj[:, mi]                           # [V, M, 3] observed
         tr_t = traj_t[:, mi]                         # [V, M, 3] target lookup (LOO if strict)
@@ -1146,6 +1153,10 @@ def knn_flow_displacement(
                         good[_t] = True
                         _n_filled += int(_take.sum())
                 _gate_fill += _n_filled
+                if _n_filled == 0 and j == (0 if i != 0 else 1):
+                    print(f"[DynFlow/fill] frame {i}->{j}: 0 filled from "
+                          f"{int(good.sum())} donors / {int((~good).sum())} recipients "
+                          f"-- no recipient shares a component with a donor", flush=True)
 
             d_ij = d_ij * good.unsqueeze(-1).float()
             row = torch.zeros(N, 3, device=dev, dtype=disp.dtype)
