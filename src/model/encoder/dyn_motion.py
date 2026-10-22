@@ -1062,12 +1062,32 @@ def knn_flow_displacement(
         # target): the geometry at i does not depend on j.
         lab_fill = None
         if fill_link > 0:
-            _flink = float((fill_link * spacing).clamp_min(1e-5))
+            # THE LENGTH SCALE MUST COME FROM THE CLOUD BEING LABELLED, not from
+            # `spacing`. `spacing` is the median distance between TRACKS, and tracks
+            # concentrate on the moving object -- a small dense set -- while the
+            # dynamic gaussians are spread over the whole room (nearly half of them
+            # are mask false positives on background). Measured on balloon: a link of
+            # 2 x track spacing put EVERY gaussian in its own voxel, 24433 components
+            # over 24433 gaussians, so no recipient ever shared a label with a donor
+            # and the mechanism silently did nothing.
+            #
+            # Estimate the gaussian spacing as (bounding volume / count)^(1/3), the
+            # mean spacing of a uniform cloud. It is a proxy -- these gaussians lie on
+            # surfaces, so it overestimates -- but it is cheap, exact in scale, and
+            # has no subsample bias. Deliberately NOT a nearest-neighbour distance
+            # measured on a subsample: that reads high by the subsampling factor and
+            # has already produced one retracted result in this project.
+            _ext = (G.max(dim=0).values - G.min(dim=0).values).clamp_min(1e-9)
+            _gsp = float((_ext.prod() / max(int(G.shape[0]), 1)).clamp_min(1e-30) ** (1.0 / 3.0))
+            _flink = max(fill_link * _gsp, 1e-9)
             lab_fill = _label_objects_3d(G, _flink)
             if not _fill_logged:
-                print(f"[DynFlow/fill] link={_flink:.4f} world units, "
-                      f"{int(lab_fill.max()) + 1} components over "
-                      f"{lab_fill.numel()} dynamic gaussians at frame {i}", flush=True)
+                _nc = int(lab_fill.max()) + 1
+                print(f"[DynFlow/fill] gaussian spacing {_gsp:.3e} (track spacing "
+                      f"{float(spacing):.3e}), link {_flink:.3e} -> {_nc} components "
+                      f"over {lab_fill.numel()} dynamic gaussians at frame {i}"
+                      f"{'  <-- ALL ISOLATED, raise --dyn_motion_fill' if _nc == lab_fill.numel() else ''}"
+                      f"{'  <-- ALL ONE BLOB, lower it' if _nc == 1 else ''}", flush=True)
                 _fill_logged = True
 
         tr_i = traj[:, mi]                           # [V, M, 3] observed
