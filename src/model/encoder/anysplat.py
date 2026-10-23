@@ -285,6 +285,8 @@ class EncoderAnySplatCfg:
     dyn_motion_fill: float = 0.0
     # Minimum supported fraction before a component may donate (0 = off).
     dyn_motion_fill_min: float = 0.0
+    # Max recipient-to-donor distance in gaussian spacings (0 = unbounded).
+    dyn_motion_fill_max: float = 0.0
     # STRICT control: predict each track's target-frame position from the OTHER frames
     # instead of observing it, so frame j is never read (see predict_tracks_loo).
     dyn_motion_strict: bool = False
@@ -1395,6 +1397,7 @@ class EncoderAnySplat(Encoder[EncoderAnySplatCfg]):
                             same_object=getattr(self.cfg, "dyn_same_object", 0.0),
                             fill_link=getattr(self.cfg, "dyn_motion_fill", 0.0),
                             fill_min=getattr(self.cfg, "dyn_motion_fill_min", 0.0),
+                            fill_max=getattr(self.cfg, "dyn_motion_fill_max", 0.0),
                             strict=getattr(self.cfg, "dyn_motion_strict", False),
                             pred_bandwidth=getattr(self.cfg, "dyn_motion_pred_bandwidth", 0.0),
                             nn_dist_out=_nn,

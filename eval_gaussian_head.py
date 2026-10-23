@@ -1399,6 +1399,15 @@ def main():
                              "place instead of faded -- which renders stronger, so it looks worse. "
                              "A person's component is largely tracked and passes; a wall's and a "
                              "balloon's do not.")
+    parser.add_argument("--dyn_motion_fill_max", type=float, default=0.0,
+                        help="With --dyn_motion_fill: the furthest a recipient may be from its "
+                             "donor, in multiples of the gaussian spacing (0 = unbounded, try "
+                             "2-8). A body is ARTICULATED, so an unsupported leg that borrows the "
+                             "TORSO's displacement lands wrong, and every source frame's copy "
+                             "borrows the same torso motion so the copies never converge -- they "
+                             "render as a duplicated or stretched limb. Capping the distance "
+                             "keeps the donation local, so a part borrows from what it is "
+                             "attached to.")
     parser.add_argument("--dyn_same_object", type=float, default=0.0,
                         help="Restrict each gaussian's kNN to tracks on the SAME object, as a "
                              "link radius in multiples of the track spacing (0 = off). The "
@@ -1682,6 +1691,7 @@ def main():
         dyn_conf_opacity=args.dyn_conf_opacity,
         dyn_motion_fill=args.dyn_motion_fill,
         dyn_motion_fill_min=args.dyn_motion_fill_min,
+        dyn_motion_fill_max=args.dyn_motion_fill_max,
         dyn_same_object=args.dyn_same_object,
         dyn_motion_strict=args.dyn_motion_strict,
         dyn_motion_pred_bandwidth=args.dyn_motion_pred_bandwidth,

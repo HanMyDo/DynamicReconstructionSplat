@@ -935,6 +935,7 @@ def knn_flow_displacement(
     same_object: float = 0.0,
     fill_link: float = 0.0,
     fill_min: float = 0.0,
+    fill_max: float = 0.0,
     strict: bool = False,
     pred_bandwidth: float = 0.0,
     nn_dist_out: Optional[torch.Tensor] = None,
@@ -1062,6 +1063,7 @@ def knn_flow_displacement(
         # Components for motion donation, computed ONCE per source frame (not per
         # target): the geometry at i does not depend on j.
         lab_fill = None
+        _gsp_i = 0.0
         if fill_link > 0:
             # THE LENGTH SCALE MUST COME FROM THE CLOUD BEING LABELLED, not from
             # `spacing`. `spacing` is the median distance between TRACKS, and tracks
@@ -1080,6 +1082,7 @@ def knn_flow_displacement(
             # has already produced one retracted result in this project.
             _ext = (G.max(dim=0).values - G.min(dim=0).values).clamp_min(1e-9)
             _gsp = float((_ext.prod() / max(int(G.shape[0]), 1)).clamp_min(1e-30) ** (1.0 / 3.0))
+            _gsp_i = _gsp
             _flink = max(fill_link * _gsp, 1e-9)
             lab_fill = _label_objects_3d(G, _flink)
             if not _fill_logged:
@@ -1187,6 +1190,18 @@ def knn_flow_displacement(
                                      _D, torch.full_like(_D, float("inf")))
                     _nnd, _nn = _D.min(dim=1)
                     _take = torch.isfinite(_nnd)
+                    if fill_max > 0:
+                        # LOCALITY. Component membership alone is not enough: a body
+                        # is ARTICULATED, so an unsupported leg borrowing the TORSO's
+                        # displacement lands wrong, and since every source frame's
+                        # copy of that leg borrows the same torso motion the copies
+                        # never converge -- they render as a duplicated or stretched
+                        # limb, which is what the unbounded version produced. Capping
+                        # the donor distance makes the donation local, so a part
+                        # borrows from the piece of the object it is attached to and
+                        # anything with no nearby support stays unsupported rather
+                        # than being moved by something that is not rigid with it.
+                        _take = _take & (_nnd <= fill_max * max(_gsp_i, 1e-12))
                     if bool(_take.any()):
                         _t = _r[_take]
                         d_ij[_t] = _dd[_nn[_take]]
