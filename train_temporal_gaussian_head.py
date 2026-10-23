@@ -362,6 +362,7 @@ class TrainingConfig:
     dyn_motion_max_disp_mult: float = 0.0
     dyn_conf_opacity: float = 0.0
     dyn_motion_fill: float = 0.0
+    dyn_motion_fill_min: float = 0.0
     dyn_same_object: float = 0.0
     dyn_motion_strict: bool = False
     dyn_motion_pred_bandwidth: float = 0.0
@@ -690,6 +691,7 @@ def create_model(config: TrainingConfig) -> AnySplat:
         dyn_motion_max_disp_mult=config.dyn_motion_max_disp_mult,
         dyn_conf_opacity=getattr(config, "dyn_conf_opacity", 0.0),
         dyn_motion_fill=getattr(config, "dyn_motion_fill", 0.0),
+        dyn_motion_fill_min=getattr(config, "dyn_motion_fill_min", 0.0),
         dyn_same_object=getattr(config, "dyn_same_object", 0.0),
         dyn_motion_strict=config.dyn_motion_strict,
         dyn_motion_pred_bandwidth=config.dyn_motion_pred_bandwidth,

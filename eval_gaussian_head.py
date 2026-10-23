@@ -1388,6 +1388,17 @@ def main():
                              "static, where opening the radius was not (dyn +1.67 but SSIM and "
                              "LPIPS worse 2/2). Addresses holes: an unsupported arm is currently "
                              "faded out by --dyn_unsup_gain rather than moved.")
+    parser.add_argument("--dyn_motion_fill_min", type=float, default=0.0,
+                        help="With --dyn_motion_fill: the minimum fraction of a component's "
+                             "gaussians that must ALREADY be supported by tracking before that "
+                             "component may donate motion (0 = off, try 0.3-0.6). Without it the "
+                             "mechanism's safety argument does not hold: at ~50-70 gaussians per "
+                             "component a wall needs one or two accidentally-supported gaussians "
+                             "to start donating to itself, measured at -1.2 dB static on balloon, "
+                             "and an untrackable balloon gets relocated CONFIDENTLY to the wrong "
+                             "place instead of faded -- which renders stronger, so it looks worse. "
+                             "A person's component is largely tracked and passes; a wall's and a "
+                             "balloon's do not.")
     parser.add_argument("--dyn_same_object", type=float, default=0.0,
                         help="Restrict each gaussian's kNN to tracks on the SAME object, as a "
                              "link radius in multiples of the track spacing (0 = off). The "
@@ -1670,6 +1681,7 @@ def main():
         dyn_motion_max_disp_mult=args.dyn_motion_max_disp_mult,
         dyn_conf_opacity=args.dyn_conf_opacity,
         dyn_motion_fill=args.dyn_motion_fill,
+        dyn_motion_fill_min=args.dyn_motion_fill_min,
         dyn_same_object=args.dyn_same_object,
         dyn_motion_strict=args.dyn_motion_strict,
         dyn_motion_pred_bandwidth=args.dyn_motion_pred_bandwidth,

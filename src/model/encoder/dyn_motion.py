@@ -934,6 +934,7 @@ def knn_flow_displacement(
     conf_opacity: float = 0.0,
     same_object: float = 0.0,
     fill_link: float = 0.0,
+    fill_min: float = 0.0,
     strict: bool = False,
     pred_bandwidth: float = 0.0,
     nn_dist_out: Optional[torch.Tensor] = None,
@@ -1147,12 +1148,32 @@ def knn_flow_displacement(
             if lab_fill is not None and bool(good.any()) and bool((~good).any()):
                 _dn = good.nonzero(as_tuple=True)[0]
                 _rc = (~good).nonzero(as_tuple=True)[0]
+                if fill_min > 0 and _rc.numel():
+                    # A COMPONENT MAY ONLY DONATE IF TRACKING SUPPORTS IT. Without
+                    # this the asymmetry the mechanism rests on does not hold: at
+                    # ~50-70 gaussians per component a wall region needs only one or
+                    # two accidentally-supported gaussians to start donating to
+                    # itself, and measured on balloon that cost 1.2 dB of static
+                    # while an untrackable balloon was relocated confidently to the
+                    # wrong place instead of being faded (a wrong placement renders
+                    # STRONGER than a faded one, so it looked worse, not better).
+                    # A person's component is largely tracked and passes; a wall's
+                    # and a balloon's do not.
+                    _nl = int(lab_fill.max()) + 1
+                    _cnt = torch.bincount(lab_fill, minlength=_nl).float()
+                    _sup = torch.bincount(lab_fill[good], minlength=_nl).float()
+                    _okc = (_sup / _cnt.clamp_min(1.0)) >= fill_min
+                    _rc = _rc[_okc[lab_fill[_rc]]]
+                    if _rc.numel() == 0:
+                        _dn = _dn[:0]
                 # Cap the donor set for the distance matrix: a displacement field is
                 # smooth within one object, so a strided sample answers "nearest
                 # donor" to well under the track spacing, and the full matrix would
                 # be tens of GB on a crowded frame.
                 if _dn.numel() > _FILL_MAX_DONORS:
                     _dn = _dn[:: (_dn.numel() + _FILL_MAX_DONORS - 1) // _FILL_MAX_DONORS]
+                if _dn.numel() == 0 or _rc.numel() == 0:
+                    _rc = _rc[:0]
                 _Gd, _dd, _ld = G[_dn], d_ij[_dn], lab_fill[_dn]
                 _fd = frac_all[_dn]
                 _n_filled = 0
