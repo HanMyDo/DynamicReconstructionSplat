@@ -77,6 +77,7 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
         render_max_scale_frac: float = 0.0,
         src_window: int = 0,
         src_window_dyn: int = -1,
+        dyn_facing_min: float = -1.0,
     ) -> DecoderOutput:
         B, V, _, _  = intrinsics.shape
         H, W = image_shape
@@ -131,6 +132,50 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
             test_intr_i[:, 0] = test_intr_i_normalized[:, 0] * W
             test_intr_i[:, 1] = test_intr_i_normalized[:, 1] * H
             sh_degree = (int(sqrt(feature_i.shape[-2])) - 1)
+
+            # SURFACE NORMALS, for the back-face gate (--dyn_facing_min). Measured on
+            # a balloon PLY: the gaussians are near-flat discs -- median max/min axis
+            # ratio 1573 with mid/min 501, so two long axes and one a thousand times
+            # shorter. The thinnest axis IS the surface normal, and these are surfels
+            # in all but name.
+            #
+            # WHY THIS IS NOT ANOTHER COVERAGE KNOB. Under --eval_loo the held-out
+            # view's own gaussians are dropped, so a moving person is assembled from
+            # ~15 copies captured at different TIMES and different ANGLES. Relocation
+            # moves a gaussian but never re-orients it, so a patch of the person's back
+            # from another frame arrives still facing backwards and renders through the
+            # front -- a union of surfaces, which reads as soft however accurate the
+            # motion is. That is why the relocation oracle was +0.64 and still soft.
+            # This drops patches that do not face the target camera; it removes no
+            # front-facing surface, so it is not the assert-more/assert-less trade that
+            # five other mechanisms all landed on.
+            #
+            # A gaussian's normal has no inherent sign, so it is oriented toward the
+            # SOURCE camera that created it -- these come from unprojected depth, so a
+            # patch legitimately faces the camera that saw it.
+            _normal_i = None
+            if (dyn_facing_min > -1.0 and gaussian_dyn_flag is not None
+                    and gaussian_frame_idx is not None):
+                _q = rotation_i / rotation_i.norm(dim=-1, keepdim=True).clamp_min(1e-12)
+                _w, _x, _y, _z = _q[:, 0], _q[:, 1], _q[:, 2], _q[:, 3]
+                _R = torch.stack([
+                    torch.stack([1 - 2 * (_y * _y + _z * _z), 2 * (_x * _y - _w * _z),
+                                 2 * (_x * _z + _w * _y)], dim=-1),
+                    torch.stack([2 * (_x * _y + _w * _z), 1 - 2 * (_x * _x + _z * _z),
+                                 2 * (_y * _z - _w * _x)], dim=-1),
+                    torch.stack([2 * (_x * _z - _w * _y), 2 * (_y * _z + _w * _x),
+                                 1 - 2 * (_x * _x + _y * _y)], dim=-1),
+                ], dim=-2)                                   # [N,3,3], rows of R
+                _k = scale_i.argmin(dim=-1)                  # thinnest axis
+                _normal_i = torch.gather(
+                    _R, 2, _k.view(-1, 1, 1).expand(-1, 3, 1)).squeeze(-1)
+                # extrinsics are CAMERA-TO-WORLD here (the rasterizer is handed their
+                # inverse), so the translation column is the camera centre.
+                _cc_all = extrinsics[i].float()[:, :3, 3]    # [V,3]
+                _src_c = _cc_all[gaussian_frame_idx[i].long().to(_cc_all.device)]
+                _sgn = torch.sign(((_src_c - xyz_i) * _normal_i).sum(-1, keepdim=True))
+                _normal_i = _normal_i * torch.where(
+                    _sgn == 0, torch.ones_like(_sgn), _sgn)
 
             rendering_list = []
             rendering_depth_list = []
@@ -200,6 +245,31 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
                                       else ((fidx_i - j).abs() <= src_window_dyn).float())
                             near = torch.where(dyn_i, near_d, near)
                         gate = gate * near
+
+                    # BACK-FACE GATE FOR MOVERS (--dyn_facing_min). cos threshold
+                    # against the target camera: -1 is off, 0 drops strictly
+                    # back-facing patches, higher also drops grazing ones. Uses the
+                    # pre-relocation position for the view direction, which is a
+                    # safe approximation -- a displacement of centimetres barely
+                    # rotates a direction to a camera metres away.
+                    if _normal_i is not None:
+                        _vd = extrinsics[i].float()[j, :3, 3].unsqueeze(0) - xyz_i
+                        _vd = _vd / _vd.norm(dim=-1, keepdim=True).clamp_min(1e-12)
+                        _face = (_normal_i * _vd).sum(-1)
+                        _dynb = gaussian_dyn_flag[i].to(gate.device) > 0.5
+                        _cull = _dynb & (_face < dyn_facing_min)
+                        gate = gate * torch.where(
+                            _dynb, (_face >= dyn_facing_min).to(gate.dtype),
+                            torch.ones_like(gate))
+                        # Say what it did. Three mechanisms this week were silently
+                        # inert for a whole 25-window run before anyone noticed, so a
+                        # gate that reports nothing is a gate that cannot be trusted.
+                        if i == 0 and j == 0:
+                            _nd = int(_dynb.sum())
+                            print(f"[BackFace] cos>={dyn_facing_min:g}: culled "
+                                  f"{int(_cull.sum())} of {_nd} dynamic gaussians "
+                                  f"({100.0 * int(_cull.sum()) / max(_nd, 1):.1f}%) "
+                                  f"at view 0", flush=True)
 
                     # DISTANCE-GATED RESCUE (--dyn_far_static M). The radius gate
                     # rejects two populations that want OPPOSITE treatment:
@@ -633,6 +703,7 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
         render_max_scale_frac: float = 0.0,
         src_window: int = 0,
         src_window_dyn: int = -1,
+        dyn_facing_min: float = -1.0,
     ) -> DecoderOutput:
 
         return self.rendering_fn(gaussians, extrinsics, intrinsics, near, far, image_shape, depth_mode, cam_rot_delta, cam_trans_delta,
@@ -652,6 +723,7 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
                                  dyn_scale_mult=dyn_scale_mult,
                                  render_max_scale_frac=render_max_scale_frac,
                                  src_window=src_window, src_window_dyn=src_window_dyn,
+                                 dyn_facing_min=dyn_facing_min,
                                  per_frame_compositing=per_frame_compositing,
                                  dyn_opacity_comp=dyn_opacity_comp)
 

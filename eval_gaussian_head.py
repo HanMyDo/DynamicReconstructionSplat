@@ -474,6 +474,7 @@ def evaluate(model, dataloader, config, output_dir, device, max_image_batches=50
             render_max_scale_frac=getattr(config, "render_max_scale_frac", 0.0),
             src_window=getattr(config, "src_window", 0),
             src_window_dyn=getattr(config, "src_window_dyn", -1),
+            dyn_facing_min=getattr(config, "dyn_facing_min", -1.0),
         )
         if infos.get("dyn_group_pred") is not None:
             n_group_motion += 1
@@ -1270,6 +1271,19 @@ def main():
                              "ply_export has used since September (0.011), which removes "
                              "1.9%% of Gaussians and 31%% of the visible haze -- but that "
                              "one never touched a rendered metric. 0 disables.")
+    parser.add_argument("--dyn_facing_min", type=float, default=-1.0,
+                        help="Back-face gate for MOVERS, a cosine against the target camera: "
+                             "-1 = off, 0 drops strictly back-facing patches, 0.2-0.4 also "
+                             "drops grazing ones. The gaussians are near-flat discs (median "
+                             "max/min axis ratio 1573, mid/min 501) so the thinnest axis is a "
+                             "real surface normal. NOT another coverage knob: under --eval_loo "
+                             "the person is assembled from ~15 copies taken at different times "
+                             "AND angles, and relocation moves a gaussian without re-orienting "
+                             "it, so a patch of someone's back arrives still facing backwards "
+                             "and renders through their front. It removes no front-facing "
+                             "surface, so it attacks the softness that survived the relocation "
+                             "oracle (+0.64 and still soft) instead of trading coverage against "
+                             "artefacts as the gate, unsup_gain, motion-fill and src_window did.")
     parser.add_argument("--src_window_dyn", type=int, default=-1,
                         help="Source-frame window for DYNAMIC gaussians only; static "
                              "keeps --src_window. <0 = follow --src_window (previous "
@@ -1716,6 +1730,7 @@ def main():
         render_max_scale_frac=args.render_max_scale_frac,
         src_window=args.src_window,
         src_window_dyn=args.src_window_dyn,
+        dyn_facing_min=args.dyn_facing_min,
     )
 
     print(f"\nLoading {args.split} dataset...")
@@ -1769,6 +1784,7 @@ def main():
             "render_max_scale_frac": args.render_max_scale_frac,
             "src_window": args.src_window,
             "src_window_dyn": args.src_window_dyn,
+            "dyn_facing_min": args.dyn_facing_min,
             "backbone": "vggt" if args.no_vggt4d else "vggt4d",
             "mode": "finetuned" if args.checkpoint else "baseline",
             "per_frame_dynamic": args.per_frame_dynamic,
