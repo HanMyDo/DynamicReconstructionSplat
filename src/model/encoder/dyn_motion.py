@@ -1080,7 +1080,13 @@ def knn_flow_displacement(
             # has no subsample bias. Deliberately NOT a nearest-neighbour distance
             # measured on a subsample: that reads high by the subsampling factor and
             # has already produced one retracted result in this project.
-            _ext = (G.max(dim=0).values - G.min(dim=0).values).clamp_min(1e-9)
+            _ext = (G.max(dim=0).values - G.min(dim=0).values)
+            # FLOOR THE DEGENERATE AXES. A product of extents collapses to ~0 when the
+            # cloud is planar or collinear, and then every gaussian lands in its own
+            # voxel and the fill is silently inert -- the same symptom as taking the
+            # scale from the tracks, with a different cause. Real dynamic gaussians lie
+            # on SURFACES, so one axis is routinely much thinner than the others.
+            _ext = _ext.clamp_min(_ext.max() / 100.0).clamp_min(1e-9)
             _gsp = float((_ext.prod() / max(int(G.shape[0]), 1)).clamp_min(1e-30) ** (1.0 / 3.0))
             _gsp_i = _gsp
             _flink = max(fill_link * _gsp, 1e-9)
