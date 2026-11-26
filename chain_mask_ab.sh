@@ -44,7 +44,7 @@ F="--per_frame_dynamic --dyn_conf_opacity 4.0 --track_dynamic --dyn_motion_knn 8
 --dyn_motion_strict --dyn_motion_pred_bandwidth 1.5 --dyn_motion_tracker raft \
 --dyn_motion_max_disp_mult 3.0 --dyn_opacity_comp 1.0 --bg_color 1 1 1 \
 --eval_loo --image_views 8 --dyn_unsupported static --dyn_opacity_gain 4 \
---dyn_unsup_gain 0.25 --render_max_scale_frac 0.011"
+--dyn_unsup_gain 0.25 --render_max_scale_frac 0.011 --dyn_nearest_source 4"
 
 # Window SAMPLING, not render config: starts 0,5,10..., which is exactly the set
 # MoVieS/NeoVerse slide through, and ~5x cheaper than step 1. Identical in both

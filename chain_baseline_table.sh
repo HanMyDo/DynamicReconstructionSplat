@@ -49,12 +49,18 @@ cd "${REPO}"
 # background; clipping only the movers (static keeps every contributor) is worth
 # crowd +1.19 psnr / +2.66 static and TUM xyz +0.16 / +0.41, 2/2 with renders
 # agreeing. Largest single gain this week.
+# --dyn_nearest_source 4 added Nov 26: each dynamic gaussian is composited from its
+# 4 nearest source frames instead of all of them. Five sequences, one variable:
+# overall/static/ssim/lpips 5/5 positive (mean +0.28 / +0.58 / +0.010 / -0.011),
+# dynamic a wash (2/5, +0.07). Renders agree -- the xyz ceiling smear disappears and
+# people are equal or better, so the nf16 "thinner not sharper" failure of
+# --dyn_nearest_source 1/2 does not recur at 4.
 F="--per_frame_dynamic --dyn_conf_opacity 4.0 --track_dynamic --dyn_motion_knn 8 \
 --dyn_motion_strict --dyn_motion_pred_bandwidth 1.5 --dyn_motion_tracker raft \
 --dyn_motion_max_disp_mult 3.0 --dyn_opacity_comp 1.0 --bg_color 1 1 1 \
 --eval_loo --image_views 8 --dyn_unsupported static --dyn_opacity_gain 4 \
 --dyn_unsup_gain 0.25 --render_max_scale_frac 0.011 --image_size 392 518 \
---src_window_dyn 4"
+--src_window_dyn 4 --dyn_nearest_source 4"
 
 A512="${A512:-output_dyn_masks_precomputed_cs512_r518_st3_fs1_m6_flow_otsu2_glob_samvid_gvid}"
 A256="${A256:-output_dyn_masks_precomputed_cs256_r518_st3_fs1_m6_flow_otsu2_glob_samvid_gvid_an16}"

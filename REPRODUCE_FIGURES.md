@@ -14,6 +14,47 @@ F="--per_frame_dynamic --track_dynamic --dyn_motion_knn 8 --dyn_motion_strict \
    --dyn_motion_max_disp_mult 3.0 --dyn_opacity_comp 1.0 --bg_color 1 1 1"
 ```
 
+## ⭐⭐ ADOPTED Nov 26 2026 — `--dyn_nearest_source 4`  ← THE CURRENT RECIPE
+
+Everything adopted to date, in one block. Copy THIS, not the dated blocks below, which each
+show only the state at their own date:
+
+```
+F="--per_frame_dynamic --dyn_conf_opacity 4.0 --track_dynamic --dyn_motion_knn 8 \
+   --dyn_motion_strict --dyn_motion_pred_bandwidth 1.5 --dyn_motion_tracker raft \
+   --dyn_motion_max_disp_mult 3.0 --dyn_opacity_comp 1.0 --bg_color 1 1 1 \
+   --eval_loo --image_views 8 --dyn_unsupported static --dyn_opacity_gain 4 \
+   --dyn_unsup_gain 0.25 --render_max_scale_frac 0.011 --image_size 392 518 \
+   --src_window_dyn 4 --dyn_nearest_source 4"
+```
+
+**Evidence.** Five sequences, one variable, both arms in one allocation, held out
+(`--eval_loo`), at the nf32 stride-4 sampling point. Deltas are ns4 minus control:
+
+| sequence | overall | dynamic | static | ssim | lpips |
+|---|---|---|---|---|---|
+| crowd | +0.063 | **+1.108** | +0.042 | +0.0012 | −0.0014 |
+| synchronous2 | +0.271 | −0.001 | +0.638 | +0.0026 | −0.0020 |
+| halfsphere | +0.185 | +0.061 | +0.404 | +0.0162 | −0.0201 |
+| balloon | +0.488 | −0.200 | +0.855 | +0.0121 | −0.0137 |
+| xyz | +0.404 | −0.625 | +0.940 | +0.0164 | −0.0192 |
+| **mean** | **+0.282** | +0.069 | **+0.576** | **+0.0097** | **−0.0113** |
+
+**overall, static, ssim and lpips are 5/5; dynamic is a wash (2/5).** That is the bar
+`--src_window_dyn 2` failed (1/10 on overall), which is why five sequences were required.
+
+**Renders agree, and that is what decided it.** The control throws a long dark smear across the
+xyz ceiling and doubles the scaffolding; with ns4 the trail is gone and the trusses are sharp,
+while the right-hand person gains readable shirt stripes and legs. balloon goes from hazy to
+sharp across the whole lab. ⚠️ The nf16 failure mode of `--dyn_nearest_source 1/2` — a THINNER
+person flattering ssim/lpips — does NOT reappear at 4: people are equal or better in every frame.
+
+⚠️ One regression: on balloon the misplaced balloon ghost becomes brighter and more conspicuous
+(that is the −0.200 dynamic). ns4 does not fix relocation; it stops bad relocation from damaging
+the background.
+
+⛔ Not a completion mechanism. The person is still soft in every frame.
+
 ## ⭐ ADOPTED Oct 14 2026 — `--render_max_scale_frac 0.011`
 
 The full current recipe, which is what the horizon ladders use (the `F` above predates the
