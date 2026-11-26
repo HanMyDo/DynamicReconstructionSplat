@@ -35,9 +35,7 @@ CKPT=$(ls -t ${REPO}/ckpts/checkpoint_best_ep5_*.pt 2>/dev/null | head -1)
 source /opt/miniforge3/etc/profile.d/conda.sh; conda activate dynrec
 export PATH=/usr/local/cuda-12.9/bin:${PATH} CUDA_HOME=/usr/local/cuda-12.9
 export OMP_NUM_THREADS=8 MKL_NUM_THREADS=8 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-FREE=$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits | sort -nr | head -1 | tr -d ' ')
-PICK=$(nvidia-smi --query-gpu=index,memory.free --format=csv,noheader,nounits | sort -t, -k2 -nr | head -1 | cut -d, -f1 | tr -d ' ')
-export CUDA_VISIBLE_DEVICES=${PICK}
+. "${REPO}/slurm_gpu_env.sh"   # sets CUDA_VISIBLE_DEVICES, PICK, FREE
 echo "GPU ${PICK}: ${FREE} MiB free | ckpt [${CKPT:-NONE}] | batch ${BATCH} x ${NWIN} windows"
 [ "${FREE}" -lt 12000 ] && { echo "ERROR: only ${FREE} MiB free"; exit 1; }
 

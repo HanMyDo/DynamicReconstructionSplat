@@ -52,12 +52,10 @@ export CUDA_HOME=/usr/local/cuda-12.9
 export OMP_NUM_THREADS=8 MKL_NUM_THREADS=8
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
-# Refuse to start on a card another process is occupying (slurm does not see them
-# all on this node) -- otherwise every config OOMs and the job burns hours to
-# produce nothing.
-FREE=$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits | sort -nr | head -1 | tr -d ' ')
-PICK=$(nvidia-smi --query-gpu=index,memory.free --format=csv,noheader,nounits | sort -t, -k2 -nr | head -1 | cut -d, -f1 | tr -d ' ')
-export CUDA_VISIBLE_DEVICES=${PICK}
+# Refuse to start when the ALLOCATED card is already occupied -- otherwise every
+# config OOMs and the job burns hours to produce nothing. We no longer move to a
+# different card in that case: moving is what made two jobs collide.
+. "${REPO}/slurm_gpu_env.sh"   # sets CUDA_VISIBLE_DEVICES, PICK, FREE
 echo "GPU: local index ${PICK}, ${FREE} MiB free"
 [ "${FREE}" -lt "${MIN_FREE}" ] && { echo "ERROR: only ${FREE} MiB free (need ${MIN_FREE}); requeue when a card frees."; nvidia-smi; exit 1; }
 

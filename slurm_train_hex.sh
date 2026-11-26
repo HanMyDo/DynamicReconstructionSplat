@@ -78,9 +78,7 @@ if [ "${WANDB_MODE}" = "online" ] && ! grep -q "api.wandb.ai" "${HOME}/.netrc" 2
 fi
 export WANDB_DIR=${REPO}/wandb
 
-FREE=$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits | sort -nr | head -1 | tr -d ' ')
-PICK=$(nvidia-smi --query-gpu=index,memory.free --format=csv,noheader,nounits | sort -t, -k2 -nr | head -1 | cut -d, -f1 | tr -d ' ')
-export CUDA_VISIBLE_DEVICES=${PICK}
+. "${REPO}/slurm_gpu_env.sh"   # sets CUDA_VISIBLE_DEVICES, PICK, FREE
 echo "GPU ${PICK}: ${FREE} MiB free"
 [ "${FREE}" -lt 30000 ] && { echo "ERROR: only ${FREE} MiB free; training needs headroom."; exit 1; }
 
