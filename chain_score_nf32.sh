@@ -22,11 +22,11 @@
 # where the person actually is. Say so in the writeup.
 #
 # USAGE:  ./chain_score_nf32.sh            # tag rb2
-#         TAG=rb3 ./chain_score_nf32.sh
+#         TAG=lad8 S=8 ./chain_score_nf32.sh   # one rung of the ladder
 # =============================================================================
 set -uo pipefail
 TAG="${TAG:-rb2}"
-S=4
+S="${S:-4}"          # window stride; nf32 span = 31*S/30 seconds
 HALF=16                      # frames//2 at nf32 -- see above
 REPO="${REPO:-${HOME}/DynamicReconstructionSplat}"
 MO="${HOME}/data/mask_out"
@@ -42,6 +42,7 @@ ROWS=(
 "rgbd_bonn_balloon|balloon|${BONN}|${A512}"
 "rgbd_bonn_synchronous2|sync2|${BONN}|${A512}"
 "rgbd_bonn_crowd|crowd|${BONN}|${A256}"
+"rgbd_bonn_removing_obstructing_box|removing|${BONN}|${A256}"
 "rgbd_dataset_freiburg3_walking_xyz|tum_xyz|${TUM}|${A256}"
 "rgbd_dataset_freiburg3_walking_halfsphere|tum_halfsphere|${TUM}|${A128}"
 "dynrep_0cde48|dynrep_0cde48|${BONN}|${A512}"
@@ -54,8 +55,8 @@ for ROW in "${ROWS[@]}"; do
   OURS="output_probe_frozen_ours_${SHORT}_${TAG}/images"
   [ -d "${OURS}" ] || { echo "MISSING ours: ${OURS}"; continue; }
   for B in neoverse movies; do
-    [ "${B}" = "movies" ] && SRC="${HOME}/MoVieS/out/nf32_${KEY}_s4" \
-                          || SRC="${HOME}/NeoVerse/out/nf32_${KEY}_s4"
+    [ "${B}" = "movies" ] && SRC="${HOME}/MoVieS/out/nf32_${KEY}_s${S}" \
+                          || SRC="${HOME}/NeoVerse/out/nf32_${KEY}_s${S}"
     [ "${B}" = "movies" ] && LABEL="MoVieS" || LABEL="NeoVerse"
     [ -d "${SRC}" ] || { echo "MISSING baseline: ${SRC}"; continue; }
     OUT="cmp_${TAG}/${KEY}_${B}_s${S}"
@@ -81,14 +82,16 @@ for ROW in "${ROWS[@]}"; do
 done
 
 # ---- one table, parsed from the logs so it cannot disagree with them --------
-python - "${TAG}" <<'PY'
+S="${S}" python - "${TAG}" <<'PY'
 import glob, re, sys
 tag = sys.argv[1]
 row_re = re.compile(r'^(overall|dynamic|static|LPIPS|SSIM)\s+(-?\d+\.\d+)\s+(-?\d+\.\d+)\s+([+-]\d+\.\d+)')
 pair_re = re.compile(r'paired (\d+) frames')
 recs = {}
-for f in sorted(glob.glob("slurm_logs/nf32_*_s4.txt")):
-    key = f.split("nf32_", 1)[1].rsplit("_s4.txt", 1)[0]
+import os
+S = os.environ.get("S", "4")
+for f in sorted(glob.glob(f"slurm_logs/nf32_*_s{S}.txt")):
+    key = f.split("nf32_", 1)[1].rsplit(f"_s{S}.txt", 1)[0]
     seq, base = key.rsplit("_", 1)
     d = recs.setdefault((seq, base), {})
     for line in open(f):
@@ -98,7 +101,7 @@ for f in sorted(glob.glob("slurm_logs/nf32_*_s4.txt")):
         p = pair_re.search(line)
         if p:
             d["n"] = int(p.group(1))
-out = ["# Ours vs baselines at nf32 stride 4 (" + tag + ")", "",
+out = [f"# Ours vs baselines at nf32 stride {S} (span {31*int(S)/30:.1f} s) -- {tag}", "",
        "Deltas are OURS MINUS BASELINE; for LPIPS, negative favours us.",
        "⚠️ both arms scored under OUR masks. ⚠️ MoVieS has no Dynamic Replica arm",
        "(no correct intrinsics preset).", "",
