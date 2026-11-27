@@ -66,13 +66,17 @@ for ROW in "${ROWS[@]}"; do
       --bonn_rgb "${ROOT}/${SEQ}/rgb" \
       --ours_offset $(( HALF * S )) \
       --mask_dir "${MO}/${MASK}/${SEQ}/masks" \
-      --out "${OUT}" 2>&1 | grep -E "paired|SKIPPED|indexed" || true
+      --out "${OUT}" 2>&1 | grep -E "paired|SKIPPED|indexed" \
+        | tee "slurm_logs/nf32_${KEY}_${B}_s${S}.txt" || true
+    # NOTE the pair step WRITES the log and the score step APPENDS to it: the
+    # "paired N" count lives in the pairing output, and the table needs it in the
+    # same file it parses, or every row reports n=?.
     echo "=== SCORE ${KEY} vs ${LABEL}"
     python tools/compare_masked.py \
       --gt_dir "${OUT}/gt" --a "${OUT}/ours" --a_panels 2 --a_label ours \
       --b "${OUT}/movies" --b_label "${LABEL}" \
       --mask_dir "${OUT}/mask" --lpips \
-      2>&1 | tee "slurm_logs/nf32_${KEY}_${B}_s${S}.txt"
+      2>&1 | tee -a "slurm_logs/nf32_${KEY}_${B}_s${S}.txt"
   done
 done
 
