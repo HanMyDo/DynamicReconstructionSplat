@@ -143,6 +143,15 @@ OUT_DIR="${OUT_ROOT}/output_dyn_masks_precomputed_cs${CHUNK_SIZE}_r${DET_RES}_st
 [ "${VETO}" != "0" ] && OUT_DIR="${OUT_DIR}_veto$(echo ${VETO} | tr '.' 'p')w${SUPW}"
 [ "${FLOOR}" != "0" ] && OUT_DIR="${OUT_DIR}_fl$(echo ${FLOOR} | tr '.' 'p')"
 # the panels are a diagnostic, not a different mask set -- no suffix
+# TAG: free suffix so a run can be parked beside an existing mask set instead of
+# into it. The CONTROL arm of an A/B has every knob at its adopted value and so
+# earns no suffix of its own -- it would land straight on the adopted masks and
+# overwrite them. That is not harmless: SAM seeding is not reproducible run to
+# run (halfsphere, same args, Oct 19 vs Nov 28: 33 vs 31 objects, and the growth
+# rails rejected 62+30 object-frames vs 0+0), so re-running the adopted recipe
+# silently changes the masks behind every number already published from it.
+# Export TAG=ctl for such a control.
+[ -n "${TAG}" ] && OUT_DIR="${OUT_DIR}_${TAG}"
 
 mkdir -p "${REPO}/slurm_logs" "${OUT_ROOT}"
 cd "${REPO}"
