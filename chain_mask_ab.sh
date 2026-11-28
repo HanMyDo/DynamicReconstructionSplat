@@ -37,14 +37,40 @@ BONN="${HOME}/data/bonn/rgbd_bonn_dataset"
 TUM="${HOME}/data/tum"
 cd "${REPO}"
 
-# The adopted config, copied verbatim from REPRODUCE_FIGURES.md "ADOPTED Oct 14
-# 2026". Do NOT rebuild it from memory: a from-memory version once dropped
+# The adopted config, copied verbatim from REPRODUCE_FIGURES.md "THE CURRENT
+# RECIPE". Do NOT rebuild it from memory: a from-memory version once dropped
 # --dyn_conf_opacity 4.0, which is worth +0.52 psnr.
+#
+# ⚠️ This was STALE until Nov 28 2026: it held the Oct 14 config and so missed
+# --image_size 392 518 (adopted Oct 18 as a CORRECTNESS fix -- the 448 square
+# squashes a 4:3 scene by 25% and sits off VGGT's training distribution) and
+# --src_window_dyn 4. The Oct 16 four-sequence mask table was produced with the
+# older F and cannot be reproduced from this script as it now stands.
 F="--per_frame_dynamic --dyn_conf_opacity 4.0 --track_dynamic --dyn_motion_knn 8 \
 --dyn_motion_strict --dyn_motion_pred_bandwidth 1.5 --dyn_motion_tracker raft \
 --dyn_motion_max_disp_mult 3.0 --dyn_opacity_comp 1.0 --bg_color 1 1 1 \
 --eval_loo --image_views 8 --dyn_unsupported static --dyn_opacity_gain 4 \
---dyn_unsup_gain 0.25 --render_max_scale_frac 0.011 --dyn_nearest_source 4"
+--dyn_unsup_gain 0.25 --render_max_scale_frac 0.011 --image_size 392 518 \
+--src_window_dyn 4 --dyn_nearest_source 4"
+
+# F with the four opacity flags REMOVED. They multiply opacity INSIDE the mask,
+# so two mask sets of different area differ in global brightness and density
+# whichever one is correct -- Trap 2 of the Oct 15 crowd validation. Any arm that
+# changes mask AREA (the depth veto changes it by ~12%) must be judged here too,
+# not on the tuned config alone. Use with NEUTRAL=1.
+FN="--per_frame_dynamic --track_dynamic --dyn_motion_knn 8 \
+--dyn_motion_strict --dyn_motion_pred_bandwidth 1.5 --dyn_motion_tracker raft \
+--dyn_motion_max_disp_mult 3.0 --bg_color 1 1 1 \
+--eval_loo --image_views 8 --dyn_unsupported static \
+--render_max_scale_frac 0.011 --image_size 392 518 \
+--src_window_dyn 4 --dyn_nearest_source 4"
+# An if-block, not `[ ... ] && ...`: the latter returns 1 when NEUTRAL is unset,
+# which is fine today but becomes a silent early exit the moment anyone adds
+# `set -e` to line 26. That exact pattern just killed both veto arms of this A/B.
+if [ "${NEUTRAL:-0}" = "1" ]; then
+  F="${FN}"
+  TAG="${TAG}n"
+fi
 
 # Window SAMPLING, not render config: starts 0,5,10..., which is exactly the set
 # MoVieS/NeoVerse slide through, and ~5x cheaper than step 1. Identical in both
