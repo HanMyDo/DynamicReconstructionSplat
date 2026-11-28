@@ -151,7 +151,9 @@ OUT_DIR="${OUT_ROOT}/output_dyn_masks_precomputed_cs${CHUNK_SIZE}_r${DET_RES}_st
 # rails rejected 62+30 object-frames vs 0+0), so re-running the adopted recipe
 # silently changes the masks behind every number already published from it.
 # Export TAG=ctl for such a control.
-[ -n "${TAG}" ] && OUT_DIR="${OUT_DIR}_${TAG}"
+# `${TAG:-}`, not `${TAG}`: this script runs under `set -u`, so a bare reference
+# is fatal for every run that does NOT set it -- i.e. every arm except a control.
+[ -n "${TAG:-}" ] && OUT_DIR="${OUT_DIR}_${TAG}"
 
 mkdir -p "${REPO}/slurm_logs" "${OUT_ROOT}"
 cd "${REPO}"
