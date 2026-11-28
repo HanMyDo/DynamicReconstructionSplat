@@ -85,6 +85,16 @@ def _depth_split_keep(mask: np.ndarray, depth: np.ndarray, support: np.ndarray,
     d = np.asarray(depth, dtype=np.float32)
     if d.shape != mask.shape:
         return mask, 0
+    # ABSTAIN WITHOUT EVIDENCE. This veto is COMPARATIVE: it keeps the parts the
+    # detector fired near and drops the parts it did not. If it fired nowhere on
+    # this object, there is no comparison to make, and dropping every part would
+    # not be a depth veto at all -- it would be the seed-support gate at maximum
+    # strength, which the adopted recipe deliberately runs with OFF. Measured when
+    # this guard was missing: TUM halfsphere seeds are empty on 35.8% of frames,
+    # and the veto emptied 24.1% of all frames outright (adopted: 0.0%), deleting
+    # the mover on exactly the frames where no detection was nearby in time.
+    if not (mask & support).any():
+        return mask, 0
     ref = np.maximum(np.abs(d), 1e-6)
     edge = np.zeros(mask.shape, dtype=bool)
     gx = np.abs(np.diff(d, axis=1)) > jump * ref[:, :-1]

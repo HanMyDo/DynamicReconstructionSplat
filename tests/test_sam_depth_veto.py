@@ -78,9 +78,37 @@ def test_both_parts_supported_survive():
     print("[4] a seeded far part is kept")
 
 
+def test_no_support_anywhere_abstains():
+    """THE REGRESSION THIS PINS. With no seed anywhere on the object, every part
+    fails the support test, and a veto that then drops them all is not a depth
+    veto -- it is the seed-support gate at full strength, which the adopted recipe
+    runs with OFF. Measured on TUM halfsphere before the guard: seeds are empty on
+    35.8% of frames and the veto emptied 24.1% of ALL frames (adopted: 0.0%), i.e.
+    it deleted the mover wherever no detection was nearby in time. With no evidence
+    to compare parts, the only honest action is to leave the mask alone."""
+    depth, person, _, fused = _scene()
+    support = np.zeros_like(person)              # the detector fired nowhere
+    kept, dropped = _depth_split_keep(fused, depth, support, jump=0.08, frac=0.02)
+    assert dropped == 0, "no evidence must mean no parts dropped"
+    assert kept.sum() == fused.sum(), "no evidence must leave the mask untouched"
+    print("[5] no support anywhere -> abstain, not delete")
+
+
+def test_support_elsewhere_in_frame_still_abstains():
+    """A detection on a DIFFERENT object does not license a verdict on this one."""
+    depth, person, _, fused = _scene()
+    support = np.zeros_like(person)
+    support[55:60, 55:60] = True                 # fires, but nowhere on `fused`
+    kept, dropped = _depth_split_keep(fused, depth, support, jump=0.08, frac=0.02)
+    assert dropped == 0 and kept.sum() == fused.sum()
+    print("[6] support on another object -> still abstain")
+
+
 if __name__ == "__main__":
     test_veto_removes_the_unsupported_far_part()
     test_veto_keeps_a_supported_object_whole()
     test_veto_is_off_by_default_value()
     test_both_parts_supported_survive()
+    test_no_support_anywhere_abstains()
+    test_support_elsewhere_in_frame_still_abstains()
     print("OK")
