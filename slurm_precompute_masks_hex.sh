@@ -99,6 +99,13 @@ SUPF=${27:-0}
 # adaptive threshold falls under it and the seed spills onto the wall. The bound is
 # RAFT's own error (~1-2px). Same constant for every sequence.
 FLOOR=${28:-0}
+# VETO: relative depth jump at which a PROPAGATED object is CUT, keeping only the
+# parts the detector fired near in time. The rails above cap SIZE and the support
+# gate asks whether an OBJECT is moving; neither can see that one object spans a
+# person AND the ceiling behind them, because in 2D they are adjacent and SAM is
+# never shown depth. Measured: halfsphere frame 457, seed area 0.0062 -> ~15% of
+# the frame. Needs STAGES=3 (Stage-1 depth) and SAMG!=0. Try 0.08.
+VETO=${29:-0}
                       # 1 = original (topmost class only -> a person's arm, not their torso).
                       # 2 = top two classes -> the whole object. THIS is the coverage knob;
                       # the aggregate is not, because the threshold adapts to the scores.
@@ -133,6 +140,7 @@ OUT_DIR="${OUT_ROOT}/output_dyn_masks_precomputed_cs${CHUNK_SIZE}_r${DET_RES}_st
 [ "${CONFQ}" != "0" ] && OUT_DIR="${OUT_DIR}_dc$(echo ${CONFQ} | tr '.' 'p')"
 [ "${MADK}" != "0" ] && OUT_DIR="${OUT_DIR}_mad$(echo ${MADK} | tr '.' 'p')"
 [ "${SUPF}" != "0" ] && OUT_DIR="${OUT_DIR}_sup$(echo ${SUPF} | tr '.' 'p')w${SUPW}"
+[ "${VETO}" != "0" ] && OUT_DIR="${OUT_DIR}_veto$(echo ${VETO} | tr '.' 'p')w${SUPW}"
 [ "${FLOOR}" != "0" ] && OUT_DIR="${OUT_DIR}_fl$(echo ${FLOOR} | tr '.' 'p')"
 # the panels are a diagnostic, not a different mask set -- no suffix
 
@@ -199,6 +207,7 @@ python precompute_dyn_masks.py \
     --mask_thresh_min "${FLOOR}" \
     --sam_support_window "${SUPW}" \
     --sam_support_frac "${SUPF}" \
+    --sam_depth_veto "${VETO}" \
     $( [ "${RESID}" != "0" ] && echo --save_residual ) \
     --mask_propagate "${PROP}" \
     --mask_aggregate "${AGG}" \

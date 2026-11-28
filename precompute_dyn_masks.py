@@ -376,6 +376,19 @@ def main():
     ap.add_argument("--sam_support_window", type=int, default=0,
                     help="half-width, in frames, of the window a propagated object may "
                          "draw seed support from. Used with --sam_support_frac.")
+    ap.add_argument("--sam_depth_veto", type=float, default=0.0,
+                    help="RELATIVE depth jump (|dz| > v*z) at which a propagated SAM "
+                         "object is CUT, keeping only the parts the detector fired "
+                         "near in time. Fixes the one failure no 2D rail can: SAM "
+                         "fuses the ceiling behind a person into the person's object, "
+                         "the per-object support gate then passes the whole thing on "
+                         "the person's seeds, and a ceiling strip is not 'too big'. "
+                         "Measured case: TUM halfsphere frame 457, seed area 0.0062 "
+                         "-> mask over ~15%% of the frame. SAM never sees depth, so "
+                         "this is information it cannot have. Try 0.08. Needs "
+                         "--sam_video_global and --stages 3; pair with "
+                         "--sam_support_window (the time window support is drawn "
+                         "from), which works even with --sam_support_frac 0.")
     ap.add_argument("--sam_support_frac", type=float, default=0.0,
                     help="0 = off. >0 drops a propagated object-frame unless this "
                          "fraction of its area was actually SEEDED within "
@@ -621,6 +634,7 @@ def main():
 
     per_frame_fraction = {}
     deferred_seeds = {}          # frame idx -> seed mask, for --sam_video_global
+    deferred_depth = {}          # frame idx -> Stage-1 depth, for --sam_depth_veto
     deferred_res = {}            # frame idx -> flow residual, for --global_flow_thresh
     for ci, (idxs, emit_idxs) in enumerate(passes):
         chunk_paths = [frame_paths[i] for i in idxs]
@@ -854,9 +868,21 @@ def main():
         # than one chunk. See --sam_video_global for the measurement.
         if args.sam_video and args.sam_video_global:
             _emit = set(emit_idxs)
+            # float16: 900 frames of 392x518 depth is 0.37 GB here against 0.73 GB
+            # as float32, and the veto thresholds a RELATIVE gradient, which does not
+            # need more precision than that.
+            _dv = None
+            if args.sam_depth_veto > 0:
+                try:
+                    _dv = depth_s1[0].squeeze(-1).detach().float().cpu().numpy()
+                except NameError:
+                    print("[sam-video] --sam_depth_veto needs --stages 3 for Stage-1 "
+                          "depth; continuing without the veto", flush=True)
             for i in range(n):
                 if idxs[i] in _emit:
                     deferred_seeds[idxs[i]] = (dyn_mask[0, i].numpy() > 0.5)
+                    if _dv is not None:
+                        deferred_depth[idxs[i]] = _dv[i].astype(np.float16)
             continue
 
         if args.sam_complete or args.sam_video:
@@ -960,6 +986,15 @@ def main():
                                       .transpose(0, 2, 3, 1) * 255).astype(np.uint8)
         if _prop:
             from src.model.encoder.sam_video_complete import sam_video_complete
+            _depth_stack = None
+            if args.sam_depth_veto > 0:
+                if len(deferred_depth) == len(order):
+                    _depth_stack = np.stack([deferred_depth[i] for i in order]
+                                            ).astype(np.float32)
+                else:
+                    print(f"[sam-video] depth collected for {len(deferred_depth)} of "
+                          f"{len(order)} frames; veto needs all of them, skipping",
+                          flush=True)
             grown = sam_video_complete(
                 imgs, seeds, model_id=args.sam_model, ckpt=args.sam_ckpt,
                 device=str(device), max_anchors=args.sam_anchors,
@@ -967,7 +1002,10 @@ def main():
                 max_growth=args.sam_max_growth,
                 max_frame_frac=args.sam_max_frame_frac,
                 support_window=args.sam_support_window,
-                support_frac=args.sam_support_frac)
+                support_frac=args.sam_support_frac,
+                depth=_depth_stack, depth_jump=args.sam_depth_veto)
+            del _depth_stack
+            deferred_depth.clear()
         else:
             grown = seeds          # --global_flow_thresh alone: seeds ARE the mask
         if (args.mask_close or args.mask_fill or args.mask_min_area or args.mask_dilate):
@@ -1005,6 +1043,7 @@ def main():
         "mask_thresh_min": args.mask_thresh_min,
         "sam_support_window": args.sam_support_window,
         "sam_support_frac": args.sam_support_frac,
+        "sam_depth_veto": args.sam_depth_veto,
         "mask_motion_gate": args.mask_motion_gate,
         "mask_close": args.mask_close,
         "mask_fill": args.mask_fill,

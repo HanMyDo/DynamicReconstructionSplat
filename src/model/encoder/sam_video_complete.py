@@ -57,6 +57,73 @@ def _components(mask: np.ndarray, min_area: int) -> List[np.ndarray]:
     return out
 
 
+def _depth_split_keep(mask: np.ndarray, depth: np.ndarray, support: np.ndarray,
+                      jump: float, frac: float) -> Tuple[np.ndarray, int]:
+    """Cut `mask` at depth discontinuities and keep only the parts with seed support.
+
+    THE FAILURE THIS EXISTS FOR. The seed-support gate below is PER OBJECT, so an
+    object that spans a person AND the ceiling behind them passes on the person's
+    seeds alone and carries the ceiling through: measured on TUM halfsphere frame
+    457, a seed area of 0.0062 became a mask over ~15% of the frame. The growth
+    rails cannot catch it either -- they ask "too big?", and a ceiling strip is a
+    reasonable size. Nothing in the 2D evidence distinguishes the two: they are
+    adjacent in the image, and SAM is never shown depth.
+
+    But a person-to-ceiling leak is a large DEPTH discontinuity, and depth is
+    something the pipeline already has. So: delete pixels lying on a relative depth
+    edge, label what remains, and keep a part only where the detector actually fired
+    near it in time. The far part of a leak has no seeds anywhere and goes.
+
+    The threshold is RELATIVE (|dz| > jump * z) because a 10 cm step matters at 1 m
+    and does not at 8 m -- the same reasoning the residual panel's depth-edge column
+    uses.
+
+    Returns (kept mask, number of parts dropped).
+    """
+    if jump <= 0 or depth is None:
+        return mask, 0
+    d = np.asarray(depth, dtype=np.float32)
+    if d.shape != mask.shape:
+        return mask, 0
+    ref = np.maximum(np.abs(d), 1e-6)
+    edge = np.zeros(mask.shape, dtype=bool)
+    gx = np.abs(np.diff(d, axis=1)) > jump * ref[:, :-1]
+    gy = np.abs(np.diff(d, axis=0)) > jump * ref[:-1, :]
+    edge[:, :-1] |= gx
+    edge[:, 1:] |= gx
+    edge[:-1, :] |= gy
+    edge[1:, :] |= gy
+    core = mask & ~edge
+    if not core.any():
+        return mask, 0                      # all edge: no evidence to split on
+    try:
+        import cv2
+        n_lab, lab = cv2.connectedComponents(core.astype(np.uint8))
+    except Exception:
+        return mask, 0
+    keep = np.zeros(mask.shape, dtype=bool)
+    dropped = 0
+    for i in range(1, n_lab):
+        part = lab == i
+        a = int(part.sum())
+        if a == 0:
+            continue
+        if int((part & support).sum()) >= max(1.0, frac * a):
+            keep |= part
+        else:
+            dropped += 1
+    if not keep.any():
+        return keep, dropped
+    # Give back the edge pixels that touch a kept part, so the veto trims the leak
+    # rather than eroding a one-pixel outline off every object it approves.
+    try:
+        import cv2
+        grow = cv2.dilate(keep.astype(np.uint8), np.ones((3, 3), np.uint8), 1) > 0
+    except Exception:
+        grow = keep
+    return mask & (keep | (grow & edge)), dropped
+
+
 def sam_video_complete(
     images: np.ndarray,
     seeds: np.ndarray,
@@ -70,6 +137,8 @@ def sam_video_complete(
     max_frame_frac: float = 0.5,
     support_window: int = 0,
     support_frac: float = 0.0,
+    depth: Optional[np.ndarray] = None,
+    depth_jump: float = 0.0,
 ) -> np.ndarray:
     """images [N,H,W,3] uint8, seeds [N,H,W] bool -> completed masks [N,H,W] bool.
 
@@ -173,8 +242,13 @@ def sam_video_complete(
     # the support of nearby frames, while a wall never had any. The fraction is small
     # on purpose -- a seated person is seeded by their ARM, a few percent of the mask
     # SAM grows from it -- so this tests "contains a detection", not "is mostly one".
+    # The veto needs the same "was anything detected near here in time?" map as the
+    # gate, so build it whenever EITHER is on. The adopted mask recipe runs with the
+    # gate off, and requiring the gate to enable the veto would make the comparison
+    # two variables instead of one.
+    _part_frac = support_frac if support_frac > 0 else 0.02
     seed_win = None
-    if support_window >= 0 and support_frac > 0:
+    if support_window >= 0 and (support_frac > 0 or depth_jump > 0):
         seed_win = np.empty_like(seeds, dtype=bool)
         for _f in range(n_frames):
             lo = max(0, _f - support_window)
@@ -183,6 +257,12 @@ def sam_video_complete(
 
     out = np.zeros((n_frames, H, W), dtype=bool)
     n_rej_grow = 0; n_rej_abs = 0; n_rej_sup = 0; area_rej_sup = 0
+    n_rej_part = 0; area_rej_part = 0
+    _veto = bool(depth_jump > 0 and depth is not None
+                 and len(depth) == n_frames)
+    if depth_jump > 0 and not _veto:
+        print('[sam-video] depth veto requested but no usable depth '
+              'was passed; continuing without it', flush=True)
     with torch.inference_mode(), _amp:
         for reverse in (False, True):                 # forward, then backward
             try:
@@ -222,6 +302,20 @@ def sam_video_complete(
                     if ref and a > max_growth * ref:
                         n_rej_grow += 1
                         continue
+                    # DEPTH VETO, before the per-object gate: split the object at
+                    # depth discontinuities and drop the parts the detector never
+                    # fired near. This is the only stage that can separate a person
+                    # from the ceiling fused into the same object -- the gate below
+                    # sees one object and the person's seeds vouch for all of it.
+                    if _veto and seed_win is not None:
+                        m, _nd = _depth_split_keep(m, depth[f_idx], seed_win[f_idx],
+                                                   depth_jump, _part_frac)
+                        if _nd:
+                            n_rej_part += _nd
+                            area_rej_part += a - int(m.sum())
+                        a = int(m.sum())
+                        if a == 0:
+                            continue
                     if seed_win is not None:
                         sup = int((m & seed_win[f_idx]).sum())
                         if sup < support_frac * a:
@@ -233,6 +327,11 @@ def sam_video_complete(
     out |= seeds.astype(bool)
     print(f"[sam-video] rejected {n_rej_grow} object-frames past {max_growth:g}x their "
           f"seed and {n_rej_abs} past {100 * max_frame_frac:g}% of the frame", flush=True)
+    if _veto:
+        print(f"[sam-video] depth veto (jump {depth_jump:g} relative) cut {n_rej_part} "
+              f"parts off objects, {area_rej_part / max(1, n_frames * H * W):.4f} of "
+              f"total pixel volume -- these are the background regions SAM fused into "
+              f"a mover and no 2D rail can see", flush=True)
     if seed_win is not None:
         print(f"[sam-video] seed-support gate dropped {n_rej_sup} object-frames "
               f"({area_rej_sup / max(1, n_frames * H * W):.4f} of total pixel volume) "
