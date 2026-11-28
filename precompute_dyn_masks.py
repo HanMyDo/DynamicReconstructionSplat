@@ -558,8 +558,12 @@ def main():
     # Stage-1 depth the veto needs, which is what lets the detection pass be SKIPPED
     # rather than recomputed and thrown away -- leaving it in would keep burning ~30
     # min a run AND keep the drift it exists to remove.
+    # np.savez APPENDS .npz when the name lacks it, so normalise once here or the
+    # load site and the save site disagree about the filename.
+    if args.seed_cache and not args.seed_cache.endswith(".npz"):
+        args.seed_cache += ".npz"
     _cache_seeds = _cache_depth = None
-    if args.seed_cache and os.path.exists(args.seed_cache):
+    if args.seed_cache and Path(args.seed_cache).exists():
         _z = np.load(args.seed_cache)
         _cache_seeds = np.unpackbits(_z["seeds"], axis=-1,
                                      count=int(_z["w"])).astype(bool)
@@ -1019,18 +1023,18 @@ def main():
         # that dies in SAM still leaves a reusable detection behind. Seeds are
         # bit-packed (27 MB for 1067 frames at 392x518, vs 217 MB as bool) and depth
         # is float16, which is ample for a RELATIVE depth-jump test.
-        if args.seed_cache and not os.path.exists(args.seed_cache):
+        if args.seed_cache and not Path(args.seed_cache).exists():
             _dsave = None
             if len(deferred_depth) == len(order):
                 _dsave = np.stack([deferred_depth[i] for i in order]).astype(np.float16)
-            os.makedirs(os.path.dirname(os.path.abspath(args.seed_cache)), exist_ok=True)
+            Path(args.seed_cache).resolve().parent.mkdir(parents=True, exist_ok=True)
             _kw = {"seeds": np.packbits(seeds, axis=-1),
                    "w": np.int64(seeds.shape[-1])}
             if _dsave is not None:
                 _kw["depth"] = _dsave
             np.savez(args.seed_cache, **_kw)
             print(f"[seed-cache] WROTE {args.seed_cache} "
-                  f"({os.path.getsize(args.seed_cache) / 1e6:.0f} MB, "
+                  f"({Path(args.seed_cache).stat().st_size / 1e6:.0f} MB, "
                   f"depth={'yes' if _dsave is not None else 'no'}). Point every arm of "
                   f"a mask A/B at this file so they share one detection.", flush=True)
             del _dsave
