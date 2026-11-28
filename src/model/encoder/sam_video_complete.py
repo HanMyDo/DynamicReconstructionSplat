@@ -237,6 +237,16 @@ def sam_video_complete(
     print(f"[sam-video] {len(anchors)} anchor frames, {obj} objects "
           f"(seeds empty on {100.0 * (seeds.reshape(n_frames, -1).sum(1) == 0).mean():.1f}% "
           f"of frames)", flush=True)
+    # WHICH anchors, and how big was each prompt. Two runs of the SAME arguments
+    # are not reproducible -- the flow residual drifts in its 3rd decimal, which
+    # moves the seed components, which can move an anchor. Under whole-sequence
+    # propagation one different anchor changes the mask over the ENTIRE sequence,
+    # so without this line a mask A/B cannot tell its own variable from a reseed.
+    # Measured on rgbd_bonn_crowd (60% of frames seedless): two runs differing
+    # only in the depth veto came out at mean area 0.179 vs 0.421, shifted nearly
+    # UNIFORMLY across all 16 time bins -- which no per-pixel veto can do.
+    print(f"[sam-video] anchors={anchors} "
+          f"prompt_areas={[anchor_area[k] for k in sorted(anchor_area)]}", flush=True)
 
     # SEED-SUPPORT GATE. The growth rails ask "is this object too big?"; they cannot
     # ask "is this object MOVING?", which is the question that matters once the seeds
