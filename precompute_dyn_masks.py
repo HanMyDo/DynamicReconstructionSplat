@@ -376,6 +376,15 @@ def main():
     ap.add_argument("--sam_support_window", type=int, default=0,
                     help="half-width, in frames, of the window a propagated object may "
                          "draw seed support from. Used with --sam_support_frac.")
+    ap.add_argument("--seed_cache", type=str, default="",
+                    help="Path to an .npz holding this sequence's detection seeds "
+                         "(and Stage-1 depth). Written if absent, LOADED if present -- "
+                         "and when loaded the whole detection pass is skipped. Use it "
+                         "for every arm of a mask A/B: detection is not reproducible "
+                         "(the flow residual drifts in its 3rd decimal, which can swap "
+                         "a SAM anchor and rewrite the mask over the entire sequence), "
+                         "and on halfsphere that confound measured 3-5x the effect "
+                         "under test. A cache is per sequence AND per --det_resolution.")
     ap.add_argument("--sam_depth_veto", type=float, default=0.0,
                     help="RELATIVE depth jump (|dz| > v*z) at which a propagated SAM "
                          "object is CUT, keeping only the parts the detector fired "
@@ -533,6 +542,39 @@ def main():
         stride = max(1, (len(frame_paths) + args.chunk_size - 1) // args.chunk_size)
     passes = build_passes(len(frame_paths), args.chunk_size, stride,
                           margin=(args.pass_margin if stride <= 1 else 0))
+    # ---------------------------------------------------------------- SEED CACHE
+    # WHY THIS EXISTS. Detection is not reproducible: the flow residual drifts in its
+    # third decimal between runs of identical arguments, that moves the seed
+    # components, and that can swap one of the SAM anchors. Under whole-sequence
+    # propagation one different anchor rewrites the mask over the entire sequence.
+    # Measured on TUM halfsphere, two runs differing only in the depth veto: 16.2% of
+    # the veto arm's mask was pixels the control did NOT have -- impossible for a veto,
+    # which only removes -- against the veto's own logged effect of 4.9% of pixel
+    # volume. IoU between the arms was 0.646. The confound was 3-5x the signal, so no
+    # single-variable mask A/B was possible at all.
+    #
+    # With a cache, every arm propagates from ONE stored seed array: the comparison is
+    # single-variable by construction rather than by hope. The cache also carries the
+    # Stage-1 depth the veto needs, which is what lets the detection pass be SKIPPED
+    # rather than recomputed and thrown away -- leaving it in would keep burning ~30
+    # min a run AND keep the drift it exists to remove.
+    _cache_seeds = _cache_depth = None
+    if args.seed_cache and os.path.exists(args.seed_cache):
+        _z = np.load(args.seed_cache)
+        _cache_seeds = np.unpackbits(_z["seeds"], axis=-1,
+                                     count=int(_z["w"])).astype(bool)
+        _cache_depth = _z["depth"].astype(np.float32) if "depth" in _z.files else None
+        if len(_cache_seeds) != len(frame_paths):
+            raise RuntimeError(
+                f"seed cache {args.seed_cache} holds {len(_cache_seeds)} frames but "
+                f"this sequence has {len(frame_paths)}; caches are per sequence AND "
+                f"per --det_resolution, so do not share one across either")
+        passes = []                      # both detection loops now iterate zero times
+        print(f"[seed-cache] LOADED {args.seed_cache}: {_cache_seeds.shape} seeds, "
+              f"depth={'yes' if _cache_depth is not None else 'no'} -- skipping "
+              f"detection entirely; every arm sharing this file sees identical seeds",
+              flush=True)
+
     span_hint = f", span up to ~{args.chunk_size * stride} frames/pass" if stride > 1 else ""
     auto_hint = " (auto full-span)" if args.frame_stride == 0 else ""
     print(f"Sequence: {args.dataset_name}  |  {len(frame_paths)} frames  |  "
@@ -558,7 +600,7 @@ def main():
     # stays chunked, because that is the part that does not fit; nothing about
     # KMeans or Otsu needs the frames to be resident on the GPU together.
     coarse_by_pass = None
-    if args.global_post:
+    if args.global_post and _cache_seeds is None:
         print(f"[GlobalPost] pass A: collecting attention maps over {len(passes)} chunk(s)")
         _feats, _dyns, _rows = [], [], []      # _rows: (pass_index, n_frames, emitted mask)
         for ci, (idxs, emit_idxs) in enumerate(passes):
@@ -636,6 +678,12 @@ def main():
     deferred_seeds = {}          # frame idx -> seed mask, for --sam_video_global
     deferred_depth = {}          # frame idx -> Stage-1 depth, for --sam_depth_veto
     deferred_res = {}            # frame idx -> flow residual, for --global_flow_thresh
+    if _cache_seeds is not None:
+        for _i in range(len(_cache_seeds)):
+            deferred_seeds[_i] = _cache_seeds[_i]
+            if _cache_depth is not None:
+                deferred_depth[_i] = _cache_depth[_i]
+        del _cache_seeds, _cache_depth
     for ci, (idxs, emit_idxs) in enumerate(passes):
         chunk_paths = [frame_paths[i] for i in idxs]
         # Load NATIVELY at the detection long-edge (aspect-preserved crop, /14). Default
@@ -967,6 +1015,25 @@ def main():
         _prop = bool(args.sam_video and args.sam_video_global)
         print(f"[deferred] {len(order)} frames collected over the whole sequence; "
               f"propagation={'on' if _prop else 'off'}", flush=True)
+        # Write the cache the moment the seeds exist, BEFORE propagation, so an arm
+        # that dies in SAM still leaves a reusable detection behind. Seeds are
+        # bit-packed (27 MB for 1067 frames at 392x518, vs 217 MB as bool) and depth
+        # is float16, which is ample for a RELATIVE depth-jump test.
+        if args.seed_cache and not os.path.exists(args.seed_cache):
+            _dsave = None
+            if len(deferred_depth) == len(order):
+                _dsave = np.stack([deferred_depth[i] for i in order]).astype(np.float16)
+            os.makedirs(os.path.dirname(os.path.abspath(args.seed_cache)), exist_ok=True)
+            _kw = {"seeds": np.packbits(seeds, axis=-1),
+                   "w": np.int64(seeds.shape[-1])}
+            if _dsave is not None:
+                _kw["depth"] = _dsave
+            np.savez(args.seed_cache, **_kw)
+            print(f"[seed-cache] WROTE {args.seed_cache} "
+                  f"({os.path.getsize(args.seed_cache) / 1e6:.0f} MB, "
+                  f"depth={'yes' if _dsave is not None else 'no'}). Point every arm of "
+                  f"a mask A/B at this file so they share one detection.", flush=True)
+            del _dsave
         # Reload the frames as uint8 -- needed to PROMPT propagation and to draw
         # overlays, and for nothing else. The whole-sequence uint8 array is ~0.75 GB at
         # 518 px for 900 frames; a float copy of all of them on the GPU is not, which

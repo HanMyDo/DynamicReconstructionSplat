@@ -219,6 +219,7 @@ python precompute_dyn_masks.py \
     --sam_support_window "${SUPW}" \
     --sam_support_frac "${SUPF}" \
     --sam_depth_veto "${VETO}" \
+    --seed_cache "${SEEDC:-}" \
     $( [ "${RESID}" != "0" ] && echo --save_residual ) \
     --mask_propagate "${PROP}" \
     --mask_aggregate "${AGG}" \
